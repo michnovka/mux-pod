@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,6 +8,7 @@ import '../../../services/terminal/ansi_parser.dart';
 import '../../../services/terminal/font_calculator.dart';
 import '../../../services/terminal/terminal_diff.dart';
 import '../../../services/terminal/terminal_font_styles.dart';
+import '../../../services/tmux/pane_navigator.dart';
 import '../../../theme/design_colors.dart';
 
 /// キー入力イベント
@@ -82,6 +84,12 @@ class AnsiTextView extends ConsumerStatefulWidget {
   /// direction: 'Up', 'Down', 'Left', 'Right'
   final void Function(String direction)? onArrowSwipe;
 
+  /// 2本指スワイプでペイン切り替え時のコールバック
+  final void Function(SwipeDirection direction)? onTwoFingerSwipe;
+
+  /// 各方向にペインが存在するかのマップ（視覚フィードバック用）
+  final Map<SwipeDirection, bool>? navigableDirections;
+
   const AnsiTextView({
     super.key,
     required this.text,
@@ -97,6 +105,8 @@ class AnsiTextView extends ConsumerStatefulWidget {
     this.cursorX = 0,
     this.cursorY = 0,
     this.onArrowSwipe,
+    this.onTwoFingerSwipe,
+    this.navigableDirections,
   });
 
   @override
@@ -131,6 +141,20 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
   Offset? _longPressStartPosition;
   String? _lastSwipeDirection;
   static const double _swipeThreshold = 30.0;
+
+  /// 2本指ジェスチャーのモード（指の移動方向で判定し、終了までロック）
+  _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
+  Offset _twoFingerPanStart = Offset.zero;
+  Offset _twoFingerPanDelta = Offset.zero;
+  bool _isTwoFingerPanning = false;
+  SwipeDirection? _twoFingerSwipeResult;
+  static const double _twoFingerSwipeThreshold = 50.0;
+  static const double _panGlowThreshold = 20.0;
+  static const Duration _edgeFlashDuration = Duration(milliseconds: 400);
+
+  /// 個別ポインタ追跡（指の移動方向ベクトルでズーム/パンを判定）
+  final Map<int, Offset> _pointerStartPositions = {};
+  final Map<int, Offset> _pointerCurrentPositions = {};
 
   /// 現在のズームスケール
   double _currentScale = 1.0;
@@ -252,16 +276,99 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     widget.onZoomChanged?.call(1.0);
   }
 
-  // === ピンチズーム処理 ===
+  // === ポインタ追跡（指の移動方向ベクトルでズーム/パンを判定） ===
+
+  void _onPointerDown(PointerDownEvent event) {
+    _pointerStartPositions[event.pointer] = event.position;
+    _pointerCurrentPositions[event.pointer] = event.position;
+  }
+
+  void _onPointerMove(PointerMoveEvent event) {
+    _pointerCurrentPositions[event.pointer] = event.position;
+  }
+
+  void _onPointerUpOrCancel(PointerEvent event) {
+    _pointerStartPositions.remove(event.pointer);
+    _pointerCurrentPositions.remove(event.pointer);
+  }
+
+  /// 2本の指の移動方向ベクトルの内積からモードを判定
+  ///
+  /// - 内積 > 0: 同方向（パン） → ペイン切り替え
+  /// - 内積 < 0: 逆方向（ピンチ） → ズーム
+  /// - 移動量不足: 判定不能
+  _TwoFingerMode _detectModeFromFingerDirections() {
+    if (_pointerCurrentPositions.length < 2) {
+      return _TwoFingerMode.undetermined;
+    }
+
+    final pointers = _pointerStartPositions.keys
+        .where((p) => _pointerCurrentPositions.containsKey(p))
+        .take(2)
+        .toList();
+    if (pointers.length < 2) return _TwoFingerMode.undetermined;
+
+    final v1 =
+        _pointerCurrentPositions[pointers[0]]! -
+        _pointerStartPositions[pointers[0]]!;
+    final v2 =
+        _pointerCurrentPositions[pointers[1]]! -
+        _pointerStartPositions[pointers[1]]!;
+
+    // 最低移動量に達していなければ判定不能
+    if (v1.distance < 15 || v2.distance < 15) {
+      return _TwoFingerMode.undetermined;
+    }
+
+    final dot = v1.dx * v2.dx + v1.dy * v2.dy;
+    return dot > 0 ? _TwoFingerMode.pan : _TwoFingerMode.zoom;
+  }
+
+  // === ピンチズーム + 2本指スワイプ処理 ===
 
   void _onScaleStart(ScaleStartDetails details) {
     _baseScale = _currentScale;
+    _twoFingerPanStart = details.focalPoint;
+    _twoFingerPanDelta = Offset.zero;
+    _isTwoFingerPanning = false;
+    _twoFingerMode = _TwoFingerMode.undetermined;
   }
 
   void _onScaleUpdate(ScaleUpdateDetails details) {
-    // 1本指のドラッグ（scale == 1.0）はスクロールに任せる
-    if (details.scale == 1.0) return;
+    // 1本指ドラッグはスクロールに任せる
+    if (details.pointerCount <= 1) return;
 
+    // モード確定済み → そのまま処理
+    if (_twoFingerMode == _TwoFingerMode.zoom) {
+      _isTwoFingerPanning = false;
+      _applyZoom(details);
+      return;
+    }
+    if (_twoFingerMode == _TwoFingerMode.pan) {
+      _isTwoFingerPanning = true;
+      _twoFingerPanDelta = details.focalPoint - _twoFingerPanStart;
+      setState(() {});
+      return;
+    }
+
+    // モード未確定 → 指の移動方向ベクトルで判定
+    _twoFingerMode = _detectModeFromFingerDirections();
+
+    switch (_twoFingerMode) {
+      case _TwoFingerMode.zoom:
+        _isTwoFingerPanning = false;
+        _applyZoom(details);
+      case _TwoFingerMode.pan:
+        _isTwoFingerPanning = true;
+        _twoFingerPanDelta = details.focalPoint - _twoFingerPanStart;
+        setState(() {});
+      case _TwoFingerMode.undetermined:
+        // まだ判定できない → 暫定的にパンデルタだけ追跡
+        _twoFingerPanDelta = details.focalPoint - _twoFingerPanStart;
+    }
+  }
+
+  void _applyZoom(ScaleUpdateDetails details) {
     final newScale = (_baseScale * details.scale).clamp(0.5, 5.0);
     if (newScale != _currentScale) {
       setState(() {
@@ -272,7 +379,41 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
   }
 
   void _onScaleEnd(ScaleEndDetails details) {
-    // ズーム終了時の処理（必要に応じて）
+    final wasPanning = _isTwoFingerPanning;
+    _isTwoFingerPanning = false;
+    _twoFingerMode = _TwoFingerMode.undetermined;
+    if (!wasPanning) return;
+
+    final direction = PaneNavigator.detectSwipeDirection(
+      _twoFingerPanDelta,
+      threshold: _twoFingerSwipeThreshold,
+    );
+
+    if (direction != null) {
+      final canNavigate = widget.navigableDirections?[direction] ?? true;
+      if (canNavigate) {
+        widget.onTwoFingerSwipe?.call(direction);
+        HapticFeedback.mediumImpact();
+      } else {
+        _showEdgeFlash(direction);
+      }
+    }
+    _twoFingerPanDelta = Offset.zero;
+    setState(() {});
+  }
+
+  void _showEdgeFlash(SwipeDirection direction) {
+    HapticFeedback.heavyImpact();
+    setState(() {
+      _twoFingerSwipeResult = direction;
+    });
+    Future.delayed(_edgeFlashDuration, () {
+      if (mounted) {
+        setState(() {
+          _twoFingerSwipeResult = null;
+        });
+      }
+    });
   }
 
   // === ホールド+スワイプ処理 ===
@@ -415,6 +556,135 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 2本指スワイプ時の視覚フィードバックオーバーレイ
+  Widget _buildTwoFingerSwipeOverlay() {
+    // 端到達時のフラッシュ表示
+    if (_twoFingerSwipeResult != null) {
+      return _buildEdgeFlash(_twoFingerSwipeResult!);
+    }
+
+    // パン中のエッジグロー表示
+    if (_isTwoFingerPanning) {
+      return _buildPanGlow();
+    }
+
+    return const SizedBox.shrink();
+  }
+
+  /// 端到達時の赤系フラッシュ
+  Widget _buildEdgeFlash(SwipeDirection direction) {
+    final alignment = switch (direction) {
+      SwipeDirection.left => Alignment.centerLeft,
+      SwipeDirection.right => Alignment.centerRight,
+      SwipeDirection.up => Alignment.topCenter,
+      SwipeDirection.down => Alignment.bottomCenter,
+    };
+
+    final isHorizontal =
+        direction == SwipeDirection.left || direction == SwipeDirection.right;
+
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Align(
+          alignment: alignment,
+          child: Container(
+            width: isHorizontal ? 40 : double.infinity,
+            height: isHorizontal ? double.infinity : 40,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: isHorizontal
+                    ? (direction == SwipeDirection.left
+                        ? Alignment.centerRight
+                        : Alignment.centerLeft)
+                    : (direction == SwipeDirection.up
+                        ? Alignment.bottomCenter
+                        : Alignment.topCenter),
+                end: isHorizontal
+                    ? (direction == SwipeDirection.left
+                        ? Alignment.centerLeft
+                        : Alignment.centerRight)
+                    : (direction == SwipeDirection.up
+                        ? Alignment.topCenter
+                        : Alignment.bottomCenter),
+                colors: [
+                  Colors.transparent,
+                  Colors.red.withValues(alpha: 0.4),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// パン中の方向グロー
+  Widget _buildPanGlow() {
+    final dx = _twoFingerPanDelta.dx;
+    final dy = _twoFingerPanDelta.dy;
+
+    // 移動量が小さすぎる場合は表示しない
+    if (dx.abs() < _panGlowThreshold && dy.abs() < _panGlowThreshold) {
+      return const SizedBox.shrink();
+    }
+
+    SwipeDirection? direction;
+    if (dx.abs() > dy.abs()) {
+      direction = dx > 0 ? SwipeDirection.right : SwipeDirection.left;
+    } else {
+      direction = dy > 0 ? SwipeDirection.down : SwipeDirection.up;
+    }
+
+    final canNavigate = widget.navigableDirections?[direction] ?? true;
+    final color = canNavigate
+        ? DesignColors.primary.withValues(alpha: 0.2)
+        : Colors.red.withValues(alpha: 0.15);
+
+    final alignment = switch (direction) {
+      SwipeDirection.left => Alignment.centerLeft,
+      SwipeDirection.right => Alignment.centerRight,
+      SwipeDirection.up => Alignment.topCenter,
+      SwipeDirection.down => Alignment.bottomCenter,
+    };
+
+    final isHorizontal =
+        direction == SwipeDirection.left || direction == SwipeDirection.right;
+
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Align(
+          alignment: alignment,
+          child: Container(
+            width: isHorizontal ? 30 : double.infinity,
+            height: isHorizontal ? double.infinity : 30,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: isHorizontal
+                    ? (direction == SwipeDirection.left
+                        ? Alignment.centerRight
+                        : Alignment.centerLeft)
+                    : (direction == SwipeDirection.up
+                        ? Alignment.bottomCenter
+                        : Alignment.topCenter),
+                end: isHorizontal
+                    ? (direction == SwipeDirection.left
+                        ? Alignment.centerLeft
+                        : Alignment.centerRight)
+                    : (direction == SwipeDirection.up
+                        ? Alignment.topCenter
+                        : Alignment.bottomCenter),
+                colors: [
+                  Colors.transparent,
+                  color,
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -629,17 +899,38 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
           );
         }
 
-        // ピンチズームが有効な場合、GestureDetector + Transform.scaleでズーム
+        // ピンチズーム + 2本指スワイプ
         if (widget.zoomEnabled) {
-          listWidget = GestureDetector(
-            onScaleStart: _onScaleStart,
-            onScaleUpdate: _onScaleUpdate,
-            onScaleEnd: _onScaleEnd,
+          // RawGestureDetectorで2本指検出時にgesture arenaを強制勝利
+          listWidget = RawGestureDetector(
+            gestures: <Type, GestureRecognizerFactory>{
+              _EagerScaleGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<
+                    _EagerScaleGestureRecognizer
+                  >(
+                    () => _EagerScaleGestureRecognizer(),
+                    (_EagerScaleGestureRecognizer instance) {
+                      instance
+                        ..onStart = _onScaleStart
+                        ..onUpdate = _onScaleUpdate
+                        ..onEnd = _onScaleEnd;
+                    },
+                  ),
+            },
             child: Transform.scale(
               scale: _currentScale,
               alignment: Alignment.topLeft,
               child: listWidget,
             ),
+          );
+          // Listenerで個別ポインタを追跡（gesture arenaに参加しない）
+          // 指の移動方向ベクトルの内積でズーム/パンを判定するために使用
+          listWidget = Listener(
+            onPointerDown: _onPointerDown,
+            onPointerMove: _onPointerMove,
+            onPointerUp: _onPointerUpOrCancel,
+            onPointerCancel: _onPointerUpOrCancel,
+            child: listWidget,
           );
         }
 
@@ -670,8 +961,11 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                   color: widget.backgroundColor,
                   child: listWidget,
                 ),
-                // スワイプオーバーレイ
+                // ホールド+スワイプオーバーレイ
                 if (_isLongPressing) _buildSwipeOverlay(),
+                // 2本指スワイプオーバーレイ
+                if (_isTwoFingerPanning || _twoFingerSwipeResult != null)
+                  _buildTwoFingerSwipeOverlay(),
               ],
             ),
           ),
@@ -1034,5 +1328,48 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
         curve: Curves.easeOut,
       );
     });
+  }
+}
+
+/// 2本指ジェスチャーのモード（ジェスチャー開始時に判定し、終了までロック）
+enum _TwoFingerMode { undetermined, pan, zoom }
+
+/// 2本指以上を検出した場合、gesture arenaを強制的に勝ち取るScaleGestureRecognizer。
+///
+/// 通常のScaleGestureRecognizerは内部のSingleChildScrollViewの
+/// HorizontalDragGestureRecognizerにarenaで負けてしまう。
+/// このクラスは2本指検出時にrejectGesture()をacceptGesture()にオーバーライドし、
+/// arenaを強制勝利する。1本指の場合はsuper.rejectGesture()で通常通り
+/// ScrollViewに譲るため、1本指スクロールは影響を受けない。
+class _EagerScaleGestureRecognizer extends ScaleGestureRecognizer {
+  int _pointerCount = 0;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    super.addAllowedPointer(event);
+    _pointerCount++;
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    super.handleEvent(event);
+    if (event is PointerUpEvent || event is PointerCancelEvent) {
+      _pointerCount = (_pointerCount - 1).clamp(0, 99);
+    }
+  }
+
+  @override
+  void rejectGesture(int pointer) {
+    if (_pointerCount >= 2) {
+      acceptGesture(pointer);
+    } else {
+      super.rejectGesture(pointer);
+    }
+  }
+
+  @override
+  void dispose() {
+    _pointerCount = 0;
+    super.dispose();
   }
 }
