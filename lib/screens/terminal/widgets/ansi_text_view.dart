@@ -33,8 +33,8 @@ enum TerminalMode {
   /// 通常モード（キー入力が有効）
   normal,
 
-  /// コピペモード（テキスト選択が有効、キー入力は無効）
-  copyPaste,
+  /// スクロールモード（テキスト選択も可能、キー入力は無効）
+  scroll,
 }
 
 /// ANSIテキスト表示ウィジェット
@@ -427,7 +427,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
-    final isCopyPasteMode = widget.mode == TerminalMode.copyPaste;
+    final isScrollMode = widget.mode == TerminalMode.scroll;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -643,8 +643,8 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
           );
         }
 
-        // コピペモードの場合はテキスト選択を有効化
-        if (isCopyPasteMode) {
+        // スクロールモードの場合はテキスト選択を有効化
+        if (isScrollMode) {
           return Container(
             color: widget.backgroundColor,
             child: SelectionArea(

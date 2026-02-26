@@ -234,6 +234,21 @@ class TmuxCommands {
     return 'tmux display-message -p -t ${_escapeArg(target)} "#{cursor_x},#{cursor_y},#{pane_width},#{pane_height}"';
   }
 
+  /// ペインのモードを取得（copy-mode検出用）
+  static String getPaneMode(String target) {
+    return 'tmux display-message -p -t ${_escapeArg(target)} "#{pane_mode}"';
+  }
+
+  /// copy-modeに入る
+  static String enterCopyMode(String target) {
+    return 'tmux copy-mode -t ${_escapeArg(target)}';
+  }
+
+  /// copy-modeを終了（copy-mode中のみ有効、非copy-mode時は無害）
+  static String cancelCopyMode(String target) {
+    return 'tmux send-keys -t ${_escapeArg(target)} -X cancel';
+  }
+
   // ===== ペインコンテンツ =====
 
   /// ペインの内容をキャプチャ（ANSIエスケープ付き）
