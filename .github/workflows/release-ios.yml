@@ -1,0 +1,94 @@
+name: Build and Release iOS IPA
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+concurrency:
+  group: ios-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 15.4
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Cache pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            .dart_tool
+          key: ${{ runner.os }}-pub-${{ hashFiles('pubspec.lock') }}
+          restore-keys: ${{ runner.os }}-pub-
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: ios/Pods
+          key: pods-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: pods-
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Install CocoaPods dependencies
+        run: |
+          cd ios
+          for i in 1 2 3; do
+            if pod install --repo-update; then
+              echo "CocoaPods install succeeded on attempt $i"
+              break
+            fi
+            if [ $i -eq 3 ]; then
+              echo "CocoaPods install failed after 3 attempts"
+              exit 1
+            fi
+            rm -rf Pods
+            SLEEP_TIME=$((10 * i))
+            echo "Attempt $i failed, retrying in ${SLEEP_TIME}s..."
+            sleep $SLEEP_TIME
+          done
+
+      - name: Build iOS (unsigned)
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION_NUM="${VERSION#v}"
+          MAJOR=$(echo "$VERSION_NUM" | cut -d. -f1)
+          MINOR=$(echo "$VERSION_NUM" | cut -d. -f2)
+          PATCH=$(echo "$VERSION_NUM" | cut -d. -f3)
+          BUILD_NUMBER=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          GIT_REF="${{ github.ref_name }}@$(echo '${{ github.sha }}' | cut -c1-7)"
+
+          flutter build ios --release --no-codesign \
+            --build-name=$VERSION_NUM \
+            --build-number=$BUILD_NUMBER \
+            --dart-define=APP_VERSION=$VERSION \
+            --dart-define=GIT_REF=$GIT_REF
+
+      - name: Create unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/
+          zip -r "mux-pod-${{ github.ref_name }}-unsigned.ipa" Payload
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mux-pod-${{ github.ref_name }}-unsigned.ipa
+          fail_on_unmatched_files: false
+          generate_release_notes: false
