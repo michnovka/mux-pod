@@ -239,6 +239,15 @@ class TmuxCommands {
     return 'tmux display-message -p -t ${_escapeArg(target)} "#{pane_mode}"';
   }
 
+  /// Get bootstrap metadata for snapshotting a pane.
+  ///
+  /// Output format:
+  /// `alternate_on,cursor_x,cursor_y,pane_width,pane_height`
+  static String getPaneSnapshotMetadata(String target) {
+    return 'tmux display-message -p -t ${_escapeArg(target)} '
+        '"#{alternate_on},#{cursor_x},#{cursor_y},#{pane_width},#{pane_height}"';
+  }
+
   /// Enter copy-mode
   static String enterCopyMode(String target) {
     return 'tmux copy-mode -t ${_escapeArg(target)}';
@@ -257,9 +266,13 @@ class TmuxCommands {
     int? startLine,
     int? endLine,
     bool escapeSequences = true,
+    bool alternateScreen = false,
+    bool quiet = false,
   }) {
     final parts = ['tmux', 'capture-pane', '-t', _escapeArg(paneId), '-p'];
+    if (alternateScreen) parts.add('-a');
     if (escapeSequences) parts.add('-e');
+    if (quiet) parts.add('-q');
     if (startLine != null) parts.addAll(['-S', startLine.toString()]);
     if (endLine != null) parts.addAll(['-E', endLine.toString()]);
     return parts.join(' ');
