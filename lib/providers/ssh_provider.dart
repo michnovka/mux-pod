@@ -110,9 +110,16 @@ class SshNotifier extends Notifier<SshState> {
     // クリーンアップを登録
     ref.onDispose(() {
       _reconnectTimer?.cancel();
+      _reconnectTimer = null;
+      // Stream subscriptions and client dispose are async but
+      // ref.onDispose is synchronous. Cancel what we can synchronously
+      // and fire the async cleanup without awaiting.
       _connectionStateSubscription?.cancel();
+      _connectionStateSubscription = null;
       _networkStatusSubscription?.cancel();
+      _networkStatusSubscription = null;
       _client?.dispose();
+      _client = null;
       _foregroundService.stopService();
     });
     return const SshState();
