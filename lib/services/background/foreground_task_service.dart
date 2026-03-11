@@ -154,7 +154,7 @@ class _SshTaskHandler extends TaskHandler {
   }
 
   @override
-  Future<void> onDestroy(DateTime timestamp) async {
+  Future<void> onDestroy(DateTime timestamp, bool isAppTerminated) async {
     // サービス終了時の処理（必要に応じてクリーンアップ）
   }
 
