@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
@@ -61,8 +62,12 @@ class SshKeyService {
     assert(bits == 2048 || bits == 3072 || bits == 4096);
 
     final secureRandom = pc.FortunaRandom();
-    final seedSource = List<int>.generate(32, (i) => DateTime.now().millisecondsSinceEpoch % 256);
-    secureRandom.seed(pc.KeyParameter(Uint8List.fromList(seedSource)));
+    final rng = Random.secure();
+    final seed = Uint8List(32);
+    for (var i = 0; i < 32; i++) {
+      seed[i] = rng.nextInt(256);
+    }
+    secureRandom.seed(pc.KeyParameter(seed));
 
     final keyGen = pc.RSAKeyGenerator()
       ..init(pc.ParametersWithRandom(
