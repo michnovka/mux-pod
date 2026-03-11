@@ -165,25 +165,31 @@ class TmuxNotifier extends Notifier<TmuxState> {
 
   /// カーソル位置を更新
   void updateCursorPosition(String paneId, int x, int y) {
-    // 変更がない場合はディープコピーを回避してスキップ
+    // 変更がない場合はスキップ
     final currentPane = state.activePane;
     if (currentPane == null || currentPane.id != paneId) return;
     if (currentPane.cursorX == x && currentPane.cursorY == y) return;
 
-    final sessions = state.sessions.map((session) {
-      final windows = session.windows.map((window) {
-        final panes = window.panes.map((pane) {
-          if (pane.id == paneId) {
-            return pane.copyWith(cursorX: x, cursorY: y);
+    // ペインを含むセッション/ウィンドウを特定し、その祖先チェーンのみコピー
+    final sessions = state.sessions;
+    for (var si = 0; si < sessions.length; si++) {
+      final session = sessions[si];
+      for (var wi = 0; wi < session.windows.length; wi++) {
+        final window = session.windows[wi];
+        for (var pi = 0; pi < window.panes.length; pi++) {
+          if (window.panes[pi].id == paneId) {
+            final newPanes = List.of(window.panes);
+            newPanes[pi] = window.panes[pi].copyWith(cursorX: x, cursorY: y);
+            final newWindows = List.of(session.windows);
+            newWindows[wi] = window.copyWith(panes: newPanes);
+            final newSessions = List.of(sessions);
+            newSessions[si] = session.copyWith(windows: newWindows);
+            state = state.copyWith(sessions: newSessions);
+            return;
           }
-          return pane;
-        }).toList();
-        return window.copyWith(panes: panes);
-      }).toList();
-      return session.copyWith(windows: windows);
-    }).toList();
-
-    state = state.copyWith(sessions: sessions);
+        }
+      }
+    }
   }
 
   /// アクティブなセッション/ウィンドウ/ペインを一括設定

@@ -30,22 +30,39 @@ final currentTabProvider = NotifierProvider<CurrentTabNotifier, int>(
 
 /// ホーム画面（Bottom Navigation付き）
 /// タブ順序: Servers | Keys | [Dashboard] | Notify | Settings
-class HomeScreen extends ConsumerWidget {
+class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> {
+  /// 一度でも表示されたタブを追跡（遅延ロード用）
+  final _initializedTabs = <int>{2}; // Dashboardはデフォルトなので初期化済み
+
+  static const _tabs = <Widget>[
+    ConnectionsScreen(),        // 0: Servers
+    KeysScreen(),               // 1: Keys
+    DashboardScreen(),          // 2: Dashboard（中央）
+    NotificationPanesScreen(),  // 3: Alerts
+    SettingsScreen(),           // 4: Settings
+  ];
+
+  @override
+  Widget build(BuildContext context) {
     final currentTab = ref.watch(currentTabProvider);
+    _initializedTabs.add(currentTab);
 
     return Scaffold(
       body: IndexedStack(
         index: currentTab,
-        children: const [
-          ConnectionsScreen(),        // 0: Servers
-          KeysScreen(),               // 1: Keys
-          DashboardScreen(),          // 2: Dashboard（中央）
-          NotificationPanesScreen(),  // 3: Alerts
-          SettingsScreen(),           // 4: Settings
+        children: [
+          for (var i = 0; i < _tabs.length; i++)
+            if (_initializedTabs.contains(i))
+              _tabs[i]
+            else
+              const SizedBox.shrink(),
         ],
       ),
       bottomNavigationBar: _buildBottomNavigationBar(context, ref, currentTab),
