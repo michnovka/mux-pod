@@ -6,51 +6,51 @@ import '../keychain/secure_storage.dart';
 // Re-export BiometricType from local_auth for convenience
 export 'package:local_auth/local_auth.dart' show BiometricType;
 
-/// SSH認証方式
+/// SSH authentication method
 enum SshAuthMethod {
-  /// パスワード認証
+  /// Password authentication
   password,
 
-  /// 公開鍵認証
+  /// Public key authentication
   publicKey,
 }
 
-/// 生体認証の結果
+/// Biometric authentication result
 enum BiometricAuthResult {
-  /// 成功
+  /// Success
   success,
 
-  /// キャンセル
+  /// Cancelled
   cancelled,
 
-  /// 利用不可
+  /// Not available
   notAvailable,
 
-  /// 未設定
+  /// Not enrolled
   notEnrolled,
 
-  /// ロックアウト（試行回数超過）
+  /// Locked out (too many attempts)
   lockedOut,
 
-  /// 永続的ロックアウト
+  /// Permanently locked out
   permanentlyLockedOut,
 
-  /// エラー
+  /// Error
   error,
 }
 
-/// SSH認証資格情報
+/// SSH authentication credential
 class SshCredential {
-  /// 認証方式
+  /// Authentication method
   final SshAuthMethod method;
 
-  /// パスワード（パスワード認証時）
+  /// Password (for password authentication)
   final String? password;
 
-  /// 秘密鍵（公開鍵認証時）
+  /// Private key (for public key authentication)
   final String? privateKey;
 
-  /// パスフレーズ（秘密鍵が暗号化されている場合）
+  /// Passphrase (when the private key is encrypted)
   final String? passphrase;
 
   const SshCredential({
@@ -60,20 +60,20 @@ class SshCredential {
     this.passphrase,
   });
 
-  /// パスワード認証用
+  /// For password authentication
   const SshCredential.password(this.password)
       : method = SshAuthMethod.password,
         privateKey = null,
         passphrase = null;
 
-  /// 公開鍵認証用
+  /// For public key authentication
   const SshCredential.publicKey({
     required this.privateKey,
     this.passphrase,
   })  : method = SshAuthMethod.publicKey,
         password = null;
 
-  /// 有効な資格情報かどうか
+  /// Whether this is a valid credential
   bool get isValid {
     switch (method) {
       case SshAuthMethod.password:
@@ -84,14 +84,14 @@ class SshCredential {
   }
 }
 
-/// SSH認証サービス
+/// SSH authentication service
 ///
-/// 認証資格情報の管理と生体認証を提供する。
+/// Provides authentication credential management and biometric authentication.
 class SshAuthService {
   final SecureStorageService _storage;
   final LocalAuthentication _localAuth;
 
-  /// 生体認証が必要かどうか（アプリ設定に依存）
+  /// Whether biometric authentication is required (depends on app settings)
   bool requireBiometricAuth = false;
 
   SshAuthService({
@@ -100,22 +100,22 @@ class SshAuthService {
   })  : _storage = storage ?? SecureStorageService(),
         _localAuth = localAuth ?? LocalAuthentication();
 
-  // ===== 資格情報の取得 =====
+  // ===== Credential retrieval =====
 
-  /// 接続の認証資格情報を取得
+  /// Get authentication credential for a connection
   ///
-  /// [connectionId] 接続ID
-  /// [authMethod] 認証方式
-  /// [keyId] 使用するSSH鍵のID（公開鍵認証時）
+  /// [connectionId] Connection ID
+  /// [authMethod] Authentication method
+  /// [keyId] ID of the SSH key to use (for public key authentication)
   Future<SshCredential?> getCredential({
     required String connectionId,
     required SshAuthMethod authMethod,
     String? keyId,
   }) async {
-    // 生体認証が必要な場合
+    // If biometric authentication is required
     if (requireBiometricAuth) {
       final bioResult = await authenticateWithBiometrics(
-        reason: '認証情報にアクセスするために生体認証が必要です',
+        reason: 'Biometric authentication required to access credentials',
       );
       if (bioResult != BiometricAuthResult.success) {
         return null;
@@ -140,70 +140,70 @@ class SshAuthService {
     }
   }
 
-  // ===== パスワード管理 =====
+  // ===== Password management =====
 
-  /// パスワード認証の資格情報を取得
+  /// Get password authentication credential
   Future<String?> getPassword(String connectionId) async {
     return _storage.getPassword(connectionId);
   }
 
-  /// パスワードを保存
+  /// Save password
   Future<void> savePassword(String connectionId, String password) async {
     await _storage.savePassword(connectionId, password);
   }
 
-  /// パスワードを削除
+  /// Delete password
   Future<void> deletePassword(String connectionId) async {
     await _storage.deletePassword(connectionId);
   }
 
-  /// パスワードが保存されているか確認
+  /// Check if a password is saved
   Future<bool> hasPassword(String connectionId) async {
     final password = await getPassword(connectionId);
     return password != null && password.isNotEmpty;
   }
 
-  // ===== SSH鍵管理 =====
+  // ===== SSH key management =====
 
-  /// 秘密鍵を取得
+  /// Get private key
   Future<String?> getPrivateKey(String keyId) async {
     return _storage.getPrivateKey(keyId);
   }
 
-  /// 秘密鍵を保存
+  /// Save private key
   Future<void> savePrivateKey(String keyId, String privateKey) async {
     await _storage.savePrivateKey(keyId, privateKey);
   }
 
-  /// 秘密鍵を削除
+  /// Delete private key
   Future<void> deletePrivateKey(String keyId) async {
     await _storage.deletePrivateKey(keyId);
   }
 
-  /// パスフレーズを取得
+  /// Get passphrase
   Future<String?> getPassphrase(String keyId) async {
     return _storage.getPassphrase(keyId);
   }
 
-  /// パスフレーズを保存
+  /// Save passphrase
   Future<void> savePassphrase(String keyId, String passphrase) async {
     await _storage.savePassphrase(keyId, passphrase);
   }
 
-  /// パスフレーズを削除
+  /// Delete passphrase
   Future<void> deletePassphrase(String keyId) async {
     await _storage.deletePassphrase(keyId);
   }
 
-  /// 秘密鍵が保存されているか確認
+  /// Check if a private key is saved
   Future<bool> hasPrivateKey(String keyId) async {
     final key = await getPrivateKey(keyId);
     return key != null && key.isNotEmpty;
   }
 
-  // ===== 生体認証 =====
+  // ===== Biometric authentication =====
 
-  /// 生体認証が利用可能か確認
+  /// Check if biometric authentication is available
   Future<bool> canCheckBiometrics() async {
     try {
       return await _localAuth.canCheckBiometrics;
@@ -212,7 +212,7 @@ class SshAuthService {
     }
   }
 
-  /// デバイスが生体認証をサポートしているか確認
+  /// Check if the device supports biometric authentication
   Future<bool> isDeviceSupported() async {
     try {
       return await _localAuth.isDeviceSupported();
@@ -221,7 +221,7 @@ class SshAuthService {
     }
   }
 
-  /// 利用可能な生体認証の種類を取得
+  /// Get available biometric authentication types
   Future<List<BiometricType>> getAvailableBiometrics() async {
     try {
       return await _localAuth.getAvailableBiometrics();
@@ -230,14 +230,14 @@ class SshAuthService {
     }
   }
 
-  /// 生体認証を実行
+  /// Perform biometric authentication
   ///
-  /// [reason] 認証理由（ユーザーに表示）
+  /// [reason] Authentication reason (displayed to user)
   Future<BiometricAuthResult> authenticateWithBiometrics({
-    String reason = '認証してください',
+    String reason = 'Please authenticate',
   }) async {
     try {
-      // 生体認証が利用可能か確認
+      // Check if biometric authentication is available
       final canCheck = await canCheckBiometrics();
       final isSupported = await isDeviceSupported();
 
@@ -255,11 +255,11 @@ class SshAuthService {
     }
   }
 
-  /// 認証（生体認証またはデバイスPIN/パターン）
+  /// Authenticate (biometric or device PIN/pattern)
   ///
-  /// 生体認証が利用できない場合、デバイスの認証（PIN/パターン等）にフォールバック
+  /// Falls back to device authentication (PIN/pattern, etc.) if biometric is unavailable
   Future<BiometricAuthResult> authenticate({
-    String reason = '認証してください',
+    String reason = 'Please authenticate',
   }) async {
     try {
       final isSupported = await isDeviceSupported();
@@ -277,9 +277,9 @@ class SshAuthService {
     }
   }
 
-  /// 認証エラーをハンドル
+  /// Handle authentication error
   BiometricAuthResult _handleAuthError(PlatformException e) {
-    // local_auth のエラーコードに基づいて結果を返す
+    // Return result based on local_auth error codes
     final code = e.code;
     if (code == 'NotEnrolled' || code == 'notEnrolled') {
       return BiometricAuthResult.notEnrolled;
@@ -293,19 +293,19 @@ class SshAuthService {
     return BiometricAuthResult.error;
   }
 
-  /// 認証をキャンセル
+  /// Cancel authentication
   Future<bool> stopAuthentication() async {
     return _localAuth.stopAuthentication();
   }
 
-  // ===== 接続資格情報の一括操作 =====
+  // ===== Bulk credential operations =====
 
-  /// 接続のすべての資格情報を削除
+  /// Delete all credentials for a connection
   Future<void> deleteConnectionCredentials(String connectionId) async {
     await deletePassword(connectionId);
   }
 
-  /// SSH鍵のすべての資格情報を削除
+  /// Delete all credentials for an SSH key
   Future<void> deleteKeyCredentials(String keyId) async {
     await Future.wait([
       deletePrivateKey(keyId),
@@ -313,13 +313,13 @@ class SshAuthService {
     ]);
   }
 
-  /// すべての資格情報を削除
+  /// Delete all credentials
   Future<void> deleteAllCredentials() async {
     await _storage.deleteAll();
   }
 }
 
-/// ファクトリ関数
+/// Factory function
 SshAuthService createSshAuthService({
   SecureStorageService? storage,
 }) {

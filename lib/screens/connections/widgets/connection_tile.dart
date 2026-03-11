@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// 接続一覧のタイルWidget
+/// Tile widget for the connections list
 class ConnectionTile extends StatelessWidget {
   final String name;
   final String host;

@@ -8,7 +8,7 @@ import '../../services/tmux/tmux_parser.dart';
 import '../../theme/design_colors.dart';
 import '../terminal/terminal_screen.dart';
 
-/// 通知ペイン一覧画面（tmuxのactivity/bell/silenceフラグベース）
+/// Notification panes list screen (based on tmux activity/bell/silence flags)
 class NotificationPanesScreen extends ConsumerStatefulWidget {
   const NotificationPanesScreen({super.key});
 
@@ -42,7 +42,7 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
   Future<void> _openAlertPane(AlertPane alert) async {
     final notifier = ref.read(alertPanesProvider.notifier);
 
-    // ローカルリストから同一ウィンドウのアラートを除去
+    // Remove alerts for the same window from the local list
     final windowKey = alert.windowKey;
     final currentPanes = ref.read(alertPanesProvider).alertPanes;
     for (final a in currentPanes) {
@@ -51,7 +51,7 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
       }
     }
 
-    // tmux側のウィンドウフラグをクリア（バックグラウンド）
+    // Clear tmux window flags (in background)
     notifier.clearWindowFlag(alert);
 
     ref.read(activeSessionsProvider.notifier).addOrUpdateSession(
@@ -81,7 +81,7 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
   void _dismissAlert(AlertPane alert) {
     final notifier = ref.read(alertPanesProvider.notifier);
     notifier.dismiss(alert.key);
-    // tmux側のフラグもクリア
+    // Also clear the tmux-side flags
     notifier.clearWindowFlag(alert);
   }
 
@@ -214,7 +214,7 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
   }
 }
 
-/// アラートペインカード
+/// Alert pane card
 class _AlertPaneCard extends StatelessWidget {
   final AlertPane alert;
   final VoidCallback onTap;

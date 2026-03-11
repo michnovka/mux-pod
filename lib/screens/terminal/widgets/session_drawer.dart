@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-/// セッション/ウィンドウ/ペインを表示するドロワー
-/// 仮想スクロール対応: ListView.builder + 遅延ウィジェット生成
+/// Drawer that displays sessions/windows/panes
+/// Virtual scroll support: ListView.builder + lazy widget creation
 class SessionDrawer extends StatelessWidget {
   final List<SessionItem> sessions;
   final String? activeSessionName;
@@ -26,7 +26,7 @@ class SessionDrawer extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListView.builder(
       itemCount: sessions.length,
-      // 画面外のウィジェットを破棄してメモリ節約
+      // Dispose off-screen widgets to save memory
       addAutomaticKeepAlives: false,
       addRepaintBoundaries: true,
       itemBuilder: (context, index) {
@@ -43,7 +43,7 @@ class SessionDrawer extends StatelessWidget {
   }
 }
 
-/// セッションタイル（展開状態を管理して遅延生成）
+/// Session tile (manages expansion state with lazy generation)
 class _SessionTile extends StatefulWidget {
   final SessionItem session;
   final bool isActive;
@@ -87,7 +87,7 @@ class _SessionTileState extends State<_SessionTile> {
       onExpansionChanged: (expanded) {
         setState(() => _isExpanded = expanded);
       },
-      // 展開時のみ子ウィジェットを生成（遅延生成でメモリ節約）
+      // Only generate child widgets when expanded (lazy generation to save memory)
       children: _isExpanded
           ? widget.session.windows.map((window) {
               return _WindowTile(
@@ -103,7 +103,7 @@ class _SessionTileState extends State<_SessionTile> {
   }
 }
 
-/// ウィンドウタイル（展開状態を管理して遅延生成）
+/// Window tile (manages expansion state with lazy generation)
 class _WindowTile extends StatefulWidget {
   final WindowItem window;
   final bool isSessionActive;
@@ -151,7 +151,7 @@ class _WindowTileState extends State<_WindowTile> {
       onExpansionChanged: (expanded) {
         setState(() => _isExpanded = expanded);
       },
-      // 展開時のみ子ウィジェットを生成（遅延生成でメモリ節約）
+      // Only generate child widgets when expanded (lazy generation to save memory)
       children: _isExpanded
           ? widget.window.panes.map((pane) {
               final isActive = pane.id == widget.activePaneId;

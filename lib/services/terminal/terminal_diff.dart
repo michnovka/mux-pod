@@ -1,23 +1,23 @@
-/// ターミナル差分計算サービス
+/// Terminal diff calculation service
 ///
-/// 高頻度更新時のパフォーマンス最適化のため、
-/// 行単位で差分を検出し、変更された部分だけを特定する。
+/// For performance optimization during high-frequency updates,
+/// detects diffs line by line and identifies only the changed portions.
 class TerminalDiff {
-  /// 前回のコンテンツ（行単位）
+  /// Previous content (line by line)
   List<String> _previousLines = [];
 
-  /// 前回の行ごとのハッシュ値
+  /// Hash values per line from previous content
   List<int> _previousHashes = [];
 
-  /// 変更がない連続フレーム数
+  /// Number of consecutive frames without changes
   int _unchangedFrames = 0;
 
-  /// 差分計算結果
+  /// Diff calculation result
   DiffResult calculateDiff(String newContent) {
     final newLines = newContent.split('\n');
     final newHashes = newLines.map((line) => line.hashCode).toList();
 
-    // 初回または行数が大きく異なる場合は全更新
+    // Full update on first run or when line count differs significantly
     if (_previousLines.isEmpty ||
         (newLines.length - _previousLines.length).abs() > 10) {
       _previousLines = newLines;
@@ -31,32 +31,32 @@ class TerminalDiff {
       );
     }
 
-    // 行単位で差分を検出
+    // Detect diffs line by line
     final changedIndices = <int>[];
     final maxLen =
         newLines.length > _previousLines.length ? newLines.length : _previousLines.length;
 
     for (int i = 0; i < maxLen; i++) {
       if (i >= _previousLines.length) {
-        // 新しく追加された行
+        // Newly added line
         changedIndices.add(i);
       } else if (i >= newLines.length) {
-        // 削除された行（通常はない）
+        // Deleted line (usually doesn't happen)
         changedIndices.add(i);
       } else if (_previousHashes[i] != newHashes[i]) {
-        // 変更された行
+        // Changed line
         changedIndices.add(i);
       }
     }
 
-    // 変更なしの場合はフレームカウントを増加
+    // Increment frame count if no changes
     if (changedIndices.isEmpty) {
       _unchangedFrames++;
     } else {
       _unchangedFrames = 0;
     }
 
-    // 前回の状態を更新
+    // Update previous state
     _previousLines = newLines;
     _previousHashes = newHashes;
 
@@ -68,29 +68,29 @@ class TerminalDiff {
     );
   }
 
-  /// 差分をリセット
+  /// Reset diff state
   void reset() {
     _previousLines = [];
     _previousHashes = [];
     _unchangedFrames = 0;
   }
 
-  /// 変更がない連続フレーム数を取得
+  /// Get the number of consecutive frames without changes
   int get unchangedFrames => _unchangedFrames;
 }
 
-/// 差分計算結果
+/// Diff calculation result
 class DiffResult {
-  /// 変更があるかどうか
+  /// Whether there are changes
   final bool hasChanges;
 
-  /// 全更新が必要かどうか
+  /// Whether a full update is needed
   final bool isFullUpdate;
 
-  /// 変更された行のインデックス
+  /// Indices of changed lines
   final List<int> changedLineIndices;
 
-  /// 変更がない連続フレーム数
+  /// Number of consecutive frames without changes
   final int unchangedFrames;
 
   const DiffResult({
@@ -100,10 +100,10 @@ class DiffResult {
     required this.unchangedFrames,
   });
 
-  /// 変更された行の割合（0.0〜1.0）
+  /// Ratio of changed lines (0.0 to 1.0)
   double get changeRatio {
     if (changedLineIndices.isEmpty) return 0.0;
-    // 推定の全行数
+    // Estimated total line count
     final totalLines = changedLineIndices.isEmpty
         ? 1
         : changedLineIndices.last + 1;
@@ -111,41 +111,41 @@ class DiffResult {
   }
 }
 
-/// 適応型ポーリング間隔計算
+/// Adaptive polling interval calculation
 ///
-/// コンテンツの変化頻度に応じてポーリング間隔を動的に調整する。
+/// Dynamically adjusts the polling interval according to content change frequency.
 class AdaptivePollingInterval {
-  /// 最小ポーリング間隔（ミリ秒）
+  /// Minimum polling interval (milliseconds)
   static const int minInterval = 50;
 
-  /// 最大ポーリング間隔（ミリ秒）-- アイドル時
+  /// Maximum polling interval (milliseconds) -- when idle
   static const int maxInterval = 2000;
 
-  /// デフォルトポーリング間隔（ミリ秒）
+  /// Default polling interval (milliseconds)
   static const int defaultInterval = 100;
 
-  /// 高頻度更新閾値（この回数以下の変更なしフレームで高頻度モード）
+  /// High-frequency update threshold (high-frequency mode when unchanged frames are at or below this count)
   static const int highFrequencyThreshold = 3;
 
-  /// 低頻度更新閾値（この回数以上の変更なしフレームで低頻度モード）
+  /// Low-frequency update threshold (low-frequency mode when unchanged frames are at or above this count)
   static const int lowFrequencyThreshold = 15;
 
-  /// 現在のポーリング間隔を計算
+  /// Calculate the current polling interval
   ///
-  /// [unchangedFrames] 変更がない連続フレーム数
-  /// [changeRatio] 直近の変更率
+  /// [unchangedFrames] Number of consecutive frames without changes
+  /// [changeRatio] Recent change ratio
   static int calculateInterval(int unchangedFrames, double changeRatio) {
-    // 高頻度更新中（htop等）
+    // During high-frequency updates (htop, etc.)
     if (unchangedFrames <= highFrequencyThreshold || changeRatio > 0.3) {
       return minInterval;
     }
 
-    // 低頻度更新中（アイドル状態）
+    // During low-frequency updates (idle state)
     if (unchangedFrames >= lowFrequencyThreshold) {
       return maxInterval;
     }
 
-    // 中間状態：線形補間
+    // Intermediate state: linear interpolation
     final ratio = (unchangedFrames - highFrequencyThreshold) /
         (lowFrequencyThreshold - highFrequencyThreshold);
     return (minInterval + (maxInterval - minInterval) * ratio).round();

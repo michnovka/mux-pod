@@ -7,7 +7,7 @@ import '../services/tmux/tmux_commands.dart';
 import '../services/tmux/tmux_parser.dart';
 import 'connection_provider.dart';
 
-/// tmuxウィンドウフラグに基づく通知ペイン情報
+/// Alert pane information based on tmux window flags
 class AlertPane {
   final String connectionId;
   final String connectionName;
@@ -35,10 +35,10 @@ class AlertPane {
 
   String get key => '$connectionId:$sessionName:$windowIndex:$paneId';
 
-  /// ウィンドウ単位のキー（同一ウィンドウの全ペインで共通）
+  /// Window-level key (shared by all panes in the same window)
   String get windowKey => '$connectionId:$sessionName:$windowIndex';
 
-  /// 最も優先度の高いフラグを取得 (bell > activity > silence)
+  /// Get the highest priority flag (bell > activity > silence)
   TmuxWindowFlag? get primaryFlag {
     if (flags.contains(TmuxWindowFlag.bell)) return TmuxWindowFlag.bell;
     if (flags.contains(TmuxWindowFlag.activity)) return TmuxWindowFlag.activity;
@@ -47,7 +47,7 @@ class AlertPane {
   }
 }
 
-/// 通知ペイン一覧の状態
+/// State for the alert panes list
 class AlertPanesState {
   final List<AlertPane> alertPanes;
   final bool isLoading;
@@ -72,7 +72,7 @@ class AlertPanesState {
   }
 }
 
-/// 通知ペイン一覧を管理するNotifier
+/// Notifier that manages the alert panes list
 class AlertPanesNotifier extends Notifier<AlertPanesState> {
   static const _alertFlags = {
     TmuxWindowFlag.activity,
@@ -85,13 +85,13 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
     return const AlertPanesState();
   }
 
-  /// アラートをローカルリストから除去
+  /// Dismiss an alert from the local list
   void dismiss(String key) {
     final updated = state.alertPanes.where((a) => a.key != key).toList();
     state = state.copyWith(alertPanes: updated);
   }
 
-  /// tmux側のウィンドウフラグをクリア（select-windowで当該ウィンドウを選択→元に戻す）
+  /// Clear tmux window flags (select the window via select-window, then switch back)
   Future<void> clearWindowFlag(AlertPane alert) async {
     final connectionsState = ref.read(connectionsProvider);
     final connection = connectionsState.connections
@@ -119,7 +119,7 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
         options: options,
       );
 
-      // 当該ウィンドウを選択してフラグをクリアし、元のウィンドウに戻す
+      // Select the target window to clear flags, then switch back to the original window
       await sshClient.exec(
         TmuxCommands.selectWindow(alert.sessionName, alert.windowIndex),
       );
@@ -130,7 +130,7 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
     }
   }
 
-  /// 全接続からアラートペインを取得
+  /// Fetch alert panes from all connections
   Future<void> refresh() async {
     state = state.copyWith(isLoading: true, error: null);
 
@@ -194,7 +194,7 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
   }
 }
 
-/// 通知ペインプロバイダー
+/// Alert panes provider
 final alertPanesProvider =
     NotifierProvider<AlertPanesNotifier, AlertPanesState>(() {
   return AlertPanesNotifier();

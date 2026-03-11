@@ -11,7 +11,7 @@ import '../../services/keychain/secure_storage.dart';
 import '../../services/ssh/ssh_client.dart';
 import '../../theme/design_colors.dart';
 
-/// 接続編集画面
+/// Connection edit screen
 class ConnectionFormScreen extends ConsumerStatefulWidget {
   final String? connectionId;
 
@@ -770,7 +770,7 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
     bool tmuxInstalled = false;
 
     try {
-      // 認証情報を準備
+      // Prepare authentication credentials
       String? password;
       String? privateKey;
       String? passphrase;
@@ -792,7 +792,7 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
         }
       }
 
-      // SSH接続テスト
+      // SSH connection test
       final customTmuxPath = _tmuxPathController.text.trim();
       await sshClient.connect(
         host: _hostController.text.trim(),
@@ -806,8 +806,8 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
         ),
       );
 
-      // tmuxがインストールされているか確認
-      // connect()内でPersistentShell（対話シェル）経由で絶対パスを検出済み
+      // Check if tmux is installed
+      // The absolute path has already been detected via PersistentShell (interactive shell) inside connect()
       tmuxInstalled = sshClient.tmuxPath != null;
     } on SshAuthenticationError catch (e) {
       errorMessage = 'Authentication failed: ${e.message}';

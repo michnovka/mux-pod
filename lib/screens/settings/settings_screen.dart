@@ -12,7 +12,7 @@ import '../../widgets/dialogs/theme_dialog.dart';
 import '../../services/version_info.dart';
 import 'licenses_screen.dart';
 
-/// 設定画面
+/// Settings screen
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 

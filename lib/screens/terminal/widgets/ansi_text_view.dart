@@ -11,16 +11,16 @@ import '../../../services/terminal/terminal_font_styles.dart';
 import '../../../services/tmux/pane_navigator.dart';
 import '../../../theme/design_colors.dart';
 
-/// キー入力イベント
+/// Key input event
 class KeyInputEvent {
-  /// キーデータ（エスケープシーケンスまたは文字）
+  /// Key data (escape sequence or character)
   final String data;
 
-  /// 特殊キーかどうか
+  /// Whether this is a special key
   final bool isSpecialKey;
 
-  /// tmux形式のキー名（Enterの場合は'Enter'など）
-  /// isSpecialKeyがtrueの場合に使用
+  /// tmux-format key name (e.g., 'Enter' for Enter)
+  /// Used when isSpecialKey is true
   final String? tmuxKeyName;
 
   const KeyInputEvent({
@@ -30,64 +30,64 @@ class KeyInputEvent {
   });
 }
 
-/// ターミナルの操作モード
+/// Terminal operation mode
 enum TerminalMode {
-  /// 通常モード（キー入力が有効）
+  /// Normal mode (key input is enabled)
   normal,
 
-  /// スクロールモード（テキスト選択も可能、キー入力は無効）
+  /// Scroll mode (text selection is also available, key input is disabled)
   scroll,
 }
 
-/// ANSIテキスト表示ウィジェット
+/// ANSI text display widget
 ///
-/// capture-pane -e の出力をANSIカラー付きで表示する。
-/// RichText/SelectableTextを使用し、xterm依存を排除。
+/// Displays capture-pane -e output with ANSI color support.
+/// Uses RichText/SelectableText, eliminating xterm dependency.
 class AnsiTextView extends ConsumerStatefulWidget {
-  /// 表示するANSIテキスト
+  /// ANSI text to display
   final String text;
 
-  /// ペインの文字幅
+  /// Pane character width
   final int paneWidth;
 
-  /// ペインの文字高さ
+  /// Pane character height
   final int paneHeight;
 
-  /// キー入力コールバック
+  /// Key input callback
   final void Function(KeyInputEvent)? onKeyInput;
 
-  /// 背景色
+  /// Background color
   final Color backgroundColor;
 
-  /// 前景色
+  /// Foreground color
   final Color foregroundColor;
 
-  /// 操作モード
+  /// Operation mode
   final TerminalMode mode;
 
-  /// ピンチズームが有効かどうか
+  /// Whether pinch zoom is enabled
   final bool zoomEnabled;
 
-  /// ズームスケール変更時のコールバック
+  /// Callback when zoom scale changes
   final void Function(double scale)? onZoomChanged;
 
-  /// 外部から渡される垂直スクロールコントローラー（オプション）
+  /// Vertical scroll controller passed from outside (optional)
   final ScrollController? verticalScrollController;
 
-  /// カーソルX位置（0-based）
+  /// Cursor X position (0-based)
   final int cursorX;
 
-  /// カーソルY位置（0-based, ペイン上部基準）
+  /// Cursor Y position (0-based, relative to pane top)
   final int cursorY;
 
-  /// ホールド+スワイプで矢印キー入力時のコールバック
+  /// Callback for arrow key input via hold+swipe
   /// direction: 'Up', 'Down', 'Left', 'Right'
   final void Function(String direction)? onArrowSwipe;
 
-  /// 2本指スワイプでペイン切り替え時のコールバック
+  /// Callback for pane switching via two-finger swipe
   final void Function(SwipeDirection direction)? onTwoFingerSwipe;
 
-  /// 各方向にペインが存在するかのマップ（視覚フィードバック用）
+  /// Map indicating whether a pane exists in each direction (for visual feedback)
   final Map<SwipeDirection, bool>? navigableDirections;
 
   const AnsiTextView({
@@ -119,30 +119,30 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
   final ScrollController _horizontalScrollController = ScrollController();
   ScrollController? _internalVerticalScrollController;
 
-  /// キャレット点滅用コントローラー
+  /// Controller for caret blinking animation
   late final AnimationController _caretBlinkController;
 
-  /// 使用する垂直スクロールコントローラー
+  /// Vertical scroll controller to use
   ScrollController get _verticalScrollController =>
       widget.verticalScrollController ?? _internalVerticalScrollController!;
 
   late AnsiParser _parser;
 
-  /// 差分計算サービス
+  /// Diff calculation service
   final TerminalDiff _terminalDiff = TerminalDiff();
 
-  /// 修飾キー状態
+  /// Modifier key state
   bool _ctrlPressed = false;
   bool _altPressed = false;
   bool _shiftPressed = false;
 
-  /// ホールド+スワイプ用の状態
+  /// State for hold+swipe gesture
   bool _isLongPressing = false;
   Offset? _longPressStartPosition;
   String? _lastSwipeDirection;
   static const double _swipeThreshold = 30.0;
 
-  /// 2本指ジェスチャーのモード（指の移動方向で判定し、終了までロック）
+  /// Two-finger gesture mode (determined by finger movement direction, locked until end)
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
   Offset _twoFingerPanStart = Offset.zero;
   Offset _twoFingerPanDelta = Offset.zero;
@@ -152,32 +152,32 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
   static const double _panGlowThreshold = 20.0;
   static const Duration _edgeFlashDuration = Duration(milliseconds: 400);
 
-  /// 個別ポインタ追跡（指の移動方向ベクトルでズーム/パンを判定）
+  /// Individual pointer tracking (determine zoom/pan by finger movement direction vectors)
   final Map<int, Offset> _pointerStartPositions = {};
   final Map<int, Offset> _pointerCurrentPositions = {};
 
-  /// 現在のズームスケール
+  /// Current zoom scale
   double _currentScale = 1.0;
 
-  /// ピンチズーム開始時のスケール
+  /// Scale at the start of pinch zoom
   double _baseScale = 1.0;
 
-  /// パース済み行データキャッシュ（仮想スクロール用）
+  /// Cached parsed line data (for virtual scrolling)
   List<ParsedLine>? _cachedParsedLines;
   String? _cachedText;
   double? _cachedFontSize;
   String? _cachedFontFamily;
 
-  /// 行の高さ（仮想スクロールで固定高さを使用）
+  /// Line height (using fixed height for virtual scrolling)
   double _lineHeight = 20.0;
 
-  /// 最後の差分結果（適応型ポーリング用）
+  /// Last diff result (for adaptive polling)
   DiffResult? _lastDiffResult;
 
   @override
   void initState() {
     super.initState();
-    // 外部からScrollControllerが渡されていない場合は内部で作成
+    // Create internally if no ScrollController is passed from outside
     if (widget.verticalScrollController == null) {
       _internalVerticalScrollController = ScrollController();
     }
@@ -186,7 +186,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
       defaultBackground: widget.backgroundColor,
     );
 
-    // 500ms周期で点滅（1秒で1サイクル）
+    // Blink at 500ms intervals (1 cycle per second)
     _caretBlinkController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 500),
@@ -202,12 +202,12 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
         defaultForeground: widget.foregroundColor,
         defaultBackground: widget.backgroundColor,
       );
-      // パーサーが変わったのでキャッシュを無効化
+      // Invalidate cache since the parser changed
       _invalidateCache();
     }
   }
 
-  /// キャッシュを無効化
+  /// Invalidate cache
   void _invalidateCache() {
     _cachedParsedLines = null;
     _cachedText = null;
@@ -215,15 +215,15 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     _cachedFontFamily = null;
   }
 
-  /// 行データを取得（キャッシュ使用・仮想スクロール用）
+  /// Get line data (using cache, for virtual scrolling)
   List<ParsedLine> _getParsedLines({
     required double fontSize,
     required String fontFamily,
   }) {
-    // 差分計算を実行
+    // Execute diff calculation
     _lastDiffResult = _terminalDiff.calculateDiff(widget.text);
 
-    // キャッシュが有効かチェック
+    // Check if cache is valid
     if (_cachedParsedLines != null &&
         _cachedText == widget.text &&
         _cachedFontSize == fontSize &&
@@ -231,22 +231,22 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
       return _cachedParsedLines!;
     }
 
-    // 新しくパースしてキャッシュ
+    // Parse anew and cache
     _cachedParsedLines = _parser.parseLines(widget.text);
     _cachedText = widget.text;
     _cachedFontSize = fontSize;
     _cachedFontFamily = fontFamily;
 
-    // 行の高さを計算（fontSize * lineHeight係数）
+    // Calculate line height (fontSize * lineHeight factor)
     _lineHeight = fontSize * 1.4;
 
     return _cachedParsedLines!;
   }
 
-  /// 最後の差分結果を取得（親ウィジェットから参照用）
+  /// Get last diff result (for reference from parent widget)
   DiffResult? get lastDiffResult => _lastDiffResult;
 
-  /// 推奨ポーリング間隔を取得（適応型ポーリング用）
+  /// Get recommended polling interval (for adaptive polling)
   int get recommendedPollingInterval {
     if (_lastDiffResult == null) {
       return AdaptivePollingInterval.defaultInterval;
@@ -262,12 +262,12 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     _caretBlinkController.dispose();
     _focusNode.dispose();
     _horizontalScrollController.dispose();
-    // 内部で作成した場合のみ破棄
+    // Only dispose if created internally
     _internalVerticalScrollController?.dispose();
     super.dispose();
   }
 
-  /// ズームをリセット
+  /// Reset zoom
   void resetZoom() {
     setState(() {
       _currentScale = 1.0;
@@ -276,7 +276,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     widget.onZoomChanged?.call(1.0);
   }
 
-  // === ポインタ追跡（指の移動方向ベクトルでズーム/パンを判定） ===
+  // === Pointer tracking (determine zoom/pan by finger movement direction vectors) ===
 
   void _onPointerDown(PointerDownEvent event) {
     _pointerStartPositions[event.pointer] = event.position;
@@ -292,11 +292,11 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     _pointerCurrentPositions.remove(event.pointer);
   }
 
-  /// 2本の指の移動方向ベクトルの内積からモードを判定
+  /// Determine mode from the dot product of two finger movement direction vectors
   ///
-  /// - 内積 > 0: 同方向（パン） → ペイン切り替え
-  /// - 内積 < 0: 逆方向（ピンチ） → ズーム
-  /// - 移動量不足: 判定不能
+  /// - dot > 0: same direction (pan) -> pane switching
+  /// - dot < 0: opposite direction (pinch) -> zoom
+  /// - insufficient movement: undetermined
   _TwoFingerMode _detectModeFromFingerDirections() {
     if (_pointerCurrentPositions.length < 2) {
       return _TwoFingerMode.undetermined;
@@ -315,7 +315,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
         _pointerCurrentPositions[pointers[1]]! -
         _pointerStartPositions[pointers[1]]!;
 
-    // 最低移動量に達していなければ判定不能
+    // Undetermined if minimum movement threshold not reached
     if (v1.distance < 15 || v2.distance < 15) {
       return _TwoFingerMode.undetermined;
     }
@@ -324,7 +324,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     return dot > 0 ? _TwoFingerMode.pan : _TwoFingerMode.zoom;
   }
 
-  // === ピンチズーム + 2本指スワイプ処理 ===
+  // === Pinch zoom + two-finger swipe handling ===
 
   void _onScaleStart(ScaleStartDetails details) {
     _baseScale = _currentScale;
@@ -335,10 +335,10 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
   }
 
   void _onScaleUpdate(ScaleUpdateDetails details) {
-    // 1本指ドラッグはスクロールに任せる
+    // Leave single-finger drag to scrolling
     if (details.pointerCount <= 1) return;
 
-    // モード確定済み → そのまま処理
+    // Mode already determined -> process as-is
     if (_twoFingerMode == _TwoFingerMode.zoom) {
       _isTwoFingerPanning = false;
       _applyZoom(details);
@@ -351,7 +351,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
       return;
     }
 
-    // モード未確定 → 指の移動方向ベクトルで判定
+    // Mode undetermined -> determine by finger movement direction vectors
     _twoFingerMode = _detectModeFromFingerDirections();
 
     switch (_twoFingerMode) {
@@ -363,7 +363,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
         _twoFingerPanDelta = details.focalPoint - _twoFingerPanStart;
         setState(() {});
       case _TwoFingerMode.undetermined:
-        // まだ判定できない → 暫定的にパンデルタだけ追跡
+        // Cannot determine yet -> provisionally track pan delta only
         _twoFingerPanDelta = details.focalPoint - _twoFingerPanStart;
     }
   }
@@ -416,7 +416,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     });
   }
 
-  // === ホールド+スワイプ処理 ===
+  // === Hold+swipe handling ===
 
   void _onLongPressStart(LongPressStartDetails details) {
     setState(() {
@@ -433,16 +433,16 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     final delta = details.localPosition - _longPressStartPosition!;
     String? direction;
 
-    // 閾値を超えた方向を検出
+    // Detect direction that exceeds threshold
     if (delta.dx.abs() > delta.dy.abs()) {
-      // 水平方向
+      // Horizontal direction
       if (delta.dx > _swipeThreshold) {
         direction = 'Right';
       } else if (delta.dx < -_swipeThreshold) {
         direction = 'Left';
       }
     } else {
-      // 垂直方向
+      // Vertical direction
       if (delta.dy > _swipeThreshold) {
         direction = 'Down';
       } else if (delta.dy < -_swipeThreshold) {
@@ -456,9 +456,9 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
       });
       widget.onArrowSwipe?.call(direction);
       HapticFeedback.selectionClick();
-      // 起点をリセットして連続スワイプ対応
+      // Reset start point for continuous swipe support
       _longPressStartPosition = details.localPosition;
-      // ハイライトを短時間後にリセット
+      // Reset highlight after a short delay
       Future.delayed(const Duration(milliseconds: 150), () {
         if (mounted && _isLongPressing) {
           setState(() {
@@ -477,7 +477,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     });
   }
 
-  /// スワイプオーバーレイウィジェット
+  /// Swipe overlay widget
   Widget _buildSwipeOverlay() {
     return Center(
       child: AnimatedOpacity(
@@ -492,7 +492,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
           ),
           child: Stack(
             children: [
-              // 上矢印
+              // Up arrow
               Positioned(
                 top: 8,
                 left: 0,
@@ -505,7 +505,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                       : Colors.white.withValues(alpha: 0.6),
                 ),
               ),
-              // 下矢印
+              // Down arrow
               Positioned(
                 bottom: 8,
                 left: 0,
@@ -518,7 +518,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                       : Colors.white.withValues(alpha: 0.6),
                 ),
               ),
-              // 左矢印
+              // Left arrow
               Positioned(
                 left: 8,
                 top: 0,
@@ -531,7 +531,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                       : Colors.white.withValues(alpha: 0.6),
                 ),
               ),
-              // 右矢印
+              // Right arrow
               Positioned(
                 right: 8,
                 top: 0,
@@ -544,7 +544,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                       : Colors.white.withValues(alpha: 0.6),
                 ),
               ),
-              // 中央の点
+              // Center dot
               Center(
                 child: Container(
                   width: 12,
@@ -562,14 +562,14 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     );
   }
 
-  /// 2本指スワイプ時の視覚フィードバックオーバーレイ
+  /// Visual feedback overlay during two-finger swipe
   Widget _buildTwoFingerSwipeOverlay() {
-    // 端到達時のフラッシュ表示
+    // Flash display when reaching the edge
     if (_twoFingerSwipeResult != null) {
       return _buildEdgeFlash(_twoFingerSwipeResult!);
     }
 
-    // パン中のエッジグロー表示
+    // Edge glow display during panning
     if (_isTwoFingerPanning) {
       return _buildPanGlow();
     }
@@ -577,7 +577,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     return const SizedBox.shrink();
   }
 
-  /// 端到達時の赤系フラッシュ
+  /// Red-tinted flash when reaching the edge
   Widget _buildEdgeFlash(SwipeDirection direction) {
     final alignment = switch (direction) {
       SwipeDirection.left => Alignment.centerLeft,
@@ -624,12 +624,12 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     );
   }
 
-  /// パン中の方向グロー
+  /// Directional glow during panning
   Widget _buildPanGlow() {
     final dx = _twoFingerPanDelta.dx;
     final dy = _twoFingerPanDelta.dy;
 
-    // 移動量が小さすぎる場合は表示しない
+    // Do not display if movement is too small
     if (dx.abs() < _panGlowThreshold && dy.abs() < _panGlowThreshold) {
       return const SizedBox.shrink();
     }
@@ -691,7 +691,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     );
   }
 
-  /// 現在のズームスケールを取得
+  /// Get the current zoom scale
   double get currentScale => _currentScale;
 
   @override
@@ -701,12 +701,12 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
 
     return LayoutBuilder(
       builder: (context, constraints) {
-        // フォントサイズを決定
+        // Determine font size
         late final double fontSize;
         late final bool needsHorizontalScroll;
 
         if (settings.autoFitEnabled) {
-          // 自動フィット: 画面幅に合わせて計算
+          // Auto-fit: calculate to match screen width
           final calcResult = FontCalculator.calculate(
             screenWidth: constraints.maxWidth,
             paneCharWidth: widget.paneWidth,
@@ -716,9 +716,9 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
           fontSize = calcResult.fontSize;
           needsHorizontalScroll = calcResult.needsScroll;
         } else {
-          // 手動設定: settings.fontSizeを使用
+          // Manual setting: use settings.fontSize
           fontSize = settings.fontSize;
-          // 水平スクロールの必要性を判定
+          // Determine if horizontal scrolling is needed
           final terminalWidth = FontCalculator.calculateTerminalWidth(
             paneCharWidth: widget.paneWidth,
             fontSize: fontSize,
@@ -727,28 +727,28 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
           needsHorizontalScroll = terminalWidth > constraints.maxWidth;
         }
 
-        // ターミナル幅を計算
+        // Calculate terminal width
         final terminalWidth = FontCalculator.calculateTerminalWidth(
           paneCharWidth: widget.paneWidth,
           fontSize: fontSize,
           fontFamily: settings.fontFamily,
         );
 
-        // 行データを取得（キャッシュ使用・仮想スクロール用）
+        // Get line data (using cache, for virtual scrolling)
         final parsedLines = _getParsedLines(
           fontSize: fontSize,
           fontFamily: settings.fontFamily,
         );
 
-        // 仮想スクロール対応のListView.builder
+        // ListView.builder with virtual scrolling support
         Widget listWidget = ListView.builder(
           controller: _verticalScrollController,
-          padding: EdgeInsets.zero, // パディングを明示的にゼロにする
+          padding: EdgeInsets.zero, // Explicitly set padding to zero
           physics: const ClampingScrollPhysics(),
           itemCount: parsedLines.length,
-          // 固定の行高さを使用してスクロール計算を高速化
+          // Use fixed line height to speed up scroll calculations
           itemExtent: _lineHeight,
-          // RepaintBoundaryを自動追加
+          // Automatically add RepaintBoundary
           addRepaintBoundaries: true,
           itemBuilder: (context, index) {
             final line = parsedLines[index];
@@ -758,7 +758,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
               fontFamily: settings.fontFamily,
             );
 
-            // 各行のテキストウィジェット
+            // Text widget for each line
             Widget lineWidget = Text.rich(
               textSpan,
               style: TerminalFontStyles.getTextStyle(
@@ -773,27 +773,27 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
               overflow: TextOverflow.visible,
             );
 
-            // カーソルの描画処理
-            // カーソル位置の行インデックスを計算
-            // parsedLinesには履歴+可視領域が含まれる。
-            // 末尾のpaneHeight分が可視領域となる。
+            // Cursor rendering
+            // Calculate the line index of the cursor position
+            // parsedLines contains history + visible area.
+            // The last paneHeight lines are the visible area.
             final int cursorLineIndex;
             if (parsedLines.length >= widget.paneHeight) {
               cursorLineIndex = parsedLines.length - widget.paneHeight + widget.cursorY;
             } else {
-              // 行数がpaneHeight未満の場合は、単純にcursorYを使用（初期状態など）
+              // If line count is less than paneHeight, simply use cursorY (e.g., initial state)
               cursorLineIndex = widget.cursorY;
             }
 
-            // 現在の行がカーソル位置と一致する場合、Stackでカーソルを重ねる
+            // If the current line matches the cursor position, overlay the cursor using Stack
             if (index == cursorLineIndex &&
                 widget.mode == TerminalMode.normal &&
                 settings.showTerminalCursor) {
-              // TextPainter.getOffsetForCaretを使用して、レンダリングエンジンが計算した正確なカーソル位置を取得
+              // Use TextPainter.getOffsetForCaret to get the exact cursor position calculated by the rendering engine
               double cursorLeft;
               double charWidth;
 
-              // 行全体のテキストとスタイルを使用してTextPainterを作成
+              // Create TextPainter using the full line text and styles
               final textSpanFull = _parser.lineToTextSpan(
                 line,
                 fontSize: fontSize,
@@ -806,26 +806,26 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                 textScaler: TextScaler.noScaling,
               )..layout();
 
-              // 行のプレーンテキストを取得
+              // Get the plain text of the line
               final lineText = line.segments.map((s) => s.text).join();
               final lineTextLength = lineText.length;
 
-              // 全角文字を考慮してカラム位置を文字オフセットに変換
-              // tmuxのcursor_xはカラム位置（全角=2）だが、
-              // TextPositionは文字オフセット（全角=1）を期待する
+              // Convert column position to character offset considering full-width characters
+              // tmux cursor_x is a column position (full-width=2), but
+              // TextPosition expects a character offset (full-width=1)
               final lineDisplayWidth = FontCalculator.getTextDisplayWidth(lineText);
               final charOffset = FontCalculator.columnToCharOffset(lineText, widget.cursorX);
 
               if (widget.cursorX <= lineDisplayWidth) {
-                 // カーソルが行内にある場合、getOffsetForCaretで位置を取得
+                 // If cursor is within the line, get position via getOffsetForCaret
                  final offset = painter.getOffsetForCaret(
                    TextPosition(offset: charOffset),
                    Rect.zero,
                  );
                  cursorLeft = offset.dx;
 
-                 // カーソル幅も現在の文字の位置から取得（次の文字までの幅）
-                 // 行末の場合は標準幅を使用
+                 // Get cursor width from current character position (width to next character)
+                 // Use standard width at line end
                  if (charOffset < lineTextLength) {
                     final nextOffset = painter.getOffsetForCaret(
                       TextPosition(offset: charOffset + 1),
@@ -836,8 +836,8 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                     charWidth = FontCalculator.measureCharWidth(settings.fontFamily, fontSize);
                  }
               } else {
-                 // カーソルが行末より先にある場合（空行や行末以降のスペース）
-                 // 行末の位置を取得し、超過分を加算
+                 // Cursor is beyond end of line (empty line or spaces past line end)
+                 // Get end-of-line position and add the excess
                  cursorLeft = painter.width;
                  charWidth = FontCalculator.measureCharWidth(settings.fontFamily, fontSize);
                  cursorLeft += (widget.cursorX - lineDisplayWidth) * charWidth;
@@ -850,9 +850,9 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                   AnimatedBuilder(
                     animation: _caretBlinkController,
                     builder: (context, child) {
-                      // キャレットの高さを文字サイズに合わせる（行間を含めない）
+                      // Match caret height to character size (excluding line spacing)
                       final caretHeight = fontSize;
-                      // 行内で垂直方向に中央寄せ
+                      // Vertically center within the line
                       final caretTop = (_lineHeight - caretHeight) / 2;
 
                       return Positioned(
@@ -861,7 +861,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                         width: 2,
                         height: caretHeight,
                         child: Opacity(
-                          opacity: _caretBlinkController.value, // フェードイン・アウト
+                          opacity: _caretBlinkController.value, // Fade in/out
                           child: Container(
                             color: DesignColors.primary,
                           ),
@@ -873,7 +873,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
               );
             }
 
-            // 固定幅コンテナ（水平スクロール用）
+            // Fixed-width container (for horizontal scrolling)
             if (needsHorizontalScroll) {
               lineWidget = SizedBox(
                 width: terminalWidth,
@@ -885,7 +885,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
           },
         );
 
-        // 水平スクロールが必要な場合
+        // If horizontal scrolling is needed
         if (needsHorizontalScroll) {
           listWidget = SingleChildScrollView(
             controller: _horizontalScrollController,
@@ -899,9 +899,9 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
           );
         }
 
-        // ピンチズーム + 2本指スワイプ
+        // Pinch zoom + two-finger swipe
         if (widget.zoomEnabled) {
-          // RawGestureDetectorで2本指検出時にgesture arenaを強制勝利
+          // Use RawGestureDetector to force-win gesture arena on two-finger detection
           listWidget = RawGestureDetector(
             gestures: <Type, GestureRecognizerFactory>{
               _EagerScaleGestureRecognizer:
@@ -923,8 +923,8 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
               child: listWidget,
             ),
           );
-          // Listenerで個別ポインタを追跡（gesture arenaに参加しない）
-          // 指の移動方向ベクトルの内積でズーム/パンを判定するために使用
+          // Track individual pointers with Listener (does not participate in gesture arena)
+          // Used to determine zoom/pan by dot product of finger movement direction vectors
           listWidget = Listener(
             onPointerDown: _onPointerDown,
             onPointerMove: _onPointerMove,
@@ -934,7 +934,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
           );
         }
 
-        // スクロールモードの場合はテキスト選択を有効化
+        // Enable text selection in scroll mode
         if (isScrollMode) {
           return Container(
             color: widget.backgroundColor,
@@ -944,8 +944,8 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
           );
         }
 
-        // 通常モード：キーボード入力をハンドリング
-        // ホールド+スワイプで矢印キー入力対応
+        // Normal mode: handle keyboard input
+        // Support arrow key input via hold+swipe
         return Focus(
           focusNode: _focusNode,
           autofocus: true,
@@ -961,9 +961,9 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
                   color: widget.backgroundColor,
                   child: listWidget,
                 ),
-                // ホールド+スワイプオーバーレイ
+                // Hold+swipe overlay
                 if (_isLongPressing) _buildSwipeOverlay(),
-                // 2本指スワイプオーバーレイ
+                // Two-finger swipe overlay
                 if (_isTwoFingerPanning || _twoFingerSwipeResult != null)
                   _buildTwoFingerSwipeOverlay(),
               ],
@@ -974,14 +974,14 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     );
   }
 
-  /// キーイベントをハンドリング
+  /// Handle key events
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (widget.onKeyInput == null) return KeyEventResult.ignored;
 
     if (event is KeyDownEvent || event is KeyRepeatEvent) {
       final key = event.logicalKey;
 
-      // 修飾キーの状態を更新
+      // Update modifier key state
       if (key == LogicalKeyboardKey.controlLeft ||
           key == LogicalKeyboardKey.controlRight) {
         _ctrlPressed = true;
@@ -998,7 +998,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
         return KeyEventResult.handled;
       }
 
-      // 特殊キーの処理
+      // Handle special keys
       String? data;
       bool isSpecialKey = false;
       String? tmuxKeyName;
@@ -1008,9 +1008,9 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
         isSpecialKey = true;
         tmuxKeyName = 'Escape';
       } else if (key == LogicalKeyboardKey.enter) {
-        // Shift+Enterの場合は別のキー名で送信
+        // Send with different key name for Shift+Enter
         if (_shiftPressed) {
-          data = '\x1b[27;2;13~'; // xterm拡張: Shift+Enter
+          data = '\x1b[27;2;13~'; // xterm extension: Shift+Enter
           isSpecialKey = true;
           tmuxKeyName = 'S-Enter';
           _shiftPressed = false;
@@ -1118,10 +1118,10 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
         isSpecialKey = true;
         tmuxKeyName = _getModifiedTmuxKey('F12');
       } else if (event.character != null && event.character!.isNotEmpty) {
-        // 通常文字
+        // Normal character
         data = event.character!;
 
-        // Ctrl+文字の処理
+        // Handle Ctrl+character
         if (_ctrlPressed && data.length == 1) {
           final code = data.codeUnitAt(0);
           if ((code >= 0x61 && code <= 0x7a) ||
@@ -1130,7 +1130,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
           }
         }
 
-        // Alt+文字の処理
+        // Handle Alt+character
         if (_altPressed) {
           data = '\x1b$data';
         }
@@ -1147,7 +1147,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     } else if (event is KeyUpEvent) {
       final key = event.logicalKey;
 
-      // 修飾キーの解除
+      // Release modifier keys
       if (key == LogicalKeyboardKey.controlLeft ||
           key == LogicalKeyboardKey.controlRight) {
         _ctrlPressed = false;
@@ -1163,7 +1163,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     return KeyEventResult.ignored;
   }
 
-  /// 矢印キーのシーケンスを取得
+  /// Get the escape sequence for arrow keys
   String _getArrowSequence(String code) {
     if (_shiftPressed) {
       return '\x1b[1;2$code';
@@ -1175,7 +1175,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     return '\x1b[$code';
   }
 
-  /// 矢印キーのtmux形式キー名を取得
+  /// Get the tmux-format key name for arrow keys
   String _getArrowTmuxKey(String direction) {
     if (_shiftPressed) {
       return 'S-$direction';
@@ -1187,8 +1187,8 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     return direction;
   }
 
-  /// 修飾子付きtmuxキー名を取得（汎用: Home/End/PPage/NPage/DC等）
-  /// 修飾子フラグを消費（リセット）する
+  /// Get tmux key name with modifier (generic: Home/End/PPage/NPage/DC, etc.)
+  /// Consumes (resets) the modifier flag
   String _getModifiedTmuxKey(String baseKey) {
     if (_shiftPressed) {
       _shiftPressed = false;
@@ -1203,32 +1203,32 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     return baseKey;
   }
 
-  /// 修飾子付きCSIシーケンス: 最終文字型（Home: \x1b[H, End: \x1b[F）
-  /// 修飾子あり: \x1b[1;{mod}{finalChar}
+  /// CSI sequence with modifier: final character type (Home: \x1b[H, End: \x1b[F)
+  /// With modifier: \x1b[1;{mod}{finalChar}
   String _getFinalCharSequence(String finalChar) {
     final mod = _shiftPressed ? 2 : _ctrlPressed ? 5 : _altPressed ? 3 : 0;
     if (mod == 0) return '\x1b[$finalChar';
     return '\x1b[1;$mod$finalChar';
   }
 
-  /// 修飾子付きCSIシーケンス: パラメータ型（PageUp: \x1b[5~, Delete: \x1b[3~）
-  /// 修飾子あり: \x1b[{param};{mod}~
+  /// CSI sequence with modifier: parameter type (PageUp: \x1b[5~, Delete: \x1b[3~)
+  /// With modifier: \x1b[{param};{mod}~
   String _getParamSequence(int param, String suffix) {
     final mod = _shiftPressed ? 2 : _ctrlPressed ? 5 : _altPressed ? 3 : 0;
     if (mod == 0) return '\x1b[$param$suffix';
     return '\x1b[$param;$mod$suffix';
   }
 
-  /// F1-F4用シーケンス（SS3形式、修飾子ありならCSI形式に変換）
+  /// Sequence for F1-F4 (SS3 format, converted to CSI format if modifier is present)
   /// F1=P, F2=Q, F3=R, F4=S
-  /// 修飾子なし: \x1bO{code}, 修飾子あり: \x1b[1;{mod}{code}
+  /// Without modifier: \x1bO{code}, with modifier: \x1b[1;{mod}{code}
   String _getFKeySequence(String code) {
     final mod = _shiftPressed ? 2 : _ctrlPressed ? 5 : _altPressed ? 3 : 0;
     if (mod == 0) return '\x1bO$code';
     return '\x1b[1;$mod$code';
   }
 
-  // === 修飾キートグル（外部からの制御用） ===
+  // === Modifier key toggles (for external control) ===
 
   void toggleCtrl() {
     setState(() {
@@ -1263,9 +1263,9 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     });
   }
 
-  // === スクロール制御 ===
+  // === Scroll control ===
 
-  /// 一番下までスクロール
+  /// Scroll to the bottom
   void scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_verticalScrollController.hasClients) {
@@ -1278,7 +1278,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     });
   }
 
-  /// 一番上までスクロール
+  /// Scroll to the top
   void scrollToTop() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_verticalScrollController.hasClients) {
@@ -1291,7 +1291,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
     });
   }
 
-  /// カーソル位置までスクロール
+  /// Scroll to cursor position
   void scrollToCaret() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -1300,7 +1300,7 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
       final parsedLines = _cachedParsedLines;
       if (parsedLines == null || parsedLines.isEmpty) return;
 
-      // カーソル行インデックスを計算（build内と同じロジック）
+      // Calculate cursor line index (same logic as in build)
       final int cursorLineIndex;
       if (parsedLines.length >= widget.paneHeight) {
         cursorLineIndex =
@@ -1309,16 +1309,16 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
         cursorLineIndex = widget.cursorY;
       }
 
-      // カーソル行のスクロールオフセット
+      // Scroll offset of the cursor line
       final targetOffset = cursorLineIndex * _lineHeight;
 
-      // ビューポート高さを考慮し、カーソル行が中央付近に来るよう調整
+      // Adjust so the cursor line is near the center, considering viewport height
       final viewportHeight =
           _verticalScrollController.position.viewportDimension;
       final centeredOffset =
           targetOffset - (viewportHeight / 2) + (_lineHeight / 2);
 
-      // 有効範囲にクランプ
+      // Clamp to valid range
       final maxExtent = _verticalScrollController.position.maxScrollExtent;
       final clampedOffset = centeredOffset.clamp(0.0, maxExtent);
 
@@ -1331,16 +1331,16 @@ class AnsiTextViewState extends ConsumerState<AnsiTextView>
   }
 }
 
-/// 2本指ジェスチャーのモード（ジェスチャー開始時に判定し、終了までロック）
+/// Two-finger gesture mode (determined at gesture start, locked until end)
 enum _TwoFingerMode { undetermined, pan, zoom }
 
-/// 2本指以上を検出した場合、gesture arenaを強制的に勝ち取るScaleGestureRecognizer。
+/// ScaleGestureRecognizer that forcefully wins the gesture arena when two or more fingers are detected.
 ///
-/// 通常のScaleGestureRecognizerは内部のSingleChildScrollViewの
-/// HorizontalDragGestureRecognizerにarenaで負けてしまう。
-/// このクラスは2本指検出時にrejectGesture()をacceptGesture()にオーバーライドし、
-/// arenaを強制勝利する。1本指の場合はsuper.rejectGesture()で通常通り
-/// ScrollViewに譲るため、1本指スクロールは影響を受けない。
+/// The standard ScaleGestureRecognizer loses the arena to the internal
+/// SingleChildScrollView's HorizontalDragGestureRecognizer.
+/// This class overrides rejectGesture() with acceptGesture() when two fingers
+/// are detected, forcefully winning the arena. For single-finger gestures,
+/// it defers to super.rejectGesture() as usual, so single-finger scrolling is unaffected.
 class _EagerScaleGestureRecognizer extends ScaleGestureRecognizer {
   int _pointerCount = 0;
 

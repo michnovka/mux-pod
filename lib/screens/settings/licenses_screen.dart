@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../services/version_info.dart';
 
-/// ライセンス一覧画面
+/// License list screen
 class LicensesScreen extends StatelessWidget {
   const LicensesScreen({super.key});
 

@@ -1,16 +1,16 @@
-/// tmuxコマンド生成サービス
+/// tmux command generation service
 ///
-/// tmuxコマンドを生成するユーティリティクラス。
-/// TmuxParserと対応するフォーマット文字列を使用。
+/// Utility class for generating tmux commands.
+/// Uses format strings corresponding to TmuxParser.
 class TmuxCommands {
-  /// デフォルトの区切り文字（SSH経由でタブが変換されるため|||を使用）
+  /// Default delimiter (uses ||| because tabs may be converted via SSH)
   static const String delimiter = '|||';
 
-  // ===== セッション =====
+  // ===== Sessions =====
 
-  /// セッション一覧を取得するコマンド（詳細版）
+  /// Command to list sessions (detailed version)
   ///
-  /// 出力フォーマット: `session_name\tsession_created\tsession_attached\tsession_windows\tsession_id`
+  /// Output format: `session_name\tsession_created\tsession_attached\tsession_windows\tsession_id`
   static String listSessions() {
     return 'tmux list-sessions -F "'
         '#{session_name}$delimiter'
@@ -21,19 +21,19 @@ class TmuxCommands {
         '"';
   }
 
-  /// セッション一覧を取得するコマンド（簡易版）
+  /// Command to list sessions (simple version)
   ///
-  /// 出力フォーマット: `session_name:session_windows:session_attached`
+  /// Output format: `session_name:session_windows:session_attached`
   static String listSessionsSimple() {
     return 'tmux list-sessions -F "#{session_name}:#{session_windows}:#{session_attached}"';
   }
 
-  /// セッションが存在するか確認
+  /// Check if a session exists
   static String hasSession(String sessionName) {
     return 'tmux has-session -t ${_escapeArg(sessionName)} 2>/dev/null && echo "1" || echo "0"';
   }
 
-  /// 新しいセッションを作成
+  /// Create a new session
   static String newSession({
     required String name,
     String? windowName,
@@ -48,21 +48,21 @@ class TmuxCommands {
     return parts.join(' ');
   }
 
-  /// セッションを削除
+  /// Kill a session
   static String killSession(String sessionName) {
     return 'tmux kill-session -t ${_escapeArg(sessionName)}';
   }
 
-  /// セッション名を変更
+  /// Rename a session
   static String renameSession(String oldName, String newName) {
     return 'tmux rename-session -t ${_escapeArg(oldName)} ${_escapeArg(newName)}';
   }
 
-  // ===== ウィンドウ =====
+  // ===== Windows =====
 
-  /// ウィンドウ一覧を取得するコマンド（詳細版）
+  /// Command to list windows (detailed version)
   ///
-  /// 出力フォーマット: `window_index\twindow_id\twindow_name\twindow_active\twindow_panes\twindow_flags`
+  /// Output format: `window_index\twindow_id\twindow_name\twindow_active\twindow_panes\twindow_flags`
   static String listWindows(String sessionName) {
     return 'tmux list-windows -t ${_escapeArg(sessionName)} -F "'
         '#{window_index}$delimiter'
@@ -74,15 +74,15 @@ class TmuxCommands {
         '"';
   }
 
-  /// ウィンドウ一覧を取得するコマンド（簡易版）
+  /// Command to list windows (simple version)
   ///
-  /// 出力フォーマット: `window_index:window_name:window_active:window_panes`
+  /// Output format: `window_index:window_name:window_active:window_panes`
   static String listWindowsSimple(String sessionName) {
     return 'tmux list-windows -t ${_escapeArg(sessionName)} -F "'
         '#{window_index}:#{window_name}:#{window_active}:#{window_panes}"';
   }
 
-  /// 新しいウィンドウを作成
+  /// Create a new window
   static String newWindow({
     required String sessionName,
     String? windowName,
@@ -96,26 +96,26 @@ class TmuxCommands {
     return parts.join(' ');
   }
 
-  /// ウィンドウを選択
+  /// Select a window
   static String selectWindow(String sessionName, int windowIndex) {
     return 'tmux select-window -t ${_escapeArg(sessionName)}:$windowIndex';
   }
 
-  /// ウィンドウを削除
+  /// Kill a window
   static String killWindow(String sessionName, int windowIndex) {
     return 'tmux kill-window -t ${_escapeArg(sessionName)}:$windowIndex';
   }
 
-  /// ウィンドウ名を変更
+  /// Rename a window
   static String renameWindow(String sessionName, int windowIndex, String newName) {
     return 'tmux rename-window -t ${_escapeArg(sessionName)}:$windowIndex ${_escapeArg(newName)}';
   }
 
-  // ===== ペイン =====
+  // ===== Panes =====
 
-  /// ペイン一覧を取得するコマンド（詳細版）
+  /// Command to list panes (detailed version)
   ///
-  /// 出力フォーマット: `pane_index\tpane_id\tpane_active\tpane_current_command\tpane_title\tpane_width\tpane_height\tcursor_x\tcursor_y`
+  /// Output format: `pane_index\tpane_id\tpane_active\tpane_current_command\tpane_title\tpane_width\tpane_height\tcursor_x\tcursor_y`
   static String listPanes(String sessionName, int windowIndex) {
     return 'tmux list-panes -t ${_escapeArg(sessionName)}:$windowIndex -F "'
         '#{pane_index}$delimiter'
@@ -130,17 +130,17 @@ class TmuxCommands {
         '"';
   }
 
-  /// ペイン一覧を取得するコマンド（簡易版）
+  /// Command to list panes (simple version)
   ///
-  /// 出力フォーマット: `pane_index:pane_id:pane_active:pane_width x pane_height`
+  /// Output format: `pane_index:pane_id:pane_active:pane_width x pane_height`
   static String listPanesSimple(String sessionName, int windowIndex) {
     return 'tmux list-panes -t ${_escapeArg(sessionName)}:$windowIndex -F "'
         '#{pane_index}:#{pane_id}:#{pane_active}:#{pane_width}x#{pane_height}"';
   }
 
-  /// 全ペインを取得するコマンド（セッションツリー構築用）
+  /// Command to get all panes (for building session tree)
   ///
-  /// 出力フォーマット: 完全なツリー情報（window_flags含む）
+  /// Output format: complete tree information (including window_flags)
   static String listAllPanes() {
     return 'tmux list-panes -a -F "'
         '#{session_name}$delimiter'
@@ -164,12 +164,12 @@ class TmuxCommands {
         '"';
   }
 
-  /// ペインを選択
+  /// Select a pane
   static String selectPane(String paneId) {
     return 'tmux select-pane -t ${_escapeArg(paneId)}';
   }
 
-  /// ペインを分割（水平）
+  /// Split pane (horizontal)
   static String splitWindowHorizontal({
     required String target,
     String? startDirectory,
@@ -181,7 +181,7 @@ class TmuxCommands {
     return parts.join(' ');
   }
 
-  /// ペインを分割（垂直）
+  /// Split pane (vertical)
   static String splitWindowVertical({
     required String target,
     String? startDirectory,
@@ -193,19 +193,19 @@ class TmuxCommands {
     return parts.join(' ');
   }
 
-  /// ペインを削除
+  /// Kill a pane
   static String killPane(String paneId) {
     return 'tmux kill-pane -t ${_escapeArg(paneId)}';
   }
 
-  /// ペインをズーム/アンズーム
+  /// Zoom/unzoom a pane
   static String resizePane(String paneId, {bool zoom = true}) {
     return 'tmux resize-pane -t ${_escapeArg(paneId)} ${zoom ? '-Z' : '-z'}';
   }
 
-  // ===== 入力・キー送信 =====
+  // ===== Input and key sending =====
 
-  /// キーを送信
+  /// Send keys
   static String sendKeys(String paneId, String keys, {bool literal = false}) {
     final escapedKeys = _escapeArg(keys);
     if (literal) {
@@ -214,44 +214,44 @@ class TmuxCommands {
     return 'tmux send-keys -t ${_escapeArg(paneId)} $escapedKeys';
   }
 
-  /// Enterキーを送信
+  /// Send Enter key
   static String sendEnter(String paneId) {
     return 'tmux send-keys -t ${_escapeArg(paneId)} Enter';
   }
 
-  /// Ctrl+Cを送信
+  /// Send Ctrl+C
   static String sendInterrupt(String paneId) {
     return 'tmux send-keys -t ${_escapeArg(paneId)} C-c';
   }
 
-  /// エスケープキーを送信
+  /// Send Escape key
   static String sendEscape(String paneId) {
     return 'tmux send-keys -t ${_escapeArg(paneId)} Escape';
   }
 
-  /// カーソル位置とペインサイズを取得
+  /// Get cursor position and pane size
   static String getCursorPosition(String target) {
     return 'tmux display-message -p -t ${_escapeArg(target)} "#{cursor_x},#{cursor_y},#{pane_width},#{pane_height}"';
   }
 
-  /// ペインのモードを取得（copy-mode検出用）
+  /// Get pane mode (for copy-mode detection)
   static String getPaneMode(String target) {
     return 'tmux display-message -p -t ${_escapeArg(target)} "#{pane_mode}"';
   }
 
-  /// copy-modeに入る
+  /// Enter copy-mode
   static String enterCopyMode(String target) {
     return 'tmux copy-mode -t ${_escapeArg(target)}';
   }
 
-  /// copy-modeを終了（copy-mode中のみ有効、非copy-mode時は無害）
+  /// Exit copy-mode (only effective in copy-mode, harmless when not in copy-mode)
   static String cancelCopyMode(String target) {
     return 'tmux send-keys -t ${_escapeArg(target)} -X cancel';
   }
 
-  // ===== ペインコンテンツ =====
+  // ===== Pane content =====
 
-  /// ペインの内容をキャプチャ（ANSIエスケープ付き）
+  /// Capture pane content (with ANSI escape sequences)
   static String capturePane(
     String paneId, {
     int? startLine,
@@ -265,24 +265,24 @@ class TmuxCommands {
     return parts.join(' ');
   }
 
-  /// ペインの可視領域をキャプチャ
+  /// Capture the visible area of a pane
   static String capturePaneVisible(String paneId) {
     return capturePane(paneId, escapeSequences: true);
   }
 
-  /// ペインのスクロールバック全体をキャプチャ
+  /// Capture the entire scrollback buffer of a pane
   static String capturePaneAll(String paneId) {
     return capturePane(paneId, startLine: -32768, endLine: 32768);
   }
 
-  // ===== セッション/アタッチ =====
+  // ===== Session/Attach =====
 
-  /// セッションにアタッチ
+  /// Attach to a session
   static String attachSession(String sessionName) {
     return 'tmux attach-session -t ${_escapeArg(sessionName)}';
   }
 
-  /// セッションをデタッチ
+  /// Detach from a session
   static String detachClient({String? sessionName}) {
     if (sessionName != null) {
       return 'tmux detach-client -s ${_escapeArg(sessionName)}';
@@ -290,43 +290,43 @@ class TmuxCommands {
     return 'tmux detach-client';
   }
 
-  // ===== サーバー =====
+  // ===== Server =====
 
-  /// tmuxサーバーが起動しているか確認
+  /// Check if the tmux server is running
   static String serverInfo() {
     return 'tmux server-info 2>&1';
   }
 
-  /// tmuxバージョンを取得
+  /// Get tmux version
   static String version() {
     return 'tmux -V';
   }
 
-  /// tmuxサーバーを起動
+  /// Start the tmux server
   static String startServer() {
     return 'tmux start-server';
   }
 
-  /// tmuxサーバーを終了
+  /// Kill the tmux server
   static String killServer() {
     return 'tmux kill-server';
   }
 
-  // ===== レイアウト =====
+  // ===== Layout =====
 
-  /// 定義済みレイアウトを適用
+  /// Apply a predefined layout
   static String selectLayout(String target, TmuxLayout layout) {
     return 'tmux select-layout -t ${_escapeArg(target)} ${layout.name}';
   }
 
-  // ===== ユーティリティ =====
+  // ===== Utilities =====
 
-  /// 引数をエスケープ
+  /// Escape an argument
   static String _escapeArg(String arg) {
-    // シェルの特殊文字をエスケープ
-    // 特殊文字: スペース、クォート、バックスラッシュ、変数展開、バッククォート、その他
+    // Escape shell special characters
+    // Special characters: space, quotes, backslash, variable expansion, backtick, etc.
     if (arg.contains(RegExp(r'[\s"' "'" r'\\$`!{}\[\]<>|&;()]'))) {
-      // ダブルクォートでラップし、内部の特殊文字をエスケープ
+      // Wrap in double quotes and escape internal special characters
       final escaped = arg
           .replaceAll(r'\', r'\\')
           .replaceAll('"', r'\"')
@@ -337,32 +337,32 @@ class TmuxCommands {
     return arg;
   }
 
-  /// 複数のコマンドを連結
+  /// Chain multiple commands
   static String chain(List<String> commands) {
     return commands.join(' && ');
   }
 
-  /// コマンドをパイプで連結
+  /// Pipe multiple commands together
   static String pipe(List<String> commands) {
     return commands.join(' | ');
   }
 }
 
-/// tmuxレイアウト
+/// tmux layout
 enum TmuxLayout {
-  /// 均等に水平分割
+  /// Evenly split horizontally
   evenHorizontal,
 
-  /// 均等に垂直分割
+  /// Evenly split vertically
   evenVertical,
 
-  /// メインペインを上に配置
+  /// Main pane on top
   mainHorizontal,
 
-  /// メインペインを左に配置
+  /// Main pane on the left
   mainVertical,
 
-  /// タイル状に配置
+  /// Tiled arrangement
   tiled,
 }
 

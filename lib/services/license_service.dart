@@ -1,11 +1,11 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-/// フォントライセンスを登録するサービス
+/// Service for registering font licenses
 class LicenseService {
   static bool _initialized = false;
 
-  /// ライセンスを登録する（一度だけ実行）
+  /// Register licenses (executed only once)
   static void registerLicenses() {
     if (_initialized) return;
     _initialized = true;

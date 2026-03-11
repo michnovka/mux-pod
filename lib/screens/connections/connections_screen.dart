@@ -15,7 +15,7 @@ import '../../theme/design_colors.dart';
 import 'connection_form_screen.dart';
 import '../terminal/terminal_screen.dart';
 
-/// 検索バーの表示状態を管理するNotifier
+/// Notifier that manages the visibility state of the search bar
 class _SearchVisibleNotifier extends Notifier<bool> {
   @override
   bool build() => false;
@@ -28,7 +28,7 @@ final _searchVisibleProvider = NotifierProvider<_SearchVisibleNotifier, bool>(()
   return _SearchVisibleNotifier();
 });
 
-/// 接続一覧画面
+/// Connections list screen
 class ConnectionsScreen extends ConsumerWidget {
   const ConnectionsScreen({super.key});
 
@@ -111,7 +111,7 @@ class ConnectionsScreen extends ConsumerWidget {
             final wasVisible = isSearchVisible;
             ref.read(_searchVisibleProvider.notifier).toggle();
             if (wasVisible) {
-              // 検索を閉じる際にクエリをクリア
+              // Clear query when closing search
               ref.read(connectionSearchProvider.notifier).clear();
             }
           },
@@ -133,7 +133,7 @@ class ConnectionsScreen extends ConsumerWidget {
   }
 
   void _openSettings(BuildContext context, WidgetRef ref) {
-    // 設定タブ（インデックス3）に切り替え
+    // Switch to the Settings tab (index 3)
     ref.read(currentTabProvider.notifier).setTab(3);
   }
 
@@ -479,7 +479,7 @@ class ConnectionsScreen extends ConsumerWidget {
     String? sessionName,
   ) {
     ref.read(connectionsProvider.notifier).updateLastConnected(connection.id);
-    // 既存セッションを開く場合は最終アクセス日時を更新
+    // Update last accessed time when opening an existing session
     if (sessionName != null) {
       ref.read(activeSessionsProvider.notifier).touchSession(
             connection.id,
@@ -497,7 +497,7 @@ class ConnectionsScreen extends ConsumerWidget {
   }
 }
 
-/// 接続カード（展開可能、tmuxセッション表示）
+/// Connection card (expandable, displays tmux sessions)
 class _ConnectionCard extends ConsumerStatefulWidget {
   final Connection connection;
   final void Function(String? sessionName) onConnect;
@@ -525,13 +525,13 @@ class _ConnectionCardState extends ConsumerState<_ConnectionCard> {
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final colorScheme = Theme.of(context).colorScheme;
-    // アクティブセッションからこの接続のセッション情報を取得
+    // Get session info for this connection from active sessions
     final activeSessionsState = ref.watch(activeSessionsProvider);
     final activeSessions =
         activeSessionsState.getSessionsForConnection(widget.connection.id);
     final hasActiveSessions = activeSessions.isNotEmpty;
 
-    // 接続状態の判定（アクティブセッションがあるか、lastConnectedAtがあるか）
+    // Determine connection status (whether there are active sessions or lastConnectedAt exists)
     final isConnected = hasActiveSessions || widget.connection.lastConnectedAt != null;
     final statusColor = hasActiveSessions
         ? DesignColors.success
@@ -657,7 +657,7 @@ class _ConnectionCardState extends ConsumerState<_ConnectionCard> {
     setState(() {
       _isExpanded = !_isExpanded;
     });
-    // 展開時にセッション情報をフェッチ
+    // Fetch session info when expanded
     if (_isExpanded && _sessions.isEmpty && !_isLoadingSessions) {
       _fetchSessions();
     }
@@ -673,7 +673,7 @@ class _ConnectionCardState extends ConsumerState<_ConnectionCard> {
       final connection = widget.connection;
       final storage = SecureStorageService();
 
-      // 認証オプションを取得
+      // Get authentication options
       SshConnectOptions options;
       if (connection.authMethod == 'key' && connection.keyId != null) {
         final privateKey = await storage.getPrivateKey(connection.keyId!);
@@ -684,7 +684,7 @@ class _ConnectionCardState extends ConsumerState<_ConnectionCard> {
         options = SshConnectOptions(password: password, tmuxPath: connection.tmuxPath);
       }
 
-      // SSH接続してセッション一覧を取得
+      // Connect via SSH and retrieve the list of sessions
       final sshClient = SshClient();
       await sshClient.connect(
         host: connection.host,
@@ -705,7 +705,7 @@ class _ConnectionCardState extends ConsumerState<_ConnectionCard> {
       final sessions = TmuxParser.parseSessions(result.stdout);
       debugPrint('_fetchSessions: parsed ${sessions.length} sessions');
 
-      // 切断
+      // Disconnect
       await sshClient.disconnect();
 
       if (!mounted) return;
@@ -715,7 +715,7 @@ class _ConnectionCardState extends ConsumerState<_ConnectionCard> {
         _isLoadingSessions = false;
       });
 
-      // ActiveSessionsProviderを更新
+      // Update ActiveSessionsProvider
       ref.read(activeSessionsProvider.notifier).updateSessionsForConnection(
             connectionId: connection.id,
             connectionName: connection.name,
@@ -808,7 +808,7 @@ class _ConnectionCardState extends ConsumerState<_ConnectionCard> {
               ),
             )
           else
-            // セッションリスト（_sessionsまたはactiveSessionsを使用）
+            // Session list (using _sessions or activeSessions)
             ..._buildSessionItems(isDark, colorScheme),
           // New Session Button
           Padding(
@@ -876,7 +876,7 @@ class _ConnectionCardState extends ConsumerState<_ConnectionCard> {
   }
 
   List<Widget> _buildSessionItems(bool isDark, ColorScheme colorScheme) {
-    // _sessionsを使用（フェッチ結果）
+    // Use _sessions (fetch results)
     final sessions = _sessions;
     if (sessions.isEmpty) return [];
 
@@ -949,7 +949,7 @@ class _ConnectionCardState extends ConsumerState<_ConnectionCard> {
   }
 }
 
-/// 検索フィールドウィジェット
+/// Search field widget
 class _SearchField extends StatefulWidget {
   final String initialValue;
   final ValueChanged<String> onChanged;
@@ -1034,7 +1034,7 @@ class _SearchFieldState extends State<_SearchField> {
   }
 }
 
-/// ソートオプションタイル
+/// Sort option tile
 class _SortOptionTile extends StatelessWidget {
   final String title;
   final ConnectionSortOption option;
@@ -1069,7 +1069,7 @@ class _SortOptionTile extends StatelessWidget {
   }
 }
 
-/// 新規セッション作成ダイアログ
+/// New session creation dialog
 class _NewSessionDialog extends StatefulWidget {
   final List<String> existingSessionNames;
 

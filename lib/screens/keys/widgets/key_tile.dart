@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../providers/key_provider.dart';
 
-/// SSH鍵を表示するタイルウィジェット
+/// Tile widget for displaying an SSH key
 class KeyTile extends StatelessWidget {
   final SshKeyMeta keyMeta;
   final VoidCallback? onTap;

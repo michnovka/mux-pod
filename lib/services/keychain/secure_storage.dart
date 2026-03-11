@@ -1,15 +1,15 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-/// セキュアストレージサービス
+/// Secure storage service
 class SecureStorageService {
   final FlutterSecureStorage _storage;
 
   SecureStorageService()
       : _storage = const FlutterSecureStorage();
 
-  // ===== パスワード管理 =====
+  // ===== Password management =====
 
-  /// パスワードを保存
+  /// Save a password
   Future<void> savePassword(String connectionId, String password) async {
     await _storage.write(
       key: 'password_$connectionId',
@@ -17,19 +17,19 @@ class SecureStorageService {
     );
   }
 
-  /// パスワードを取得
+  /// Retrieve a password
   Future<String?> getPassword(String connectionId) async {
     return await _storage.read(key: 'password_$connectionId');
   }
 
-  /// パスワードを削除
+  /// Delete a password
   Future<void> deletePassword(String connectionId) async {
     await _storage.delete(key: 'password_$connectionId');
   }
 
-  // ===== SSH鍵管理 =====
+  // ===== SSH key management =====
 
-  /// 秘密鍵を保存
+  /// Save a private key
   Future<void> savePrivateKey(String keyId, String privateKey) async {
     await _storage.write(
       key: 'privatekey_$keyId',
@@ -37,17 +37,17 @@ class SecureStorageService {
     );
   }
 
-  /// 秘密鍵を取得
+  /// Retrieve a private key
   Future<String?> getPrivateKey(String keyId) async {
     return await _storage.read(key: 'privatekey_$keyId');
   }
 
-  /// 秘密鍵を削除
+  /// Delete a private key
   Future<void> deletePrivateKey(String keyId) async {
     await _storage.delete(key: 'privatekey_$keyId');
   }
 
-  /// パスフレーズを保存
+  /// Save a passphrase
   Future<void> savePassphrase(String keyId, String passphrase) async {
     await _storage.write(
       key: 'passphrase_$keyId',
@@ -55,24 +55,24 @@ class SecureStorageService {
     );
   }
 
-  /// パスフレーズを取得
+  /// Retrieve a passphrase
   Future<String?> getPassphrase(String keyId) async {
     return await _storage.read(key: 'passphrase_$keyId');
   }
 
-  /// パスフレーズを削除
+  /// Delete a passphrase
   Future<void> deletePassphrase(String keyId) async {
     await _storage.delete(key: 'passphrase_$keyId');
   }
 
-  // ===== ユーティリティ =====
+  // ===== Utilities =====
 
-  /// すべてのデータを削除
+  /// Delete all data
   Future<void> deleteAll() async {
     await _storage.deleteAll();
   }
 
-  /// 指定プレフィックスのキー一覧を取得
+  /// Retrieve a list of keys with the specified prefix
   Future<List<String>> getKeysWithPrefix(String prefix) async {
     final all = await _storage.readAll();
     return all.keys.where((key) => key.startsWith(prefix)).toList();

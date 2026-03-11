@@ -1,7 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// アプリ設定
+/// App settings
 class AppSettings {
   final bool darkMode;
   final double fontSize;
@@ -14,13 +14,13 @@ class AppSettings {
   final double minFontSize;
   final bool autoFitEnabled;
 
-  /// DirectInputモード（入力した文字を即座にターミナルに送信）
+  /// Direct input mode (immediately sends typed characters to the terminal)
   final bool directInputEnabled;
 
-  /// ターミナルカーソルの表示設定
+  /// Terminal cursor visibility setting
   final bool showTerminalCursor;
 
-  /// ペインナビゲーション方向の反転
+  /// Invert pane navigation direction
   final bool invertPaneNavigation;
 
   const AppSettings({
@@ -72,7 +72,7 @@ class AppSettings {
   }
 }
 
-/// 設定を管理するNotifier
+/// Notifier that manages settings
 class SettingsNotifier extends Notifier<AppSettings> {
   static const String _darkModeKey = 'settings_dark_mode';
   static const String _fontSizeKey = 'settings_font_size';
@@ -127,101 +127,101 @@ class SettingsNotifier extends Notifier<AppSettings> {
     }
   }
 
-  /// ダークモードを設定
+  /// Set dark mode
   Future<void> setDarkMode(bool value) async {
     state = state.copyWith(darkMode: value);
     await _saveSetting(_darkModeKey, value);
   }
 
-  /// フォントサイズを設定
+  /// Set font size
   Future<void> setFontSize(double value) async {
     state = state.copyWith(fontSize: value);
     await _saveSetting(_fontSizeKey, value);
   }
 
-  /// フォントファミリーを設定
+  /// Set font family
   Future<void> setFontFamily(String value) async {
     state = state.copyWith(fontFamily: value);
     await _saveSetting(_fontFamilyKey, value);
   }
 
-  /// 生体認証を設定
+  /// Set biometric authentication requirement
   Future<void> setRequireBiometricAuth(bool value) async {
     state = state.copyWith(requireBiometricAuth: value);
     await _saveSetting(_biometricKey, value);
   }
 
-  /// 通知を設定
+  /// Set notifications
   Future<void> setEnableNotifications(bool value) async {
     state = state.copyWith(enableNotifications: value);
     await _saveSetting(_notificationsKey, value);
   }
 
-  /// バイブレーションを設定
+  /// Set vibration
   Future<void> setEnableVibration(bool value) async {
     state = state.copyWith(enableVibration: value);
     await _saveSetting(_vibrationKey, value);
   }
 
-  /// 画面常時オンを設定
+  /// Set keep screen on
   Future<void> setKeepScreenOn(bool value) async {
     state = state.copyWith(keepScreenOn: value);
     await _saveSetting(_keepScreenOnKey, value);
   }
 
-  /// スクロールバック行数を設定
+  /// Set scrollback line count
   Future<void> setScrollbackLines(int value) async {
     state = state.copyWith(scrollbackLines: value);
     await _saveSetting(_scrollbackKey, value);
   }
 
-  /// 最小フォントサイズを設定
+  /// Set minimum font size
   Future<void> setMinFontSize(double value) async {
     state = state.copyWith(minFontSize: value);
     await _saveSetting(_minFontSizeKey, value);
   }
 
-  /// 自動フィットを設定
+  /// Set auto-fit
   Future<void> setAutoFitEnabled(bool value) async {
     state = state.copyWith(autoFitEnabled: value);
     await _saveSetting(_autoFitEnabledKey, value);
   }
 
-  /// DirectInputモードを設定
+  /// Set direct input mode
   Future<void> setDirectInputEnabled(bool value) async {
     state = state.copyWith(directInputEnabled: value);
     await _saveSetting(_directInputEnabledKey, value);
   }
 
-  /// DirectInputモードをトグル
+  /// Toggle direct input mode
   Future<void> toggleDirectInput() async {
     await setDirectInputEnabled(!state.directInputEnabled);
   }
 
-  /// ターミナルカーソル表示設定を設定
+  /// Set terminal cursor visibility
   Future<void> setShowTerminalCursor(bool value) async {
     state = state.copyWith(showTerminalCursor: value);
     await _saveSetting(_showTerminalCursorKey, value);
   }
 
-  /// ペインナビゲーション方向の反転を設定
+  /// Set pane navigation direction inversion
   Future<void> setInvertPaneNavigation(bool value) async {
     state = state.copyWith(invertPaneNavigation: value);
     await _saveSetting(_invertPaneNavKey, value);
   }
 
-  /// リロード
+  /// Reload
   Future<void> reload() async {
     await _loadSettings();
   }
 }
 
-/// 設定プロバイダー
+/// Settings provider
 final settingsProvider = NotifierProvider<SettingsNotifier, AppSettings>(() {
   return SettingsNotifier();
 });
 
-/// ダークモードプロバイダー（便利アクセス）
+/// Dark mode provider (convenience accessor)
 final darkModeProvider = Provider<bool>((ref) {
   return ref.watch(settingsProvider).darkMode;
 });

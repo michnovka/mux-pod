@@ -6,23 +6,23 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/keychain/secure_storage.dart';
 import '../services/keychain/ssh_key_service.dart';
 
-/// 鍵の由来を示すEnum
+/// Enum indicating the origin of the key
 enum KeySource {
-  generated, // アプリ内で生成
-  imported, // ファイル/ペーストでインポート
+  generated, // Generated within the app
+  imported, // Imported via file/paste
 }
 
-/// SSH鍵メタデータ
+/// SSH key metadata
 class SshKeyMeta {
   final String id;
   final String name;
   final String type; // 'ed25519' | 'rsa-2048' | 'rsa-3072' | 'rsa-4096'
   final String? publicKey;
-  final String? fingerprint; // SHA256フィンガープリント
+  final String? fingerprint; // SHA256 fingerprint
   final bool hasPassphrase;
   final DateTime createdAt;
   final String? comment;
-  final KeySource source; // 鍵の由来
+  final KeySource source; // Key origin
 
   const SshKeyMeta({
     required this.id,
@@ -92,7 +92,7 @@ class SshKeyMeta {
   }
 }
 
-/// 鍵一覧の状態
+/// State for the keys list
 class KeysState {
   final List<SshKeyMeta> keys;
   final bool isLoading;
@@ -117,7 +117,7 @@ class KeysState {
   }
 }
 
-/// SSH鍵を管理するNotifier
+/// Notifier that manages SSH keys
 class KeysNotifier extends Notifier<KeysState> {
   static const String _storageKey = 'ssh_keys_meta';
 
@@ -138,7 +138,7 @@ class KeysNotifier extends Notifier<KeysState> {
             .map((json) => SshKeyMeta.fromJson(json as Map<String, dynamic>))
             .toList();
 
-        // 作成日時で並び替え（降順）
+        // Sort by creation date (descending)
         keys.sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
         state = KeysState(keys: keys);
@@ -156,21 +156,21 @@ class KeysNotifier extends Notifier<KeysState> {
     await prefs.setString(_storageKey, jsonEncode(jsonList));
   }
 
-  /// 鍵を追加
+  /// Add a key
   Future<void> add(SshKeyMeta key) async {
     final keys = [...state.keys, key];
     state = state.copyWith(keys: keys);
     await _saveKeys();
   }
 
-  /// 鍵を削除
+  /// Remove a key
   Future<void> remove(String id) async {
     final keys = state.keys.where((k) => k.id != id).toList();
     state = state.copyWith(keys: keys);
     await _saveKeys();
   }
 
-  /// 鍵を更新
+  /// Update a key
   Future<void> update(SshKeyMeta key) async {
     final keys = state.keys.map((k) {
       return k.id == key.id ? key : k;
@@ -179,7 +179,7 @@ class KeysNotifier extends Notifier<KeysState> {
     await _saveKeys();
   }
 
-  /// 鍵を取得
+  /// Get a key
   SshKeyMeta? getById(String id) {
     try {
       return state.keys.firstWhere((k) => k.id == id);
@@ -188,24 +188,24 @@ class KeysNotifier extends Notifier<KeysState> {
     }
   }
 
-  /// リロード
+  /// Reload
   Future<void> reload() async {
     state = state.copyWith(isLoading: true, error: null);
     await _loadKeys();
   }
 }
 
-/// SSH鍵プロバイダー
+/// SSH keys provider
 final keysProvider = NotifierProvider<KeysNotifier, KeysState>(() {
   return KeysNotifier();
 });
 
-/// SSH鍵サービスプロバイダー
+/// SSH key service provider
 final sshKeyServiceProvider = Provider<SshKeyService>((ref) {
   return SshKeyService();
 });
 
-/// セキュアストレージプロバイダー
+/// Secure storage provider
 final secureStorageProvider = Provider<SecureStorageService>((ref) {
   return SecureStorageService();
 });

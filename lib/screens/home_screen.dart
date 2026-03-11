@@ -15,11 +15,11 @@ import 'notifications/notification_panes_screen.dart';
 import 'settings/settings_screen.dart';
 import 'terminal/terminal_screen.dart';
 
-/// 現在のタブインデックス Notifier
-/// タブ順序: 0=Servers, 1=Keys, 2=Dashboard, 3=Notify, 4=Settings
+/// Current tab index Notifier
+/// Tab order: 0=Servers, 1=Keys, 2=Dashboard, 3=Notify, 4=Settings
 class CurrentTabNotifier extends Notifier<int> {
   @override
-  int build() => 2; // Dashboard（中央）をデフォルトに
+  int build() => 2; // Default to Dashboard (center)
 
   void setTab(int index) => state = index;
 }
@@ -28,8 +28,8 @@ final currentTabProvider = NotifierProvider<CurrentTabNotifier, int>(
   CurrentTabNotifier.new,
 );
 
-/// ホーム画面（Bottom Navigation付き）
-/// タブ順序: Servers | Keys | [Dashboard] | Notify | Settings
+/// Home screen (with Bottom Navigation)
+/// Tab order: Servers | Keys | [Dashboard] | Notify | Settings
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
 
@@ -38,13 +38,13 @@ class HomeScreen extends ConsumerStatefulWidget {
 }
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
-  /// 一度でも表示されたタブを追跡（遅延ロード用）
-  final _initializedTabs = <int>{2}; // Dashboardはデフォルトなので初期化済み
+  /// Track tabs that have been displayed at least once (for lazy loading)
+  final _initializedTabs = <int>{2}; // Dashboard is already initialized since it's the default
 
   static const _tabs = <Widget>[
     ConnectionsScreen(),        // 0: Servers
     KeysScreen(),               // 1: Keys
-    DashboardScreen(),          // 2: Dashboard（中央）
+    DashboardScreen(),          // 2: Dashboard (center)
     NotificationPanesScreen(),  // 3: Alerts
     SettingsScreen(),           // 4: Settings
   ];
@@ -92,12 +92,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           child: Stack(
             clipBehavior: Clip.none,
             children: [
-              // 通常のナビゲーションアイテム（5つ均等配置）
+              // Regular navigation items (5 evenly spaced)
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  // Servers（左端）
+                  // Servers (leftmost)
                   _buildNavItem(
                     context,
                     ref,
@@ -106,7 +106,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     label: 'Servers',
                     isSelected: currentTab == 0,
                   ),
-                  // Keys（左寄り）
+                  // Keys (left side)
                   _buildNavItem(
                     context,
                     ref,
@@ -115,9 +115,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     label: 'Keys',
                     isSelected: currentTab == 1,
                   ),
-                  // 中央スペーサー（Dashboardボタンの場所）
+                  // Center spacer (placeholder for Dashboard button)
                   const SizedBox(width: 64),
-                  // Notify（右寄り）
+                  // Notify (right side)
                   _buildNavItem(
                     context,
                     ref,
@@ -126,7 +126,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                     label: 'Notify',
                     isSelected: currentTab == 3,
                   ),
-                  // Settings（右端）
+                  // Settings (rightmost)
                   _buildNavItem(
                     context,
                     ref,
@@ -137,7 +137,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   ),
                 ],
               ),
-              // Dashboard（中央・大きくはみ出すボタン）
+              // Dashboard (center, large protruding button)
               Positioned(
                 left: 0,
                 right: 0,
@@ -153,7 +153,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  /// 中央のDashboardボタン（大きくはみ出す）
+  /// Center Dashboard button (large and protruding)
   Widget _buildCenterButton(
     BuildContext context,
     WidgetRef ref, {
@@ -228,7 +228,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              // アクティブインジケーター
+              // Active indicator
               if (isSelected)
                 Container(
                   width: 24,
@@ -271,7 +271,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 }
 
-/// ターミナルタブ - アクティブセッション一覧表示
+/// Terminal tab - displays list of active sessions
 class _TerminalTab extends ConsumerStatefulWidget {
   const _TerminalTab();
 
@@ -285,7 +285,7 @@ class _TerminalTabState extends ConsumerState<_TerminalTab> {
   @override
   Widget build(BuildContext context) {
     final activeSessionsState = ref.watch(activeSessionsProvider);
-    // 接続中（isAttached == true）のセッションのみ表示
+    // Only display sessions that are connected (isAttached == true)
     final sessions = activeSessionsState.sessions
         .where((s) => s.isAttached)
         .toList();
@@ -385,7 +385,7 @@ class _TerminalTabState extends ConsumerState<_TerminalTab> {
 
       for (final connection in connections) {
         try {
-          // 認証オプションを取得
+          // Get authentication options
           SshConnectOptions options;
           if (connection.authMethod == 'key' && connection.keyId != null) {
             final privateKey = await storage.getPrivateKey(connection.keyId!);
@@ -396,7 +396,7 @@ class _TerminalTabState extends ConsumerState<_TerminalTab> {
             options = SshConnectOptions(password: password, tmuxPath: connection.tmuxPath);
           }
 
-          // SSH接続してセッション一覧を取得
+          // Connect via SSH and retrieve the list of sessions
           final sshClient = SshClient();
           await sshClient.connect(
             host: connection.host,
@@ -410,10 +410,10 @@ class _TerminalTabState extends ConsumerState<_TerminalTab> {
               ? TmuxParser.parseSessions(result.stdout)
               : <TmuxSession>[];
 
-          // 切断
+          // Disconnect
           await sshClient.disconnect();
 
-          // ActiveSessionsProviderを更新
+          // Update ActiveSessionsProvider
           ref.read(activeSessionsProvider.notifier).updateSessionsForConnection(
                 connectionId: connection.id,
                 connectionName: connection.name,
@@ -421,7 +421,7 @@ class _TerminalTabState extends ConsumerState<_TerminalTab> {
                 tmuxSessions: tmuxSessions,
               );
         } catch (e) {
-          // 個別の接続エラーは無視（他の接続は続行）
+          // Ignore individual connection errors (continue with other connections)
           debugPrint('Failed to reload sessions for ${connection.name}: $e');
         }
       }
@@ -457,7 +457,7 @@ class _TerminalTabState extends ConsumerState<_TerminalTab> {
   }
 }
 
-/// 空のセッション表示
+/// Empty sessions view
 class _EmptySessionsView extends StatelessWidget {
   const _EmptySessionsView();
 
@@ -507,7 +507,7 @@ class _EmptySessionsView extends StatelessWidget {
   }
 }
 
-/// セッションカード
+/// Session card
 class _SessionCard extends StatelessWidget {
   final ActiveSession session;
   final VoidCallback onTap;
@@ -651,7 +651,7 @@ class _SessionCard extends StatelessWidget {
                             color: isDark ? DesignColors.textMuted : DesignColors.textMutedLight,
                           ),
                         ),
-                        // 最後に開いていたペイン情報を表示
+                        // Display info about the last opened pane
                         if (session.lastPaneId != null) ...[
                           Text(
                             ' • ',

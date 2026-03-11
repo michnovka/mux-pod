@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-/// tmuxセッションツリー表示Widget
-/// 仮想スクロール対応: ListView.builder + 遅延ウィジェット生成
+/// tmux session tree display widget
+/// Supports virtual scrolling: ListView.builder + lazy widget creation
 class SessionTree extends StatelessWidget {
   final List<SessionNode> sessions;
   final String? selectedPaneId;
@@ -26,7 +26,7 @@ class SessionTree extends StatelessWidget {
 
     return ListView.builder(
       itemCount: sessions.length,
-      // 画面外のウィジェットを破棄してメモリ節約
+      // Discard off-screen widgets to save memory
       addAutomaticKeepAlives: false,
       addRepaintBoundaries: true,
       itemBuilder: (context, index) {
@@ -41,7 +41,7 @@ class SessionTree extends StatelessWidget {
   }
 }
 
-/// セッションタイル（展開状態を管理して遅延生成）
+/// Session tile (manages expansion state with lazy generation)
 class _SessionTile extends StatefulWidget {
   final SessionNode session;
   final String? selectedPaneId;
@@ -104,7 +104,7 @@ class _SessionTileState extends State<_SessionTile> {
         onExpansionChanged: (expanded) {
           setState(() => _isExpanded = expanded);
         },
-        // 展開時のみ子ウィジェットを生成（遅延生成でメモリ節約）
+        // Only generate child widgets when expanded (lazy generation to save memory)
         children: _isExpanded
             ? widget.session.windows.map((window) {
                 return _WindowTile(
@@ -120,7 +120,7 @@ class _SessionTileState extends State<_SessionTile> {
   }
 }
 
-/// ウィンドウタイル（展開状態を管理して遅延生成）
+/// Window tile (manages expansion state with lazy generation)
 class _WindowTile extends StatefulWidget {
   final String sessionName;
   final WindowNode window;
@@ -163,7 +163,7 @@ class _WindowTileState extends State<_WindowTile> {
         onExpansionChanged: (expanded) {
           setState(() => _isExpanded = expanded);
         },
-        // 展開時のみ子ウィジェットを生成（遅延生成でメモリ節約）
+        // Only generate child widgets when expanded (lazy generation to save memory)
         children: _isExpanded
             ? widget.window.panes.map((pane) {
                 return _buildPaneNode(context, pane);
@@ -195,7 +195,7 @@ class _WindowTileState extends State<_WindowTile> {
   }
 }
 
-/// セッションノード
+/// Session node
 class SessionNode {
   final String name;
   final bool attached;
@@ -208,7 +208,7 @@ class SessionNode {
   });
 }
 
-/// ウィンドウノード
+/// Window node
 class WindowNode {
   final int index;
   final String name;
@@ -223,7 +223,7 @@ class WindowNode {
   });
 }
 
-/// ペインノード
+/// Pane node
 class PaneNode {
   final int index;
   final String id;

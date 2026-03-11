@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'design_colors.dart';
 
-/// アプリテーマ定義（HTMLデザイン仕様準拠）
+/// App theme definition (compliant with HTML design spec)
 class AppTheme {
   AppTheme._();
 
-  /// Space Grotesk ベースのテキストテーマ
+  /// Space Grotesk based text theme
   static TextTheme get _textTheme {
     return GoogleFonts.spaceGroteskTextTheme(const TextTheme(
       displayLarge: TextStyle(fontWeight: FontWeight.w700),
@@ -27,14 +27,14 @@ class AppTheme {
     ));
   }
 
-  /// JetBrains Mono モノスペースフォント
+  /// JetBrains Mono monospace font
   static TextStyle get monoTextStyle {
     return GoogleFonts.jetBrainsMono(
       fontWeight: FontWeight.w400,
     );
   }
 
-  /// ダークテーマ
+  /// Dark theme
   static ThemeData get dark {
     final colorScheme = ColorScheme.dark(
       primary: DesignColors.primary,
@@ -249,7 +249,7 @@ class AppTheme {
     );
   }
 
-  /// ライトテーマ
+  /// Light theme
   static ThemeData get light {
     final colorScheme = ColorScheme.light(
       primary: DesignColors.primary,
@@ -478,7 +478,7 @@ class AppTheme {
     );
   }
 
-  /// テーマモードを取得
+  /// Get theme mode
   static ThemeMode getThemeMode(String theme) {
     switch (theme) {
       case 'dark':
