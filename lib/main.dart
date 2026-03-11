@@ -4,13 +4,17 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_muxpod/providers/settings_provider.dart';
 import 'package:flutter_muxpod/screens/home_screen.dart';
 import 'package:flutter_muxpod/services/license_service.dart';
+import 'package:flutter_muxpod/services/version_info.dart';
 import 'package:flutter_muxpod/theme/app_theme.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // フォントライセンスを登録
   LicenseService.registerLicenses();
+
+  // バージョン情報を初期化
+  await VersionInfo.initialize();
 
   // ステータスバーを透明に
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
