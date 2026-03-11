@@ -39,10 +39,16 @@ class TmuxParser {
   static TmuxSession? parseSessionLine(String line, {String delimiter = defaultDelimiter}) {
     final parts = line.split(delimiter);
     // 区切り文字が含まれない行はtmux出力ではない（シェルエラー等）
-    if (parts.length < 2) return null;
+    if (parts.length < 2) {
+      debugPrint('parseSessionLine: skipping line with ${parts.length} fields (expected ≥2): "$line"');
+      return null;
+    }
 
     final name = parts[0];
-    if (name.isEmpty) return null;
+    if (name.isEmpty) {
+      debugPrint('parseSessionLine: skipping line with empty session name: "$line"');
+      return null;
+    }
 
     return TmuxSession(
       name: name,
@@ -102,10 +108,16 @@ class TmuxParser {
   /// 単一のウィンドウ行をパース
   static TmuxWindow? parseWindowLine(String line, {String delimiter = defaultDelimiter}) {
     final parts = line.split(delimiter);
-    if (parts.isEmpty) return null;
+    if (parts.length < 2) {
+      debugPrint('parseWindowLine: skipping line with ${parts.length} fields (expected ≥2): "$line"');
+      return null;
+    }
 
     final index = int.tryParse(parts[0]);
-    if (index == null) return null;
+    if (index == null) {
+      debugPrint('parseWindowLine: skipping line with non-integer index "${parts[0]}": "$line"');
+      return null;
+    }
 
     return TmuxWindow(
       index: index,
@@ -165,13 +177,22 @@ class TmuxParser {
   /// 単一のペイン行をパース
   static TmuxPane? parsePaneLine(String line, {String delimiter = defaultDelimiter}) {
     final parts = line.split(delimiter);
-    if (parts.length < 2) return null;
+    if (parts.length < 2) {
+      debugPrint('parsePaneLine: skipping line with ${parts.length} fields (expected ≥2): "$line"');
+      return null;
+    }
 
     final index = int.tryParse(parts[0]);
-    if (index == null) return null;
+    if (index == null) {
+      debugPrint('parsePaneLine: skipping line with non-integer index "${parts[0]}": "$line"');
+      return null;
+    }
 
     final id = parts[1];
-    if (id.isEmpty) return null;
+    if (id.isEmpty) {
+      debugPrint('parsePaneLine: skipping line with empty pane id: "$line"');
+      return null;
+    }
 
     return TmuxPane(
       index: index,
@@ -257,7 +278,10 @@ class TmuxParser {
       if (trimmed.isEmpty) continue;
 
       final parts = trimmed.split(delimiter);
-      if (parts.length < 10) continue;
+      if (parts.length < 10) {
+        debugPrint('parseFullTree: skipping line with ${parts.length} fields (expected ≥10): "$trimmed"');
+        continue;
+      }
 
       // フォーマット: session_name, session_id, window_index, window_id, window_name, window_active,
       //              pane_index, pane_id, pane_active, pane_width, pane_height, pane_left, pane_top,
