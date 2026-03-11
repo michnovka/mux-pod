@@ -11,14 +11,14 @@ void main() {
         final resultZero = FontCalculator.calculate(
           screenWidth: 400.0,
           paneCharWidth: 0,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 4.0, // Low min to avoid clamping
         );
 
         final resultDefault = FontCalculator.calculate(
           screenWidth: 400.0,
           paneCharWidth: FontCalculator.defaultPaneWidth, // 80
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 4.0,
         );
 
@@ -32,14 +32,14 @@ void main() {
         final resultNegative = FontCalculator.calculate(
           screenWidth: 400.0,
           paneCharWidth: -10,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 4.0,
         );
 
         final resultDefault = FontCalculator.calculate(
           screenWidth: 400.0,
           paneCharWidth: FontCalculator.defaultPaneWidth, // 80
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 4.0,
         );
 
@@ -52,14 +52,14 @@ void main() {
         final resultNarrow = FontCalculator.calculate(
           screenWidth: 400.0,
           paneCharWidth: 5,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 4.0,
         );
 
         final resultMinWidth = FontCalculator.calculate(
           screenWidth: 400.0,
           paneCharWidth: FontCalculator.minPaneWidth, // 10
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 4.0,
         );
 
@@ -71,7 +71,7 @@ void main() {
         final result = FontCalculator.calculate(
           screenWidth: 0.0,
           paneCharWidth: 80,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 8.0,
         );
 
@@ -83,7 +83,7 @@ void main() {
         final result = FontCalculator.calculate(
           screenWidth: -100.0,
           paneCharWidth: 80,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 8.0,
         );
 
@@ -95,7 +95,7 @@ void main() {
         final result = FontCalculator.calculate(
           screenWidth: 800.0, // Wider screen to ensure font fits
           paneCharWidth: 80,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 8.0,
         );
 
@@ -109,7 +109,7 @@ void main() {
         final result = FontCalculator.calculate(
           screenWidth: 100.0, // Very narrow screen
           paneCharWidth: 200,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 8.0,
         );
 
@@ -121,7 +121,7 @@ void main() {
         final result = FontCalculator.calculate(
           screenWidth: 100.0, // Very narrow screen
           paneCharWidth: 200,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 10.0,
         );
 
@@ -133,7 +133,7 @@ void main() {
         final result = FontCalculator.calculate(
           screenWidth: 2000.0, // Very wide screen
           paneCharWidth: 80,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 8.0,
         );
 
@@ -145,14 +145,14 @@ void main() {
         final result40 = FontCalculator.calculate(
           screenWidth: 400.0,
           paneCharWidth: 40,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 4.0, // Very low min to avoid clamping
         );
 
         final result80 = FontCalculator.calculate(
           screenWidth: 400.0,
           paneCharWidth: 80,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 4.0,
         );
 
@@ -163,14 +163,14 @@ void main() {
         final result400 = FontCalculator.calculate(
           screenWidth: 400.0,
           paneCharWidth: 80,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 4.0, // Very low min to avoid clamping
         );
 
         final result800 = FontCalculator.calculate(
           screenWidth: 800.0,
           paneCharWidth: 80,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
           minFontSize: 4.0,
         );
 
@@ -180,15 +180,15 @@ void main() {
 
     group('measureCharWidthRatio', () {
       test('returns positive ratio', () {
-        final ratio = FontCalculator.measureCharWidthRatio('JetBrains Mono');
+        final ratio = FontCalculator.measureCharWidthRatio('HackGen Console');
         expect(ratio, greaterThan(0.0));
         // Ratio can be >= 1 for some fonts, especially fallback fonts
         expect(ratio, lessThan(2.0));
       });
 
       test('returns consistent ratio for same font family', () {
-        final ratio1 = FontCalculator.measureCharWidthRatio('JetBrains Mono');
-        final ratio2 = FontCalculator.measureCharWidthRatio('JetBrains Mono');
+        final ratio1 = FontCalculator.measureCharWidthRatio('HackGen Console');
+        final ratio2 = FontCalculator.measureCharWidthRatio('HackGen Console');
         expect(ratio1, equals(ratio2));
       });
     });
@@ -198,7 +198,7 @@ void main() {
         final width = FontCalculator.calculateTerminalWidth(
           paneCharWidth: 80,
           fontSize: 14.0,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
         );
 
         // width = paneCharWidth * charWidthRatio * fontSize
@@ -209,13 +209,13 @@ void main() {
         final width80 = FontCalculator.calculateTerminalWidth(
           paneCharWidth: 80,
           fontSize: 14.0,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
         );
 
         final width120 = FontCalculator.calculateTerminalWidth(
           paneCharWidth: 120,
           fontSize: 14.0,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
         );
 
         expect(width120, greaterThan(width80));
@@ -225,13 +225,13 @@ void main() {
         final width14 = FontCalculator.calculateTerminalWidth(
           paneCharWidth: 80,
           fontSize: 14.0,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
         );
 
         final width20 = FontCalculator.calculateTerminalWidth(
           paneCharWidth: 80,
           fontSize: 20.0,
-          fontFamily: 'JetBrains Mono',
+          fontFamily: 'HackGen Console',
         );
 
         expect(width20, greaterThan(width14));

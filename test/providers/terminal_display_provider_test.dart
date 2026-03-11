@@ -1,12 +1,22 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_muxpod/providers/terminal_display_provider.dart';
 import 'package:flutter_muxpod/providers/settings_provider.dart';
 import 'package:flutter_muxpod/services/tmux/tmux_parser.dart';
 
+/// Test override for SettingsNotifier that uses a bundled font (no google_fonts fetch)
+class _TestSettingsNotifier extends SettingsNotifier {
+  @override
+  AppSettings build() {
+    return const AppSettings(fontFamily: 'HackGen Console');
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  GoogleFonts.config.allowRuntimeFetching = false;
 
   group('TerminalDisplayState', () {
     test('has correct default values', () {
@@ -100,9 +110,15 @@ void main() {
     late ProviderContainer container;
 
     setUp(() {
-      // Mock SharedPreferences
-      SharedPreferences.setMockInitialValues({});
-      container = ProviderContainer();
+      SharedPreferences.setMockInitialValues({
+        'settings_font_family': 'HackGen Console',
+      });
+      container = ProviderContainer(
+        overrides: [
+          // Override settings to use a bundled font, avoiding google_fonts network fetch
+          settingsProvider.overrideWith(() => _TestSettingsNotifier()),
+        ],
+      );
     });
 
     tearDown(() {
