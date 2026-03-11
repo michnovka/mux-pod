@@ -140,13 +140,7 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
 
         developer.log('Loaded ${connections.length} connections from storage', name: 'ConnectionsProvider');
 
-        // 最終接続日時で並び替え（降順）
-        connections.sort((a, b) {
-          final aTime = a.lastConnectedAt ?? a.createdAt;
-          final bTime = b.lastConnectedAt ?? b.createdAt;
-          return bTime.compareTo(aTime);
-        });
-
+        // ソートはfilteredConnectionsProviderで行うため、ここではソートしない
         state = ConnectionsState(connections: connections);
         developer.log('State updated with ${connections.length} connections', name: 'ConnectionsProvider');
       } else {

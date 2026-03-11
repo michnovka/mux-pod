@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -158,17 +159,8 @@ class SshNotifier extends Notifier<SshState> {
 
   /// 再接続遅延を計算（指数バックオフ）
   int _calculateDelay(int attempt) {
-    final delay = (_baseDelayMs * _pow(_backoffMultiplier, attempt)).round();
+    final delay = (_baseDelayMs * math.pow(_backoffMultiplier, attempt)).round();
     return delay.clamp(_baseDelayMs, _maxDelayMs);
-  }
-
-  /// 累乗計算
-  double _pow(double base, int exponent) {
-    double result = 1.0;
-    for (int i = 0; i < exponent; i++) {
-      result *= base;
-    }
-    return result;
   }
 
   /// SSHクライアントを取得
