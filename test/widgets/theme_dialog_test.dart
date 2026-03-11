@@ -27,11 +27,11 @@ void main() {
         ),
       );
 
-      final darkRadio = find.byWidgetPredicate(
+      final radioGroup = find.byWidgetPredicate(
         (widget) =>
-            widget is RadioListTile<bool> && widget.value == true && widget.groupValue == true,
+            widget is RadioGroup<bool> && widget.groupValue == true,
       );
-      expect(darkRadio, findsOneWidget);
+      expect(radioGroup, findsOneWidget);
     });
 
     testWidgets('light mode is selected when isDarkMode is false', (tester) async {
@@ -43,11 +43,11 @@ void main() {
         ),
       );
 
-      final lightRadio = find.byWidgetPredicate(
+      final radioGroup = find.byWidgetPredicate(
         (widget) =>
-            widget is RadioListTile<bool> && widget.value == false && widget.groupValue == false,
+            widget is RadioGroup<bool> && widget.groupValue == false,
       );
-      expect(lightRadio, findsOneWidget);
+      expect(radioGroup, findsOneWidget);
     });
 
     testWidgets('selecting light returns false', (tester) async {

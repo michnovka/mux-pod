@@ -29,14 +29,13 @@ void main() {
         ),
       );
 
-      // Find the selected radio button
-      final radioFira = find.byWidgetPredicate(
+      // Verify RadioGroup has correct groupValue
+      final radioGroup = find.byWidgetPredicate(
         (widget) =>
-            widget is RadioListTile<String> &&
-            widget.value == 'Fira Code' &&
+            widget is RadioGroup<String> &&
             widget.groupValue == 'Fira Code',
       );
-      expect(radioFira, findsOneWidget);
+      expect(radioGroup, findsOneWidget);
     });
 
     testWidgets('selecting a family returns the value', (tester) async {

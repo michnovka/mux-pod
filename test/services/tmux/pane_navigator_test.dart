@@ -1,5 +1,3 @@
-import 'dart:ui' show Offset;
-
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_muxpod/services/tmux/pane_navigator.dart';
 import 'package:flutter_muxpod/services/tmux/tmux_parser.dart';

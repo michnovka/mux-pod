@@ -649,7 +649,7 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         DropdownButtonFormField<String>(
-          value: _selectedKeyId,
+          initialValue: _selectedKeyId,
           decoration: InputDecoration(
             prefixIcon: Icon(Icons.vpn_key_outlined, color: mutedColor, size: 20),
             filled: true,

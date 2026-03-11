@@ -31,12 +31,12 @@ void main() {
         ),
       );
 
-      // Find the selected radio button
-      final radio16 = find.byWidgetPredicate(
+      // Verify RadioGroup has correct groupValue
+      final radioGroup = find.byWidgetPredicate(
         (widget) =>
-            widget is RadioListTile<double> && widget.value == 16.0 && widget.groupValue == 16.0,
+            widget is RadioGroup<double> && widget.groupValue == 16.0,
       );
-      expect(radio16, findsOneWidget);
+      expect(radioGroup, findsOneWidget);
     });
 
     testWidgets('selecting a size returns the value', (tester) async {

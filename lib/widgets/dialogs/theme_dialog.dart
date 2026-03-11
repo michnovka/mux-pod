@@ -13,30 +13,26 @@ class ThemeDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     return AlertDialog(
       title: const Text('Theme'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          RadioListTile<bool>(
-            title: const Text('Dark'),
-            value: true,
-            groupValue: isDarkMode,
-            onChanged: (value) {
-              if (value != null) {
-                Navigator.pop(context, value);
-              }
-            },
-          ),
-          RadioListTile<bool>(
-            title: const Text('Light'),
-            value: false,
-            groupValue: isDarkMode,
-            onChanged: (value) {
-              if (value != null) {
-                Navigator.pop(context, value);
-              }
-            },
-          ),
-        ],
+      content: RadioGroup<bool>(
+        groupValue: isDarkMode,
+        onChanged: (value) {
+          if (value != null) {
+            Navigator.pop(context, value);
+          }
+        },
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            RadioListTile<bool>(
+              title: const Text('Dark'),
+              value: true,
+            ),
+            RadioListTile<bool>(
+              title: const Text('Light'),
+              value: false,
+            ),
+          ],
+        ),
       ),
       actions: [
         TextButton(
