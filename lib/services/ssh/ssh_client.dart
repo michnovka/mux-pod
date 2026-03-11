@@ -123,6 +123,7 @@ class SshClient {
   SshConnectionState _state = SshConnectionState.disconnected;
   SshEvents _events = const SshEvents();
   String? _lastError;
+  bool _isDisposed = false;
 
   StreamSubscription<Uint8List>? _stdoutSubscription;
   StreamSubscription<Uint8List>? _stderrSubscription;
@@ -184,6 +185,10 @@ class SshClient {
     required String username,
     required SshConnectOptions options,
   }) async {
+    if (_isDisposed) {
+      throw SshConnectionError('Client has been disposed');
+    }
+
     // バリデーション
     _validateConnectionParams(host, port, username, options);
 
@@ -547,6 +552,9 @@ class SshClient {
   ///
   /// [options] シェルオプション
   Future<void> startShell([ShellOptions options = const ShellOptions()]) async {
+    if (_isDisposed) {
+      throw SshConnectionError('Client has been disposed');
+    }
     if (!isConnected || _client == null) {
       throw SshConnectionError('Not connected');
     }
@@ -572,6 +580,13 @@ class SshClient {
         onError: _handleError,
       );
     } catch (e) {
+      // Clean up any partially created subscriptions
+      await _stdoutSubscription?.cancel();
+      _stdoutSubscription = null;
+      await _stderrSubscription?.cancel();
+      _stderrSubscription = null;
+      _session?.close();
+      _session = null;
       throw SshConnectionError('Failed to start shell: $e', e);
     }
   }
@@ -597,7 +612,7 @@ class SshClient {
   ///
   /// [data] 送信データ（文字列）
   void write(String data) {
-    if (!isConnected || _session == null) {
+    if (_isDisposed || !isConnected || _session == null) {
       throw SshConnectionError('Not connected or shell not started');
     }
     _session!.write(utf8.encode(data));
@@ -607,7 +622,7 @@ class SshClient {
   ///
   /// [data] 送信データ（バイト）
   void writeBytes(Uint8List data) {
-    if (!isConnected || _session == null) {
+    if (_isDisposed || !isConnected || _session == null) {
       throw SshConnectionError('Not connected or shell not started');
     }
     _session!.write(data);
@@ -636,7 +651,7 @@ class SshClient {
   /// [timeout] タイムアウト時間
   /// 戻り値: コマンド出力
   Future<String> exec(String command, {Duration? timeout}) async {
-    if (!isConnected || _client == null) {
+    if (_isDisposed || !isConnected || _client == null) {
       throw SshConnectionError('Not connected');
     }
 
@@ -711,7 +726,7 @@ class SshClient {
   /// [timeout] タイムアウト時間
   /// 戻り値: コマンド出力
   Future<String> execPersistent(String command, {Duration? timeout}) async {
-    if (!isConnected || _client == null) {
+    if (_isDisposed || !isConnected || _client == null) {
       throw SshConnectionError('Not connected');
     }
 
@@ -748,7 +763,7 @@ class SshClient {
     String command, {
     Duration? timeout,
   }) async {
-    if (!isConnected || _client == null) {
+    if (_isDisposed || !isConnected || _client == null) {
       throw SshConnectionError('Not connected');
     }
 
@@ -824,6 +839,8 @@ class SshClient {
 
   /// リソースを解放する
   Future<void> dispose() async {
+    if (_isDisposed) return;
+    _isDisposed = true;
     await disconnect();
     await _connectionStateController.close();
   }

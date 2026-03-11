@@ -23,6 +23,7 @@ class NetworkMonitor {
   final _statusController = StreamController<NetworkStatus>.broadcast();
 
   NetworkStatus _currentStatus = NetworkStatus.online;
+  bool _isDisposed = false;
 
   /// 現在のネットワーク状態
   NetworkStatus get currentStatus => _currentStatus;
@@ -35,6 +36,8 @@ class NetworkMonitor {
 
   /// 監視を開始
   Future<void> start() async {
+    if (_isDisposed || _subscription != null) return;
+
     // 初期状態を取得
     final results = await _connectivity.checkConnectivity();
     _updateStatus(results);
@@ -51,18 +54,13 @@ class NetworkMonitor {
 
   /// ステータスを更新
   void _updateStatus(List<ConnectivityResult> results) {
+    if (_isDisposed) return;
+
     final newStatus = _determineStatus(results);
 
     if (newStatus != _currentStatus) {
-      final oldStatus = _currentStatus;
       _currentStatus = newStatus;
       _statusController.add(newStatus);
-
-      // オフラインからオンラインへの復帰を検知
-      if (oldStatus == NetworkStatus.offline &&
-          newStatus == NetworkStatus.online) {
-        // 復帰イベントは statusStream で通知される
-      }
     }
   }
 
@@ -79,6 +77,8 @@ class NetworkMonitor {
 
   /// リソースを解放
   Future<void> dispose() async {
+    if (_isDisposed) return;
+    _isDisposed = true;
     await stop();
     await _statusController.close();
   }
