@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 
-/// ターミナル用カラー定義
+/// Terminal color definitions
 class TerminalColors {
   TerminalColors._();
 
-  // === ANSI 標準16色 ===
+  // === ANSI Standard 16 Colors ===
 
   static const Color black = Color(0xFF000000);
   static const Color red = Color(0xFFCD0000);
@@ -25,7 +25,7 @@ class TerminalColors {
   static const Color brightCyan = Color(0xFF00FFFF);
   static const Color brightWhite = Color(0xFFFFFFFF);
 
-  /// 標準16色のリスト
+  /// List of standard 16 colors
   static const List<Color> ansi16 = [
     black,
     red,
@@ -45,9 +45,9 @@ class TerminalColors {
     brightWhite,
   ];
 
-  // === ターミナルテーマ ===
+  // === Terminal Themes ===
 
-  /// デフォルトダークテーマ
+  /// Default dark theme
   static const TerminalTheme darkTheme = TerminalTheme(
     foreground: Color(0xFFD4D4D4),
     background: Color(0xFF1E1E1E),
@@ -56,7 +56,7 @@ class TerminalColors {
     selection: Color(0x40FFFFFF),
   );
 
-  /// デフォルトライトテーマ
+  /// Default light theme
   static const TerminalTheme lightTheme = TerminalTheme(
     foreground: Color(0xFF333333),
     background: Color(0xFFFAFAFA),
@@ -65,7 +65,7 @@ class TerminalColors {
     selection: Color(0x40000000),
   );
 
-  /// Monokai テーマ
+  /// Monokai theme
   static const TerminalTheme monokaiTheme = TerminalTheme(
     foreground: Color(0xFFF8F8F2),
     background: Color(0xFF272822),
@@ -74,7 +74,7 @@ class TerminalColors {
     selection: Color(0x4049483E),
   );
 
-  /// Dracula テーマ
+  /// Dracula theme
   static const TerminalTheme draculaTheme = TerminalTheme(
     foreground: Color(0xFFF8F8F2),
     background: Color(0xFF282A36),
@@ -83,14 +83,14 @@ class TerminalColors {
     selection: Color(0x4044475A),
   );
 
-  /// 256色パレットを生成
+  /// Generate 256-color palette
   static List<Color> generate256Palette() {
     final colors = <Color>[];
 
-    // 0-15: 標準16色
+    // 0-15: Standard 16 colors
     colors.addAll(ansi16);
 
-    // 16-231: 6x6x6 カラーキューブ
+    // 16-231: 6x6x6 color cube
     for (int r = 0; r < 6; r++) {
       for (int g = 0; g < 6; g++) {
         for (int b = 0; b < 6; b++) {
@@ -102,7 +102,7 @@ class TerminalColors {
       }
     }
 
-    // 232-255: グレースケール
+    // 232-255: Grayscale
     for (int i = 0; i < 24; i++) {
       final gray = 8 + i * 10;
       colors.add(Color.fromARGB(255, gray, gray, gray));
@@ -112,7 +112,7 @@ class TerminalColors {
   }
 }
 
-/// ターミナルテーマ
+/// Terminal theme
 class TerminalTheme {
   final Color foreground;
   final Color background;

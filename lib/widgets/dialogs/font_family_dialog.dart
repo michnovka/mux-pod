@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../services/terminal/terminal_font_styles.dart';
 
-/// フォントファミリー選択ダイアログ
+/// Font family selection dialog
 class FontFamilyDialog extends StatelessWidget {
   final String currentFamily;
 

@@ -3,19 +3,19 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// ネットワーク状態
+/// Network status
 enum NetworkStatus {
-  /// ネットワーク利用可能
+  /// Network available
   online,
 
-  /// ネットワーク利用不可
+  /// Network unavailable
   offline,
 }
 
-/// ネットワーク状態を監視するサービス
+/// Service that monitors network status
 ///
-/// connectivity_plusを使用してネットワークの接続/切断を検知し、
-/// SSH再接続のトリガーとして使用する。
+/// Uses connectivity_plus to detect network connection/disconnection,
+/// and uses it as a trigger for SSH reconnection.
 class NetworkMonitor {
   final Connectivity _connectivity = Connectivity();
   StreamSubscription<List<ConnectivityResult>>? _subscription;
@@ -25,34 +25,34 @@ class NetworkMonitor {
   NetworkStatus _currentStatus = NetworkStatus.online;
   bool _isDisposed = false;
 
-  /// 現在のネットワーク状態
+  /// Current network status
   NetworkStatus get currentStatus => _currentStatus;
 
-  /// ネットワーク状態のストリーム
+  /// Network status stream
   Stream<NetworkStatus> get statusStream => _statusController.stream;
 
-  /// ネットワークが利用可能か
+  /// Whether the network is available
   bool get isOnline => _currentStatus == NetworkStatus.online;
 
-  /// 監視を開始
+  /// Start monitoring
   Future<void> start() async {
     if (_isDisposed || _subscription != null) return;
 
-    // 初期状態を取得
+    // Get initial status
     final results = await _connectivity.checkConnectivity();
     _updateStatus(results);
 
-    // 変化を監視
+    // Monitor changes
     _subscription = _connectivity.onConnectivityChanged.listen(_updateStatus);
   }
 
-  /// 監視を停止
+  /// Stop monitoring
   Future<void> stop() async {
     await _subscription?.cancel();
     _subscription = null;
   }
 
-  /// ステータスを更新
+  /// Update status
   void _updateStatus(List<ConnectivityResult> results) {
     if (_isDisposed) return;
 
@@ -64,9 +64,9 @@ class NetworkMonitor {
     }
   }
 
-  /// ConnectivityResultからNetworkStatusを判定
+  /// Determine NetworkStatus from ConnectivityResult
   NetworkStatus _determineStatus(List<ConnectivityResult> results) {
-    // none以外の接続があればオンライン
+    // Online if there is any connection other than none
     for (final result in results) {
       if (result != ConnectivityResult.none) {
         return NetworkStatus.online;
@@ -75,7 +75,7 @@ class NetworkMonitor {
     return NetworkStatus.offline;
   }
 
-  /// リソースを解放
+  /// Release resources
   Future<void> dispose() async {
     if (_isDisposed) return;
     _isDisposed = true;
@@ -84,11 +84,11 @@ class NetworkMonitor {
   }
 }
 
-/// ネットワークモニターのプロバイダー
+/// Provider for the network monitor
 final networkMonitorProvider = Provider<NetworkMonitor>((ref) {
   final monitor = NetworkMonitor();
 
-  // 自動的に監視を開始
+  // Automatically start monitoring
   monitor.start();
 
   ref.onDispose(() {
@@ -98,7 +98,7 @@ final networkMonitorProvider = Provider<NetworkMonitor>((ref) {
   return monitor;
 });
 
-/// ネットワーク状態のストリームプロバイダー
+/// Stream provider for network status
 final networkStatusProvider = StreamProvider<NetworkStatus>((ref) {
   final monitor = ref.watch(networkMonitorProvider);
   return monitor.statusStream;

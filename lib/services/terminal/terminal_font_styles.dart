@@ -1,21 +1,21 @@
 import 'package:flutter/painting.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-/// ターミナル用等幅フォントスタイル
+/// Monospace font styles for terminal
 ///
-/// Google Fontsの等幅フォントおよびバンドルされた日本語対応フォントを
-/// 統一的に取得する。
+/// Provides a unified way to retrieve Google Fonts monospace fonts
+/// and bundled Japanese-compatible fonts.
 class TerminalFontStyles {
   TerminalFontStyles._();
 
-  /// バンドルフォント（日本語対応）のファミリー名
+  /// Family names of bundled fonts (Japanese-compatible)
   static const List<String> _bundledFontFamilies = [
     'HackGen Console',
     'UDEV Gothic NF',
   ];
 
-  /// フォントフォールバック（特殊記号・絵文字用）
-  /// Nerd Fontsや記号をサポートするフォントにフォールバック
+  /// Font fallback (for special symbols and emoji)
+  /// Falls back to fonts that support Nerd Fonts and symbols
   static const List<String> _fontFamilyFallback = [
     'Noto Sans Symbols 2',
     'Noto Color Emoji',
@@ -23,7 +23,7 @@ class TerminalFontStyles {
     'Noto Sans Symbols',
   ];
 
-  /// サポートするフォントファミリーのリスト
+  /// List of supported font families
   static const List<String> supportedFontFamilies = [
     'JetBrains Mono',
     'Fira Code',
@@ -35,25 +35,25 @@ class TerminalFontStyles {
     'UDEV Gothic NF',
   ];
 
-  /// デフォルトのフォントファミリー
+  /// Default font family
   static const String defaultFontFamily = 'JetBrains Mono';
 
-  /// 表示名からバンドルフォント名へのマッピング
+  /// Mapping from display names to bundled font names
   static const Map<String, String> _bundledFontMap = {
     'HackGen Console': 'HackGenConsole',
     'UDEV Gothic NF': 'UDEVGothicNF',
   };
 
-  /// フォントファミリー名からTextStyleを取得
+  /// Get TextStyle from font family name
   ///
-  /// [fontFamily] フォントファミリー名
-  /// [fontSize] フォントサイズ
-  /// [height] 行の高さ比率
-  /// [color] 文字色
-  /// [backgroundColor] 背景色
-  /// [fontWeight] フォントウェイト
-  /// [fontStyle] フォントスタイル（イタリック等）
-  /// [decoration] テキスト装飾（下線、取り消し線等）
+  /// [fontFamily] Font family name
+  /// [fontSize] Font size
+  /// [height] Line height ratio
+  /// [color] Text color
+  /// [backgroundColor] Background color
+  /// [fontWeight] Font weight
+  /// [fontStyle] Font style (italic, etc.)
+  /// [decoration] Text decoration (underline, strikethrough, etc.)
   static TextStyle getTextStyle(
     String fontFamily, {
     double? fontSize,
@@ -64,10 +64,10 @@ class TerminalFontStyles {
     FontStyle? fontStyle,
     TextDecoration? decoration,
   }) {
-    // バンドルフォント（日本語対応）の場合
+    // For bundled fonts (Japanese-compatible)
     if (_bundledFontFamilies.contains(fontFamily)) {
       return TextStyle(
-        inherit: false, // スタイル継承を無効化してメトリクスを安定させる
+        inherit: false, // Disable style inheritance to stabilize metrics
         fontFamily: _bundledFontMap[fontFamily],
         fontFamilyFallback: _fontFamilyFallback,
         fontSize: fontSize,
@@ -80,7 +80,7 @@ class TerminalFontStyles {
       );
     }
 
-    // Google Fontsの場合
+    // For Google Fonts
     TextStyle baseStyle;
     switch (fontFamily) {
       case 'JetBrains Mono':
@@ -150,7 +150,7 @@ class TerminalFontStyles {
         );
         break;
       default:
-        // デフォルトはJetBrains Mono
+        // Default is JetBrains Mono
         baseStyle = GoogleFonts.jetBrainsMono(
           fontSize: fontSize,
           height: height,
@@ -162,7 +162,7 @@ class TerminalFontStyles {
         );
     }
 
-    // フォントフォールバックを追加し、継承を無効化
+    // Add font fallback and disable inheritance
     return baseStyle.copyWith(
       fontFamilyFallback: _fontFamilyFallback,
       inherit: false,

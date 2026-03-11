@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// テーマ選択ダイアログ
+/// Theme selection dialog
 class ThemeDialog extends StatelessWidget {
   final bool isDarkMode;
 

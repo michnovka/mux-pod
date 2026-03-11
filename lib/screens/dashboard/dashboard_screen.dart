@@ -8,7 +8,7 @@ import '../../theme/design_colors.dart';
 import '../connections/connection_form_screen.dart';
 import '../terminal/terminal_screen.dart';
 
-/// ダッシュボード画面（セッション履歴ベース）
+/// Dashboard screen (session history based)
 class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
 
@@ -128,7 +128,7 @@ class DashboardScreen extends ConsumerWidget {
   }
 
   void _navigateToTerminal(BuildContext context, WidgetRef ref, ActiveSession session) {
-    // 最終アクセス日時を更新
+    // Update last accessed time
     ref.read(activeSessionsProvider.notifier).touchSession(
           session.connectionId,
           session.sessionName,
@@ -162,7 +162,7 @@ class DashboardScreen extends ConsumerWidget {
   }
 }
 
-/// セッション履歴カード
+/// Session history card
 class _SessionHistoryCard extends StatelessWidget {
   final ActiveSession session;
   final VoidCallback onTap;

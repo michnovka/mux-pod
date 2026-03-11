@@ -10,13 +10,13 @@ import 'package:flutter_muxpod/theme/app_theme.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // フォントライセンスを登録
+  // Register font licenses
   LicenseService.registerLicenses();
 
-  // バージョン情報を初期化
+  // Initialize version info
   await VersionInfo.initialize();
 
-  // ステータスバーを透明に
+  // Make the status bar transparent
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
     statusBarIconBrightness: Brightness.light,

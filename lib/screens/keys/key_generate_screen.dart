@@ -5,7 +5,7 @@ import 'package:uuid/uuid.dart';
 import '../../providers/key_provider.dart';
 import '../../services/keychain/ssh_key_service.dart';
 
-/// SSH鍵生成画面
+/// SSH key generation screen
 class KeyGenerateScreen extends ConsumerStatefulWidget {
   const KeyGenerateScreen({super.key});
 
@@ -139,16 +139,16 @@ class _KeyGenerateScreenState extends ConsumerState<KeyGenerateScreen> {
       final keyId = const Uuid().v4();
       final name = _nameController.text.trim();
 
-      // 鍵を生成
+      // Generate the key
       SshKeyPair keyPair;
       if (_keyType == 'ed25519') {
         keyPair = await keyService.generateEd25519(comment: name);
       } else {
-        // RSA生成は時間がかかる（UIをブロックするが許容範囲）
+        // RSA generation takes time (blocks UI but is acceptable)
         setState(() {
           _statusMessage = 'Generating RSA key...';
         });
-        // 一瞬UIを更新させるためにmicrotaskで実行
+        // Execute via microtask to briefly update the UI
         await Future.delayed(const Duration(milliseconds: 50));
         keyPair = await keyService.generateRsa(bits: _rsaBits, comment: name);
       }
@@ -157,10 +157,10 @@ class _KeyGenerateScreenState extends ConsumerState<KeyGenerateScreen> {
         _statusMessage = 'Saving key...';
       });
 
-      // 秘密鍵をSecureStorageに保存
+      // Save private key to SecureStorage
       await storage.savePrivateKey(keyId, keyPair.privatePem);
 
-      // メタデータをKeysNotifierに保存
+      // Save metadata to KeysNotifier
       final meta = SshKeyMeta(
         id: keyId,
         name: name,

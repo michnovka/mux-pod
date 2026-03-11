@@ -5,7 +5,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../providers/key_provider.dart';
 
-/// SSH鍵インポート画面
+/// SSH key import screen
 class KeyImportScreen extends ConsumerStatefulWidget {
   const KeyImportScreen({super.key});
 
@@ -152,7 +152,7 @@ class _KeyImportScreenState extends ConsumerState<KeyImportScreen> {
 
     final keyService = ref.read(sshKeyServiceProvider);
 
-    // PEM形式の基本的なバリデーション
+    // Basic PEM format validation
     if (!value.contains('-----BEGIN') || !value.contains('-----END')) {
       setState(() {
         _pemValidationError = 'Invalid PEM format';
@@ -162,7 +162,7 @@ class _KeyImportScreenState extends ConsumerState<KeyImportScreen> {
     }
 
     try {
-      // 暗号化されているかチェック
+      // Check if the key is encrypted
       final isEncrypted = keyService.isEncrypted(value);
       setState(() {
         _pemValidationError = null;
@@ -190,12 +190,12 @@ class _KeyImportScreenState extends ConsumerState<KeyImportScreen> {
       if (result != null && result.files.isNotEmpty) {
         final file = result.files.first;
 
-        // ファイル内容を読み取る
+        // Read file contents
         String content;
         if (file.bytes != null) {
           content = String.fromCharCodes(file.bytes!);
         } else {
-          // ファイルパスから読み取る（デスクトップ向け）
+          // Read from file path (for desktop)
           setState(() {
             _pemValidationError = 'Could not read file content';
           });
@@ -207,7 +207,7 @@ class _KeyImportScreenState extends ConsumerState<KeyImportScreen> {
           _privateKeyController.text = content;
         });
 
-        // PEMの検証
+        // Validate the PEM
         _onPemChanged(content);
       }
     } catch (e) {
@@ -241,21 +241,21 @@ class _KeyImportScreenState extends ConsumerState<KeyImportScreen> {
       final name = _nameController.text.trim();
       final keyId = const Uuid().v4();
 
-      // PEMをパース
+      // Parse the PEM
       final keyPair = await keyService.parseFromPem(
         pemContent,
         passphrase: passphrase,
       );
 
-      // 秘密鍵をSecureStorageに保存
+      // Save private key to SecureStorage
       await storage.savePrivateKey(keyId, pemContent);
 
-      // パスフレーズがあれば保存
+      // Save passphrase if provided
       if (passphrase != null) {
         await storage.savePassphrase(keyId, passphrase);
       }
 
-      // メタデータをKeysNotifierに保存
+      // Save metadata to KeysNotifier
       final meta = SshKeyMeta(
         id: keyId,
         name: name,
@@ -276,7 +276,7 @@ class _KeyImportScreenState extends ConsumerState<KeyImportScreen> {
         );
       }
     } on FormatException catch (e) {
-      // 無効なPEM形式またはパスフレーズエラー
+      // Invalid PEM format or passphrase error
       if (mounted) {
         final message = e.message.contains('passphrase')
             ? 'Wrong passphrase. Please check and try again.'

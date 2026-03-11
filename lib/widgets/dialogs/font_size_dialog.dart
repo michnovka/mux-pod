@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// フォントサイズ選択ダイアログ
+/// Font size selection dialog
 class FontSizeDialog extends StatelessWidget {
   final double currentSize;
 

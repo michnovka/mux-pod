@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/tmux/tmux_parser.dart';
 
-/// アクティブセッション情報
+/// Active session information
 class ActiveSession {
   final String connectionId;
   final String connectionName;
@@ -15,13 +15,13 @@ class ActiveSession {
   final DateTime connectedAt;
   final bool isAttached;
 
-  /// 最後に開いていたウィンドウインデックス
+  /// Last opened window index
   final int? lastWindowIndex;
 
-  /// 最後に開いていたペインID
+  /// Last opened pane ID
   final String? lastPaneId;
 
-  /// 最終アクセス日時（履歴ソート用）
+  /// Last accessed time (used for history sorting)
   final DateTime? lastAccessedAt;
 
   const ActiveSession({
@@ -64,7 +64,7 @@ class ActiveSession {
     );
   }
 
-  /// JSON形式でシリアライズ
+  /// Serialize to JSON format
   Map<String, dynamic> toJson() {
     return {
       'connectionId': connectionId,
@@ -80,7 +80,7 @@ class ActiveSession {
     };
   }
 
-  /// JSONからデシリアライズ
+  /// Deserialize from JSON
   factory ActiveSession.fromJson(Map<String, dynamic> json) {
     final lastAccessedAtStr = json['lastAccessedAt'] as String?;
     return ActiveSession(
@@ -97,11 +97,11 @@ class ActiveSession {
     );
   }
 
-  /// セッションの一意なキー
+  /// Unique key for the session
   String get key => '$connectionId:$sessionName';
 }
 
-/// アクティブセッション一覧の状態
+/// State for the list of active sessions
 class ActiveSessionsState {
   final List<ActiveSession> sessions;
   final String? currentSessionKey; // connectionId:sessionName
@@ -123,12 +123,12 @@ class ActiveSessionsState {
     );
   }
 
-  /// 指定した接続のセッション一覧を取得
+  /// Get the list of sessions for a given connection
   List<ActiveSession> getSessionsForConnection(String connectionId) {
     return sessions.where((s) => s.connectionId == connectionId).toList();
   }
 
-  /// 現在のセッションを取得
+  /// Get the current session
   ActiveSession? get currentSession {
     if (currentSessionKey == null) return null;
     try {
@@ -141,18 +141,18 @@ class ActiveSessionsState {
   }
 }
 
-/// アクティブセッションを管理するNotifier
+/// Notifier that manages active sessions
 class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
   static const _storageKey = 'active_sessions';
 
   @override
   ActiveSessionsState build() {
-    // 初期化時にストレージから読み込み
+    // Load from storage on initialization
     _loadFromStorage();
     return const ActiveSessionsState();
   }
 
-  /// ストレージからセッション情報を読み込み
+  /// Load session information from storage
   Future<void> _loadFromStorage() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -165,22 +165,22 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
         state = state.copyWith(sessions: sessions);
       }
     } catch (e) {
-      // 読み込みエラーは無視（初回起動時など）
+      // Ignore load errors (e.g., on first launch)
     }
   }
 
-  /// ストレージにセッション情報を保存
+  /// Save session information to storage
   Future<void> _saveToStorage() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final jsonList = state.sessions.map((s) => s.toJson()).toList();
       await prefs.setString(_storageKey, jsonEncode(jsonList));
     } catch (e) {
-      // 保存エラーは無視
+      // Ignore save errors
     }
   }
 
-  /// セッションを追加または更新
+  /// Add or update a session
   void addOrUpdateSession({
     required String connectionId,
     required String connectionName,
@@ -223,7 +223,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     _saveToStorage();
   }
 
-  /// セッションの最後に開いていたペイン情報を更新
+  /// Update the last opened pane information for a session
   void updateLastPane({
     required String connectionId,
     required String sessionName,
@@ -245,7 +245,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     _saveToStorage();
   }
 
-  /// セッションを開いた時に最終アクセス日時を更新
+  /// Update the last accessed time when a session is opened
   void touchSession(String connectionId, String sessionName) {
     final key = '$connectionId:$sessionName';
     final existingIndex = state.sessions.indexWhere((s) => s.key == key);
@@ -260,21 +260,21 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     _saveToStorage();
   }
 
-  /// 接続のセッション一覧を更新（tmuxセッションリストから）
-  /// 既存のセッションの lastWindowIndex/lastPaneId/lastAccessedAt は保持する
+  /// Update the session list for a connection (from tmux session list)
+  /// Preserves lastWindowIndex/lastPaneId/lastAccessedAt of existing sessions
   void updateSessionsForConnection({
     required String connectionId,
     required String connectionName,
     required String host,
     required List<TmuxSession> tmuxSessions,
   }) {
-    // 既存のセッション情報をマップに保存
+    // Save existing session information to a map
     final existingMap = <String, ActiveSession>{};
     for (final s in state.sessions.where((s) => s.connectionId == connectionId)) {
       existingMap[s.sessionName] = s;
     }
 
-    // 他の接続のセッションを保持
+    // Preserve sessions from other connections
     final otherSessions = state.sessions
         .where((s) => s.connectionId != connectionId)
         .toList();
@@ -299,17 +299,17 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     _saveToStorage();
   }
 
-  /// 現在のセッションを設定
+  /// Set the current session
   void setCurrentSession(String connectionId, String sessionName) {
     state = state.copyWith(currentSessionKey: '$connectionId:$sessionName');
   }
 
-  /// 現在のセッションをクリア
+  /// Clear the current session
   void clearCurrentSession() {
     state = state.copyWith(clearCurrentSession: true);
   }
 
-  /// セッションを明示的に閉じる（削除）
+  /// Explicitly close (delete) a session
   void closeSession(String connectionId, String sessionName) {
     final sessions = state.sessions
         .where((s) => !(s.connectionId == connectionId && s.sessionName == sessionName))
@@ -318,12 +318,12 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     _saveToStorage();
   }
 
-  /// セッションを削除（closeSessionのエイリアス）
+  /// Remove a session (alias for closeSession)
   void removeSession(String connectionId, String sessionName) {
     closeSession(connectionId, sessionName);
   }
 
-  /// 接続の全セッションを削除
+  /// Remove all sessions for a connection
   void removeSessionsForConnection(String connectionId) {
     final sessions =
         state.sessions.where((s) => s.connectionId != connectionId).toList();
@@ -331,14 +331,14 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     _saveToStorage();
   }
 
-  /// 全セッションをクリア
+  /// Clear all sessions
   void clear() {
     state = const ActiveSessionsState();
     _saveToStorage();
   }
 }
 
-/// アクティブセッションプロバイダー
+/// Active sessions provider
 final activeSessionsProvider =
     NotifierProvider<ActiveSessionsNotifier, ActiveSessionsState>(() {
   return ActiveSessionsNotifier();

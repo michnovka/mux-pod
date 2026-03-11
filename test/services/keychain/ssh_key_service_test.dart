@@ -81,11 +81,11 @@ void main() {
     test('Ed25519 PEM is parseable by dartssh2', () async {
       final keyPair = await service.generateEd25519();
 
-      // PEMが正しい形式であることを確認
+      // Verify that the PEM is in the correct format
       expect(keyPair.privatePem, contains('-----BEGIN OPENSSH PRIVATE KEY-----'));
       expect(keyPair.privatePem, contains('-----END OPENSSH PRIVATE KEY-----'));
 
-      // dartssh2で再パース可能か確認
+      // Verify it can be re-parsed by dartssh2
       final parsed = await service.parseFromPem(keyPair.privatePem);
       expect(parsed.type, equals('ed25519'));
       expect(parsed.fingerprint, equals(keyPair.fingerprint));
@@ -97,7 +97,7 @@ void main() {
       expect(keyPair.privatePem, contains('-----BEGIN RSA PRIVATE KEY-----'));
       expect(keyPair.privatePem, contains('-----END RSA PRIVATE KEY-----'));
 
-      // dartssh2で再パース可能か確認
+      // Verify it can be re-parsed by dartssh2
       final parsed = await service.parseFromPem(keyPair.privatePem);
       expect(parsed.fingerprint, equals(keyPair.fingerprint));
     });
@@ -126,7 +126,7 @@ void main() {
       final keyPair = await service.generateEd25519();
 
       expect(keyPair.fingerprint, startsWith('SHA256:'));
-      // Base64文字列（=なし）
+      // Base64 string (without trailing =)
       final base64Part = keyPair.fingerprint.substring(7);
       expect(base64Part, isNot(contains('=')));
       expect(base64Part.length, greaterThan(0));
@@ -159,7 +159,7 @@ void main() {
   // User Story 2 Tests (T026-T028)
   group('PEM Parsing (T026)', () {
     test('parses valid Ed25519 PEM', () async {
-      // 生成した鍵のPEMをパースできることを確認
+      // Verify that the generated key's PEM can be parsed
       final original = await service.generateEd25519(comment: 'test');
       final parsed = await service.parseFromPem(original.privatePem);
 
@@ -173,7 +173,7 @@ void main() {
       final parsed = await service.parseFromPem(original.privatePem);
 
       expect(parsed.fingerprint, equals(original.fingerprint));
-      // dartssh2はRSA鍵を'rsa-sha2-256'として報告することがある
+      // dartssh2 may report RSA keys as 'rsa-sha2-256'
       expect(parsed.publicKeyString, anyOf(
         contains('ssh-rsa'),
         contains('rsa-sha2-256'),
