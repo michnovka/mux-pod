@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:math' as math;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -6,6 +9,38 @@ import '../services/ssh/ssh_client.dart';
 import '../services/tmux/tmux_commands.dart';
 import '../services/tmux/tmux_parser.dart';
 import 'connection_provider.dart';
+
+typedef AlertPanesSshClientFactory = SshClient Function();
+
+final alertPanesSshClientFactoryProvider = Provider<AlertPanesSshClientFactory>(
+  (ref) {
+    return SshClient.new;
+  },
+);
+
+final alertPanesSecureStorageProvider = Provider<SecureStorageService>((ref) {
+  return SecureStorageService();
+});
+
+class AlertPanesRefreshConfig {
+  final int maxConcurrentConnections;
+  final Duration connectTimeout;
+  final Duration commandTimeout;
+  final Duration perConnectionTimeout;
+
+  const AlertPanesRefreshConfig({
+    this.maxConcurrentConnections = 4,
+    this.connectTimeout = const Duration(seconds: 10),
+    this.commandTimeout = const Duration(seconds: 10),
+    this.perConnectionTimeout = const Duration(seconds: 12),
+  });
+}
+
+final alertPanesRefreshConfigProvider = Provider<AlertPanesRefreshConfig>((
+  ref,
+) {
+  return const AlertPanesRefreshConfig();
+});
 
 /// Alert pane information based on tmux window flags
 class AlertPane {
@@ -91,6 +126,141 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
     state = state.copyWith(alertPanes: updated);
   }
 
+  Future<SshConnectOptions> _buildConnectOptions(
+    Connection connection,
+    SecureStorageService storage,
+    AlertPanesRefreshConfig config,
+  ) async {
+    final connectTimeoutSeconds = (config.connectTimeout.inMilliseconds / 1000)
+        .ceil()
+        .clamp(1, 3600)
+        .toInt();
+
+    if (connection.authMethod == 'key' && connection.keyId != null) {
+      final credentials = await Future.wait<String?>([
+        storage.getPrivateKey(connection.keyId!),
+        storage.getPassphrase(connection.keyId!),
+      ]);
+      return SshConnectOptions(
+        privateKey: credentials[0],
+        passphrase: credentials[1],
+        tmuxPath: connection.tmuxPath,
+        timeout: connectTimeoutSeconds,
+      );
+    }
+
+    final password = await storage.getPassword(connection.id);
+    return SshConnectOptions(
+      password: password,
+      tmuxPath: connection.tmuxPath,
+      timeout: connectTimeoutSeconds,
+    );
+  }
+
+  List<AlertPane> _extractAlertPanes(
+    Connection connection,
+    List<TmuxSession> sessions,
+  ) {
+    final panes = <AlertPane>[];
+
+    for (final session in sessions) {
+      for (final window in session.windows) {
+        final windowAlertFlags = window.flags.intersection(_alertFlags);
+        if (windowAlertFlags.isEmpty) {
+          continue;
+        }
+
+        for (final pane in window.panes) {
+          panes.add(
+            AlertPane(
+              connectionId: connection.id,
+              connectionName: connection.name,
+              host: connection.host,
+              sessionName: session.name,
+              windowIndex: window.index,
+              windowName: window.name,
+              flags: windowAlertFlags,
+              paneId: pane.id,
+              paneIndex: pane.index,
+              currentCommand: pane.currentCommand,
+            ),
+          );
+        }
+      }
+    }
+
+    return panes;
+  }
+
+  Future<void> _disposeClient(SshClient sshClient) async {
+    try {
+      await sshClient.dispose();
+    } catch (e) {
+      debugPrint('Failed to dispose alert refresh client: $e');
+    }
+  }
+
+  Future<void> _runWithConcurrencyLimit<T>(
+    List<Future<T> Function()> tasks,
+    int maxConcurrent,
+    Future<void> Function(T result) onResult,
+  ) async {
+    if (tasks.isEmpty) {
+      return;
+    }
+
+    final workerCount = math.max(1, math.min(maxConcurrent, tasks.length));
+    var nextIndex = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        final taskIndex = nextIndex++;
+        if (taskIndex >= tasks.length) {
+          return;
+        }
+
+        final result = await tasks[taskIndex]();
+        await onResult(result);
+      }
+    }
+
+    await Future.wait(List.generate(workerCount, (_) => worker()));
+  }
+
+  Future<({List<AlertPane> panes, String? error})>
+  _fetchAlertPanesForConnection(
+    Connection connection,
+    SecureStorageService storage,
+    AlertPanesRefreshConfig config,
+  ) async {
+    final sshClient = ref.read(alertPanesSshClientFactoryProvider)();
+
+    try {
+      final options = await _buildConnectOptions(connection, storage, config);
+
+      await sshClient
+          .connect(
+            host: connection.host,
+            port: connection.port,
+            username: connection.username,
+            options: options,
+          )
+          .timeout(config.connectTimeout);
+
+      final output = await sshClient
+          .exec(TmuxCommands.listAllPanes())
+          .timeout(config.commandTimeout);
+      final sessions = TmuxParser.parseFullTree(output);
+      return (panes: _extractAlertPanes(connection, sessions), error: null);
+    } catch (e) {
+      final message = 'Failed to fetch alert panes for ${connection.name}: $e';
+      debugPrint(message);
+      return (panes: const <AlertPane>[], error: message);
+    } finally {
+      await _disposeClient(sshClient);
+    }
+  }
+
   /// Clear tmux window flags (select the window via select-window, then switch back)
   Future<void> clearWindowFlag(AlertPane alert) async {
     final connectionsState = ref.read(connectionsProvider);
@@ -99,34 +269,30 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
         .firstOrNull;
     if (connection == null) return;
 
-    try {
-      final storage = SecureStorageService();
-      SshConnectOptions options;
-      if (connection.authMethod == 'key' && connection.keyId != null) {
-        final privateKey = await storage.getPrivateKey(connection.keyId!);
-        final passphrase = await storage.getPassphrase(connection.keyId!);
-        options = SshConnectOptions(privateKey: privateKey, passphrase: passphrase, tmuxPath: connection.tmuxPath);
-      } else {
-        final password = await storage.getPassword(connection.id);
-        options = SshConnectOptions(password: password, tmuxPath: connection.tmuxPath);
-      }
+    final storage = ref.read(alertPanesSecureStorageProvider);
+    final config = ref.read(alertPanesRefreshConfigProvider);
+    final sshClient = ref.read(alertPanesSshClientFactoryProvider)();
 
-      final sshClient = SshClient();
-      await sshClient.connect(
-        host: connection.host,
-        port: connection.port,
-        username: connection.username,
-        options: options,
-      );
+    try {
+      final options = await _buildConnectOptions(connection, storage, config);
+
+      await sshClient
+          .connect(
+            host: connection.host,
+            port: connection.port,
+            username: connection.username,
+            options: options,
+          )
+          .timeout(config.connectTimeout);
 
       // Select the target window to clear flags, then switch back to the original window
-      await sshClient.exec(
-        TmuxCommands.selectWindow(alert.sessionName, alert.windowIndex),
-      );
-
-      await sshClient.disconnect();
+      await sshClient
+          .exec(TmuxCommands.selectWindow(alert.sessionName, alert.windowIndex))
+          .timeout(config.commandTimeout);
     } catch (e) {
       debugPrint('Failed to clear window flag: $e');
+    } finally {
+      await _disposeClient(sshClient);
     }
   }
 
@@ -136,66 +302,80 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
 
     final connectionsState = ref.read(connectionsProvider);
     final connections = connectionsState.connections;
-    final storage = SecureStorageService();
-    final allAlertPanes = <AlertPane>[];
+    final storage = ref.read(alertPanesSecureStorageProvider);
+    final config = ref.read(alertPanesRefreshConfigProvider);
 
-    for (final connection in connections) {
-      try {
-        SshConnectOptions options;
-        if (connection.authMethod == 'key' && connection.keyId != null) {
-          final privateKey = await storage.getPrivateKey(connection.keyId!);
-          final passphrase = await storage.getPassphrase(connection.keyId!);
-          options = SshConnectOptions(privateKey: privateKey, passphrase: passphrase, tmuxPath: connection.tmuxPath);
-        } else {
-          final password = await storage.getPassword(connection.id);
-          options = SshConnectOptions(password: password, tmuxPath: connection.tmuxPath);
+    final results = List<({List<AlertPane> panes, String? error})?>.filled(
+      connections.length,
+      null,
+    );
+
+    final tasks = connections.indexed.map((entry) {
+      final index = entry.$1;
+      final connection = entry.$2;
+      return () async {
+        try {
+          final result = await _fetchAlertPanesForConnection(
+            connection,
+            storage,
+            config,
+          ).timeout(config.perConnectionTimeout);
+          results[index] = result;
+        } catch (e) {
+          final message =
+              'Failed to fetch alert panes for ${connection.name}: $e';
+          debugPrint(message);
+          results[index] = (panes: const <AlertPane>[], error: message);
         }
+      };
+    }).toList();
 
-        final sshClient = SshClient();
-        await sshClient.connect(
-          host: connection.host,
-          port: connection.port,
-          username: connection.username,
-          options: options,
-        );
+    await _runWithConcurrencyLimit<void>(
+      tasks,
+      config.maxConcurrentConnections,
+      (_) async {},
+    );
 
-        final output = await sshClient.exec(TmuxCommands.listAllPanes());
-        final sessions = TmuxParser.parseFullTree(output);
+    final allAlertPanes = <AlertPane>[
+      for (final result
+          in results.whereType<({List<AlertPane> panes, String? error})>())
+        ...result.panes,
+    ];
+    final errors = [
+      for (final result
+          in results.whereType<({List<AlertPane> panes, String? error})>())
+        if (result.error != null) result.error!,
+    ];
 
-        for (final session in sessions) {
-          for (final window in session.windows) {
-            final windowAlertFlags = window.flags.intersection(_alertFlags);
-            if (windowAlertFlags.isNotEmpty) {
-              for (final pane in window.panes) {
-                allAlertPanes.add(AlertPane(
-                  connectionId: connection.id,
-                  connectionName: connection.name,
-                  host: connection.host,
-                  sessionName: session.name,
-                  windowIndex: window.index,
-                  windowName: window.name,
-                  flags: windowAlertFlags,
-                  paneId: pane.id,
-                  paneIndex: pane.index,
-                  currentCommand: pane.currentCommand,
-                ));
-              }
-            }
-          }
-        }
+    state = AlertPanesState(
+      alertPanes: allAlertPanes,
+      error: errors.isEmpty ? null : errors.join('\n'),
+    );
+  }
 
-        await sshClient.disconnect();
-      } catch (e) {
-        debugPrint('Failed to fetch alert panes for ${connection.name}: $e');
-      }
-    }
+  @visibleForTesting
+  Set<TmuxWindowFlag> get alertFlags => _alertFlags;
 
-    state = AlertPanesState(alertPanes: allAlertPanes);
+  @visibleForTesting
+  List<AlertPane> extractAlertPanes(
+    Connection connection,
+    List<TmuxSession> sessions,
+  ) {
+    return _extractAlertPanes(connection, sessions);
+  }
+
+  @visibleForTesting
+  Future<({List<AlertPane> panes, String? error})> fetchAlertPanesForConnection(
+    Connection connection,
+    SecureStorageService storage,
+    AlertPanesRefreshConfig config,
+  ) {
+    return _fetchAlertPanesForConnection(connection, storage, config);
   }
 }
 
 /// Alert panes provider
 final alertPanesProvider =
     NotifierProvider<AlertPanesNotifier, AlertPanesState>(() {
-  return AlertPanesNotifier();
-});
+      return AlertPanesNotifier();
+    });
