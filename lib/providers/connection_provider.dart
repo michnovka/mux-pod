@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:developer' as developer;
 
@@ -130,7 +131,10 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
     try {
       final prefs = await SharedPreferences.getInstance();
       final jsonString = prefs.getString(_storageKey);
-      developer.log('JSON from storage: ${jsonString != null ? 'exists' : 'null'}', name: 'ConnectionsProvider');
+      developer.log(
+        'JSON from storage: ${jsonString != null ? 'exists' : 'null'}',
+        name: 'ConnectionsProvider',
+      );
 
       if (jsonString != null) {
         final jsonList = jsonDecode(jsonString) as List<dynamic>;
@@ -138,17 +142,31 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
             .map((json) => Connection.fromJson(json as Map<String, dynamic>))
             .toList();
 
-        developer.log('Loaded ${connections.length} connections from storage', name: 'ConnectionsProvider');
+        developer.log(
+          'Loaded ${connections.length} connections from storage',
+          name: 'ConnectionsProvider',
+        );
 
         // Sorting is done by filteredConnectionsProvider, so no sorting here
         state = ConnectionsState(connections: connections);
-        developer.log('State updated with ${connections.length} connections', name: 'ConnectionsProvider');
+        developer.log(
+          'State updated with ${connections.length} connections',
+          name: 'ConnectionsProvider',
+        );
       } else {
         state = const ConnectionsState();
-        developer.log('No saved connections, initialized empty state', name: 'ConnectionsProvider');
+        developer.log(
+          'No saved connections, initialized empty state',
+          name: 'ConnectionsProvider',
+        );
       }
     } catch (e, stackTrace) {
-      developer.log('Error loading connections: $e', name: 'ConnectionsProvider', error: e, stackTrace: stackTrace);
+      developer.log(
+        'Error loading connections: $e',
+        name: 'ConnectionsProvider',
+        error: e,
+        stackTrace: stackTrace,
+      );
       state = ConnectionsState(error: e.toString());
     }
   }
@@ -161,17 +179,32 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
 
   /// Add a connection
   Future<void> add(Connection connection) async {
-    developer.log('add() called: ${connection.name} (${connection.id})', name: 'ConnectionsProvider');
-    developer.log('Current connections count: ${state.connections.length}', name: 'ConnectionsProvider');
+    developer.log(
+      'add() called: ${connection.name} (${connection.id})',
+      name: 'ConnectionsProvider',
+    );
+    developer.log(
+      'Current connections count: ${state.connections.length}',
+      name: 'ConnectionsProvider',
+    );
 
     final connections = [...state.connections, connection];
-    developer.log('New connections count: ${connections.length}', name: 'ConnectionsProvider');
+    developer.log(
+      'New connections count: ${connections.length}',
+      name: 'ConnectionsProvider',
+    );
 
     state = state.copyWith(connections: connections);
-    developer.log('State updated, saving to SharedPreferences...', name: 'ConnectionsProvider');
+    developer.log(
+      'State updated, saving to SharedPreferences...',
+      name: 'ConnectionsProvider',
+    );
 
     await _saveConnections();
-    developer.log('Connections saved. Final count: ${state.connections.length}', name: 'ConnectionsProvider');
+    developer.log(
+      'Connections saved. Final count: ${state.connections.length}',
+      name: 'ConnectionsProvider',
+    );
   }
 
   /// Remove a connection
@@ -180,12 +213,18 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
     final connections = state.connections.where((c) => c.id != id).toList();
     state = state.copyWith(connections: connections);
     await _saveConnections();
-    developer.log('Connection removed. Remaining: ${state.connections.length}', name: 'ConnectionsProvider');
+    developer.log(
+      'Connection removed. Remaining: ${state.connections.length}',
+      name: 'ConnectionsProvider',
+    );
   }
 
   /// Update a connection
   Future<void> update(Connection connection) async {
-    developer.log('update() called: ${connection.name} (${connection.id})', name: 'ConnectionsProvider');
+    developer.log(
+      'update() called: ${connection.name} (${connection.id})',
+      name: 'ConnectionsProvider',
+    );
     final connections = state.connections.map((c) {
       return c.id == connection.id ? connection : c;
     }).toList();
@@ -215,6 +254,35 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
     }
   }
 
+  /// Resolve a connection once the async initial load has completed.
+  Future<Connection?> getByIdWhenReady(
+    String id, {
+    Duration timeout = const Duration(seconds: 3),
+    Duration pollInterval = const Duration(milliseconds: 50),
+    bool reloadIfMissing = true,
+  }) async {
+    var connection = getById(id);
+    if (connection != null) {
+      return connection;
+    }
+
+    final deadline = DateTime.now().add(timeout);
+    while (state.isLoading && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(pollInterval);
+      connection = getById(id);
+      if (connection != null) {
+        return connection;
+      }
+    }
+
+    if (connection != null || !reloadIfMissing) {
+      return connection;
+    }
+
+    await reload();
+    return getById(id);
+  }
+
   /// Reload
   Future<void> reload() async {
     state = state.copyWith(isLoading: true, error: null);
@@ -225,8 +293,8 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
 /// Connections list provider
 final connectionsProvider =
     NotifierProvider<ConnectionsNotifier, ConnectionsState>(() {
-  return ConnectionsNotifier();
-});
+      return ConnectionsNotifier();
+    });
 
 /// Notifier that manages the selected connection ID
 class SelectedConnectionIdNotifier extends Notifier<String?> {
@@ -255,8 +323,8 @@ class ConnectionSearchNotifier extends Notifier<String> {
 /// Search query provider
 final connectionSearchProvider =
     NotifierProvider<ConnectionSearchNotifier, String>(() {
-  return ConnectionSearchNotifier();
-});
+      return ConnectionSearchNotifier();
+    });
 
 /// Sort options
 enum ConnectionSortOption {
@@ -281,8 +349,8 @@ class ConnectionSortNotifier extends Notifier<ConnectionSortOption> {
 /// Sort option provider
 final connectionSortProvider =
     NotifierProvider<ConnectionSortNotifier, ConnectionSortOption>(() {
-  return ConnectionSortNotifier();
-});
+      return ConnectionSortNotifier();
+    });
 
 /// Filtered and sorted connections list provider
 final filteredConnectionsProvider = Provider<List<Connection>>((ref) {
@@ -330,8 +398,8 @@ final filteredConnectionsProvider = Provider<List<Connection>>((ref) {
 /// Currently selected connection ID provider
 final selectedConnectionIdProvider =
     NotifierProvider<SelectedConnectionIdNotifier, String?>(() {
-  return SelectedConnectionIdNotifier();
-});
+      return SelectedConnectionIdNotifier();
+    });
 
 /// Currently selected connection provider
 final selectedConnectionProvider = Provider<Connection?>((ref) {

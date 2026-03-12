@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
-import 'package:flutter/foundation.dart';
 
 /// Persistent shell session
 ///
@@ -28,6 +28,9 @@ class PersistentShell {
   /// Marker string for printf (used within shell commands)
   static const String _printfStartMarker = r'\x01###START_' '$_markerId' r'###\x01';
   static const String _printfEndMarker = r'\x01###END_' '$_markerId' r'###\x01';
+
+  static final List<int> _startMarkerBytes = utf8.encode(_startMarker);
+  static final List<int> _endMarkerBytes = utf8.encode(_endMarker);
 
   /// Output buffer (accumulated as byte sequence to prevent UTF-8 multibyte boundary splits)
   final _rawBuffer = <int>[];
@@ -134,36 +137,23 @@ class PersistentShell {
       return;
     }
 
-    // Debug: detect UTF-8 boundary splits (debug builds only)
-    assert(() {
-      final chunkDecoded = utf8.decode(data, allowMalformed: true);
-      if (chunkDecoded.contains('\uFFFD')) {
-        final lastBytes = data.length > 6
-            ? data.sublist(data.length - 6)
-            : data;
-        debugPrint(
-          '[PersistentShell] UTF-8 boundary split detected!'
-          ' chunk_size=${data.length}'
-          ' last_bytes=${lastBytes.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}'
-        );
-      }
-      return true;
-    }());
-
-    // Accumulate as byte sequence (prevents UTF-8 boundary splits from chunk-by-chunk decoding)
     _rawBuffer.addAll(data);
 
-    // Decode the entire accumulated byte sequence at once
-    final content = utf8.decode(_rawBuffer, allowMalformed: true);
+    final startIndex = _indexOfBytes(_rawBuffer, _startMarkerBytes);
+    if (startIndex == -1) {
+      return;
+    }
 
-    // Check if both start and end markers are present
-    final startIndex = content.indexOf(_startMarker);
-    final endIndex = content.indexOf(_endMarker);
+    final endSearchStart = startIndex + _startMarkerBytes.length;
+    final endIndex = _indexOfBytes(
+      _rawBuffer,
+      _endMarkerBytes,
+      start: endSearchStart,
+    );
 
-    if (startIndex != -1 && endIndex != -1 && endIndex > startIndex) {
-      // Extract from the line after the start marker to just before the end marker
-      final startPos = startIndex + _startMarker.length;
-      var result = content.substring(startPos, endIndex);
+    if (endIndex != -1 && endIndex > startIndex) {
+      final resultBytes = _rawBuffer.sublist(endSearchStart, endIndex);
+      var result = utf8.decode(resultBytes, allowMalformed: true);
 
       // Normalize because PTY output conversion may use \r\n or \r
       // Fact: on macOS PTY, newlines=0, CRs=19 (\n is converted to \r)
@@ -182,6 +172,32 @@ class PersistentShell {
       _rawBuffer.clear();
       pending.complete(result);
     }
+  }
+
+  static int _indexOfBytes(
+    List<int> source,
+    List<int> pattern, {
+    int start = 0,
+  }) {
+    if (pattern.isEmpty || start < 0 || start >= source.length) {
+      return -1;
+    }
+
+    final maxStart = source.length - pattern.length;
+    for (var index = start; index <= maxStart; index++) {
+      var matches = true;
+      for (var patternIndex = 0; patternIndex < pattern.length; patternIndex++) {
+        if (source[index + patternIndex] != pattern[patternIndex]) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        return index;
+      }
+    }
+
+    return -1;
   }
 
   /// Handler for session termination

@@ -55,6 +55,7 @@ dependencies:
   # Network connectivity monitoring
   connectivity_plus: ^7.0.0
   package_info_plus: ^9.0.0
+  xterm: ^4.0.0
 
 dev_dependencies:
   flutter_test:

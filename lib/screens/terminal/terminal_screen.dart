@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:xterm/xterm.dart';
 
 import '../../providers/active_session_provider.dart';
 import '../../providers/connection_provider.dart';
@@ -14,58 +14,34 @@ import '../../providers/tmux_provider.dart';
 import '../../services/keychain/secure_storage.dart';
 import '../../services/network/network_monitor.dart';
 import '../../services/ssh/input_queue.dart';
-import '../../services/ssh/ssh_client.dart' show SshConnectOptions;
+import '../../services/ssh/ssh_client.dart' show SshClient, SshConnectOptions;
+import '../../services/terminal/bounded_text_buffer.dart';
+import '../../services/terminal/terminal_output_normalizer.dart';
+import '../../services/terminal/terminal_snapshot.dart';
+import '../../services/terminal/xterm_input_adapter.dart';
 import '../../services/tmux/pane_navigator.dart';
 import '../../services/tmux/tmux_commands.dart';
-import '../../services/tmux/tmux_parser.dart';
+import '../../services/tmux/tmux_control_client.dart';
+import '../../services/tmux/tmux_parser.dart' show TmuxPane;
 import '../../theme/design_colors.dart';
 import '../../widgets/special_keys_bar.dart';
 import '../../providers/terminal_display_provider.dart';
 import '../settings/settings_screen.dart';
-import 'widgets/ansi_text_view.dart';
+import 'widgets/pane_terminal_view.dart';
 
-/// Source of scroll mode
-enum ScrollModeSource {
-  /// Normal mode (not in scroll mode)
-  none,
+/// Terminal mode used by the mobile UI.
+enum TerminalMode { normal, select }
 
-  /// Manually enabled by user from UI
-  manual,
+class _PaneSnapshotPayload {
+  final String activeContent;
+  final String mainContent;
+  final String metadata;
 
-  /// Auto-detected tmux copy-mode
-  tmux,
-}
-
-/// Terminal display data frequently updated by polling
-///
-/// Managed via ValueNotifier to avoid parent widget setState().
-/// This prevents parent rebuilds during BottomSheet display,
-/// enabling stable operation even with isDismissible: true.
-class _TerminalViewData {
-  final String content;
-  final int latency;
-  final int paneWidth;
-  final int paneHeight;
-
-  const _TerminalViewData({
-    this.content = '',
-    this.latency = 0,
-    this.paneWidth = 80,
-    this.paneHeight = 24,
+  const _PaneSnapshotPayload({
+    required this.activeContent,
+    required this.mainContent,
+    required this.metadata,
   });
-
-  _TerminalViewData copyWith({
-    String? content,
-    int? latency,
-    int? paneWidth,
-    int? paneHeight,
-  }) =>
-      _TerminalViewData(
-        content: content ?? this.content,
-        latency: latency ?? this.latency,
-        paneWidth: paneWidth ?? this.paneWidth,
-        paneHeight: paneHeight ?? this.paneHeight,
-      );
 }
 
 /// Terminal screen (compliant with HTML design specification)
@@ -93,51 +69,57 @@ class TerminalScreen extends ConsumerStatefulWidget {
 
 class _TerminalScreenState extends ConsumerState<TerminalScreen>
     with WidgetsBindingObserver {
+  static const int _maxDeferredStreamOutputChars = 256 * 1024;
+  static const int _literalInputChunkLength = 1024;
+  static const Duration _connectionLookupTimeout = Duration(seconds: 3);
+  static const Duration _initialControlRestartDelay = Duration(
+    milliseconds: 250,
+  );
+  static const Duration _maxControlRestartDelay = Duration(seconds: 4);
+  static const String _snapshotMainMarker = '\x01__MUXPOD_MAIN__\x01';
+  static const String _snapshotAltMarker = '\x01__MUXPOD_ALT__\x01';
+  static const String _snapshotMetadataMarker = '\x01__MUXPOD_META__\x01';
+
   final _secureStorage = SecureStorageService();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
-  final _ansiTextViewKey = GlobalKey<AnsiTextViewState>();
+  final _paneTerminalViewKey = GlobalKey<PaneTerminalViewState>();
   final _terminalScrollController = ScrollController();
+  late Terminal _terminal;
+  final _terminalController = TerminalController();
+  int _terminalScrollbackLines = AppSettings().scrollbackLines;
 
   // Connection state (managed locally)
   bool _isConnecting = false;
   String? _connectionError;
   SshState _sshState = const SshState();
 
-  // Terminal display data frequently updated by polling (managed via ValueNotifier)
-  // Avoids parent setState(), rebuilding only the subtree via ValueListenableBuilder
-  final _viewNotifier = ValueNotifier<_TerminalViewData>(const _TerminalViewData());
+  // Terminal display data used for bootstrap/resync (managed via ValueNotifier)
+  final _viewNotifier = ValueNotifier<TerminalSnapshotFrame>(
+    const TerminalSnapshotFrame(),
+  );
+  final _latencyNotifier = ValueNotifier<int>(0);
+  final _deferredStreamOutput = BoundedTextBuffer(
+    maxLength: _maxDeferredStreamOutputChars,
+  );
 
-  // Polling timers
-  Timer? _pollTimer;
-  Timer? _treeRefreshTimer;
-  bool _isPolling = false;
+  TmuxControlClient? _controlClient;
+  String? _controlClientSessionName;
+  Timer? _controlSyncTimer;
+  Timer? _controlRestartTimer;
+  Timer? _latencyTimer;
+  int _controlRestartAttempt = 0;
+  bool _isLatencyProbeInFlight = false;
+  bool _isResyncingPane = false;
+  bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
 
-  // For frame skipping (optimization for high-frequency updates)
-  static const _minFrameInterval = Duration(milliseconds: 16); // ~60fps
-  DateTime _lastFrameTime = DateTime.now();
-  bool _pendingUpdate = false;
-  String _pendingContent = '';
-  int _pendingLatency = 0;
-
-  // For adaptive polling
-  int _currentPollingInterval = 100;
-  static const int _minPollingInterval = 50;
-  static const int _maxPollingInterval = 2000;
-
-  // For selection state retention (suppressing updates during scroll mode)
-  String _bufferedContent = '';
-  int _bufferedLatency = 0;
-  bool _hasBufferedUpdate = false;
+  TerminalSnapshotFrame _pendingViewData = const TerminalSnapshotFrame();
 
   // Initial scroll completed flag
   bool _hasInitialScrolled = false;
 
   // Terminal mode
   TerminalMode _terminalMode = TerminalMode.normal;
-
-  // Source of scroll mode (none / manual / tmux)
-  ScrollModeSource _scrollModeSource = ScrollModeSource.none;
 
   // Zoom scale
   double _zoomScale = 1.0;
@@ -153,6 +135,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   // Local cache of directInput setting (to avoid ref.watch)
   bool _directInputEnabled = true;
+  SshNotifier? _sshNotifier;
 
   // Riverpod listeners
   ProviderSubscription<SshState>? _sshSubscription;
@@ -163,6 +146,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   @override
   void initState() {
     super.initState();
+    _terminal = _createTerminalEmulator();
     WidgetsBinding.instance.addObserver(this);
 
     // Set up listeners on the next frame (because ref is needed)
@@ -191,23 +175,23 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  /// Stop polling when transitioning to background
+  /// Stop live terminal streaming when transitioning to background.
   void _pausePolling() {
     _isInBackground = true;
-    _pollTimer?.cancel();
-    _pollTimer = null;
-    _treeRefreshTimer?.cancel();
-    _treeRefreshTimer = null;
+    _controlSyncTimer?.cancel();
+    _controlSyncTimer = null;
+    _stopLatencyPolling(resetValue: true);
+    unawaited(_stopControlClient(resetRestartState: true));
     WakelockPlus.disable();
   }
 
-  /// Resume polling when returning to foreground
+  /// Resume live terminal streaming when returning to foreground.
   void _resumePolling() {
     if (!_isInBackground || _isDisposed) return;
     _isInBackground = false;
-    _startPolling();
-    _startTreeRefresh();
     _applyKeepScreenOn();
+    _startLatencyPolling();
+    unawaited(_restartTerminalStream(restartControlClient: true));
   }
 
   /// Apply keep screen on setting
@@ -223,49 +207,51 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// Set up Provider listeners
   void _setupListeners() {
     // Monitor SSH state changes
-    _sshSubscription = ref.listenManual<SshState>(
-      sshProvider,
-      (previous, next) {
-        if (!mounted || _isDisposed) return;
-        setState(() {
-          _sshState = next;
-        });
-      },
-      fireImmediately: true,
-    );
+    _sshSubscription = ref.listenManual<SshState>(sshProvider, (
+      previous,
+      next,
+    ) {
+      if (!mounted || _isDisposed) return;
+      setState(() {
+        _sshState = next;
+      });
+    }, fireImmediately: true);
 
     // Monitor Tmux state changes
     // Note: Parent setState() is not needed. Breadcrumbs and pane indicators
     // directly watch tmuxProvider via Consumer widgets, so they are
     // only rebuilt within the subtree.
-    _tmuxSubscription = ref.listenManual<TmuxState>(
-      tmuxProvider,
-      (previous, next) {
-        // Consumer widgets directly watch tmuxProvider, so
-        // parent setState() is not needed (removed for BottomSheet stability)
-      },
-      fireImmediately: true,
-    );
+    _tmuxSubscription = ref.listenManual<TmuxState>(tmuxProvider, (
+      previous,
+      next,
+    ) {
+      // Consumer widgets directly watch tmuxProvider, so
+      // parent setState() is not needed (removed for BottomSheet stability)
+    }, fireImmediately: true);
 
     // Monitor settings changes (for Keep screen on / directInput)
-    _settingsSubscription = ref.listenManual<AppSettings>(
-      settingsProvider,
-      (previous, next) {
-        if (!mounted || _isDisposed) return;
-        if (previous?.keepScreenOn != next.keepScreenOn) {
-          _applyKeepScreenOn();
-        }
-        if (previous?.directInputEnabled != next.directInputEnabled) {
-          setState(() {
-            _directInputEnabled = next.directInputEnabled;
-          });
-        }
-      },
-      fireImmediately: false,
-    );
+    _settingsSubscription = ref.listenManual<AppSettings>(settingsProvider, (
+      previous,
+      next,
+    ) {
+      if (!mounted || _isDisposed) return;
+      if (previous?.keepScreenOn != next.keepScreenOn) {
+        _applyKeepScreenOn();
+      }
+      if (previous?.directInputEnabled != next.directInputEnabled) {
+        setState(() {
+          _directInputEnabled = next.directInputEnabled;
+        });
+      }
+      if (previous?.scrollbackLines != next.scrollbackLines) {
+        _reconfigureTerminal(next);
+        unawaited(_resyncActivePane(refreshTree: false));
+      }
+    }, fireImmediately: false);
 
     // Explicitly set initial value
     _directInputEnabled = ref.read(settingsProvider).directInputEnabled;
+    _reconfigureTerminal(ref.read(settingsProvider));
 
     // Monitor network state changes (only update on actual connection state changes)
     _networkSubscription = ref.listenManual<AsyncValue<NetworkStatus>>(
@@ -282,28 +268,74 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
 
     // Set up handler for successful reconnection
-    final sshNotifier = ref.read(sshProvider.notifier);
-    sshNotifier.onReconnectSuccess = _onReconnectSuccess;
+    _sshNotifier = ref.read(sshProvider.notifier);
+    _sshNotifier!.onReconnectSuccess = _onReconnectSuccess;
   }
 
   /// Handler for successful reconnection
   Future<void> _onReconnectSuccess() async {
     if (!mounted || _isDisposed) return;
 
-    // Reset polling flag
-    _isPolling = false;
-
-    // Resume polling
-    _startPolling();
-
-    // Re-fetch session tree
-    _startTreeRefresh();
-
-    // Send queued input
+    await _stopControlClient(resetRestartState: true);
+    await _refreshSessionTree(syncActive: true);
+    await _restartTerminalStream(
+      restartControlClient: true,
+      refreshTree: false,
+    );
     await _flushInputQueue();
+    _startLatencyPolling();
 
     // Update UI
     if (mounted) setState(() {});
+  }
+
+  void _startLatencyPolling() {
+    _stopLatencyPolling();
+    if (_isDisposed || _isInBackground) {
+      return;
+    }
+
+    unawaited(_refreshLatency());
+    _latencyTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(_refreshLatency());
+    });
+  }
+
+  void _stopLatencyPolling({bool resetValue = false}) {
+    _latencyTimer?.cancel();
+    _latencyTimer = null;
+    _isLatencyProbeInFlight = false;
+    if (resetValue && !_isDisposed) {
+      _latencyNotifier.value = 0;
+    }
+  }
+
+  Future<void> _refreshLatency() async {
+    if (_isDisposed || _isInBackground || _isLatencyProbeInFlight || !mounted) {
+      return;
+    }
+
+    final sshClient = _sshNotifier?.client;
+    if (sshClient == null || !sshClient.isConnected) {
+      return;
+    }
+
+    _isLatencyProbeInFlight = true;
+    final startTime = DateTime.now();
+
+    try {
+      await sshClient.exec('true', timeout: const Duration(seconds: 3));
+      if (!_isDisposed && mounted) {
+        _latencyNotifier.value = DateTime.now()
+            .difference(startTime)
+            .inMilliseconds;
+      }
+    } catch (_) {
+      // Ignore latency probe failures. Connection keep-alive and reconnect
+      // paths already own transport error handling.
+    } finally {
+      _isLatencyProbeInFlight = false;
+    }
   }
 
   /// Send queued input
@@ -312,13 +344,34 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     final queuedInput = _inputQueue.flush();
     if (queuedInput.isNotEmpty) {
-      await _sendKeyData(queuedInput);
+      await _sendTerminalData(queuedInput);
+    }
+  }
+
+  Terminal _createTerminalEmulator() {
+    return Terminal(maxLines: _terminalScrollbackLines, reflowEnabled: false)
+      ..onOutput = _handleTerminalOutput;
+  }
+
+  void _resetTerminalEmulator() {
+    _terminal = _createTerminalEmulator();
+  }
+
+  void _reconfigureTerminal(AppSettings settings) {
+    if (_terminalScrollbackLines == settings.scrollbackLines) {
+      _terminal.onOutput = _handleTerminalOutput;
+      return;
+    }
+    _terminalScrollbackLines = settings.scrollbackLines;
+    _resetTerminalEmulator();
+    if (mounted) {
+      setState(() {});
     }
   }
 
   /// Connect via SSH and set up tmux session
   Future<void> _connectAndSetup() async {
-    if (!mounted) {
+    if (!mounted || _isDisposed || _isConnecting) {
       return;
     }
     setState(() {
@@ -328,7 +381,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     try {
       // 1. Get connection info
-      final connection = ref.read(connectionsProvider.notifier).getById(widget.connectionId);
+      final connection = await ref
+          .read(connectionsProvider.notifier)
+          .getByIdWhenReady(
+            widget.connectionId,
+            timeout: _connectionLookupTimeout,
+          );
+      if (!mounted || _isDisposed) {
+        return;
+      }
       if (connection == null) {
         throw Exception('Connection not found');
       }
@@ -340,7 +401,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
 
       // 3. SSH connection (no shell startup - exec only)
-      final sshNotifier = ref.read(sshProvider.notifier);
+      final SshNotifier sshNotifier = ref.read(sshProvider.notifier);
+      _sshNotifier ??= sshNotifier;
       await sshNotifier.connectWithoutShell(connection, options);
       if (!mounted || _isDisposed) {
         return;
@@ -368,10 +430,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         } else {
           // Create new session
           final sshClient = ref.read(sshProvider.notifier).client;
-          await sshClient?.exec(TmuxCommands.newSession(
-            name: widget.sessionName!,
-            detached: true,
-          ));
+          await sshClient?.execPersistent(
+            TmuxCommands.newSession(name: widget.sessionName!, detached: true),
+          );
           if (!mounted || _isDisposed) return;
           await _refreshSessionTree();
           if (!mounted || _isDisposed) return;
@@ -384,7 +445,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         // If no sessions exist, create a new one with auto-generated name
         final sshClient = ref.read(sshProvider.notifier).client;
         sessionName = 'muxpod-${DateTime.now().millisecondsSinceEpoch}';
-        await sshClient?.exec(TmuxCommands.newSession(name: sessionName, detached: true));
+        await sshClient?.execPersistent(
+          TmuxCommands.newSession(name: sessionName, detached: true),
+        );
         if (!mounted || _isDisposed) return;
         await _refreshSessionTree();
         if (!mounted || _isDisposed) return;
@@ -419,28 +482,32 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       // 7. Notify TerminalDisplayProvider of pane info (for font size calculation)
       final activePane = ref.read(tmuxProvider).activePane;
       if (activePane != null) {
-        debugPrint('[Terminal] Pane size: ${activePane.width}x${activePane.height}');
         ref.read(terminalDisplayProvider.notifier).updatePane(activePane);
         _viewNotifier.value = _viewNotifier.value.copyWith(
           paneWidth: activePane.width,
           paneHeight: activePane.height,
         );
-
-        // Send focus-in to pane (so apps like Claude Code can detect focus)
-        await sshNotifier.client?.exec(TmuxCommands.sendKeys(activePane.id, '\x1b[I', literal: true));
       }
 
-      // 8. Start 100ms polling
-      _startPolling();
+      await _restartTerminalStream(
+        restartControlClient: true,
+        refreshTree: false,
+      );
+      _startLatencyPolling();
 
-      // 9. Refresh session tree every 5 seconds
-      _startTreeRefresh();
+      if (activePane != null) {
+        // Send focus-in to pane (so apps like Claude Code can detect focus).
+        await sshNotifier.client?.execPersistentInput(
+          TmuxCommands.sendKeys(activePane.id, '\x1b[I', literal: true),
+        );
+      }
 
       if (!mounted) return;
       setState(() {
         _isConnecting = false;
       });
     } catch (e) {
+      _stopLatencyPolling(resetValue: true);
       if (!mounted) return;
       setState(() {
         _isConnecting = false;
@@ -450,8 +517,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  /// Fetch and update the entire session tree
-  Future<void> _refreshSessionTree() async {
+  /// Fetch and update the entire session tree.
+  Future<void> _refreshSessionTree({bool syncActive = false}) async {
     if (_isDisposed) {
       return;
     }
@@ -462,270 +529,626 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     try {
       final cmd = TmuxCommands.listAllPanes();
-      final output = await sshClient.exec(cmd);
+      final output = await sshClient.execPersistent(cmd);
       if (!mounted || _isDisposed) return;
       ref.read(tmuxProvider.notifier).parseAndUpdateFullTree(output);
+      if (syncActive) {
+        _syncActiveTmuxStateFromTree();
+      }
     } catch (_) {
-      // Silently ignore tree update errors (will retry on next poll)
+      // Silently ignore tree update errors.
     }
   }
 
-  /// Update session tree every 10 seconds
-  void _startTreeRefresh() {
-    _treeRefreshTimer?.cancel();
-    _treeRefreshTimer = Timer.periodic(
-      const Duration(seconds: 10),
-      (_) {
-        // Skip to avoid SSH contention during polling
-        if (!_isPolling) {
-          _refreshSessionTree();
-        }
-      },
-    );
-  }
+  void _syncActiveTmuxStateFromTree() {
+    final tmuxState = ref.read(tmuxProvider);
+    final sessionName = tmuxState.activeSessionName;
+    if (sessionName == null) {
+      return;
+    }
 
-  /// Execute capture-pane with adaptive polling to update terminal content
-  ///
-  /// Dynamically adjust polling interval based on content change frequency:
-  /// - High-frequency updates (htop, etc.): 50ms
-  /// - Normal: 100ms
-  /// - Idle: 500ms
-  void _startPolling() {
-    _pollTimer?.cancel();
-    _scheduleNextPoll();
-  }
+    ref.read(tmuxProvider.notifier).setActiveSession(sessionName);
 
-  /// Schedule next poll
-  void _scheduleNextPoll() {
-    if (_isDisposed) return;
-    _pollTimer?.cancel();
-    _pollTimer = Timer(
-      Duration(milliseconds: _currentPollingInterval),
-      () async {
-        await _pollPaneContent();
-        _scheduleNextPoll();
-      },
-    );
-  }
-
-  /// Immediately boost polling after key input (improve responsiveness during idle)
-  void _boostPolling() {
-    _currentPollingInterval = _minPollingInterval;
-    _pollTimer?.cancel();
-    _scheduleNextPoll();
-  }
-
-  /// Update polling interval
-  void _updatePollingInterval() {
-    final ansiTextViewState = _ansiTextViewKey.currentState;
-    if (ansiTextViewState != null) {
-      final recommended = ansiTextViewState.recommendedPollingInterval;
-      // Limit max polling interval to 500ms during tmux copy-mode detection
-      // Improves copy-mode exit detection delay to max 0.5 seconds
-      final maxInterval = _scrollModeSource == ScrollModeSource.tmux ? 500 : _maxPollingInterval;
-      _currentPollingInterval = recommended.clamp(
-        _minPollingInterval,
-        maxInterval,
+    final activePane = ref.read(tmuxProvider).activePane;
+    if (activePane != null) {
+      ref.read(terminalDisplayProvider.notifier).updatePane(activePane);
+      _viewNotifier.value = _viewNotifier.value.copyWith(
+        paneWidth: activePane.width,
+        paneHeight: activePane.height,
       );
     }
   }
 
-  /// Poll pane content
-  Future<void> _pollPaneContent() async {
-    if (_isPolling || _isDisposed) return; // Previous poll still running or disposed
-    _isPolling = true;
+  void _scheduleControlSync({bool resyncPane = false}) {
+    _shouldResyncAfterControlRefresh =
+        _shouldResyncAfterControlRefresh || resyncPane;
+    _controlSyncTimer?.cancel();
+    _controlSyncTimer = Timer(const Duration(milliseconds: 120), () async {
+      if (!mounted || _isDisposed) {
+        return;
+      }
+
+      final shouldResync = _shouldResyncAfterControlRefresh;
+      _shouldResyncAfterControlRefresh = false;
+      await _refreshSessionTree(syncActive: true);
+      if (shouldResync) {
+        await _resyncActivePane(refreshTree: false);
+      }
+    });
+  }
+
+  void _cancelControlClientRestart({bool resetAttempts = false}) {
+    _controlRestartTimer?.cancel();
+    _controlRestartTimer = null;
+    if (resetAttempts) {
+      _controlRestartAttempt = 0;
+    }
+  }
+
+  Duration _nextControlRestartDelay() {
+    var delayMs = _initialControlRestartDelay.inMilliseconds;
+    for (var attempt = 0; attempt < _controlRestartAttempt; attempt++) {
+      delayMs *= 2;
+      if (delayMs >= _maxControlRestartDelay.inMilliseconds) {
+        delayMs = _maxControlRestartDelay.inMilliseconds;
+        break;
+      }
+    }
+    return Duration(milliseconds: delayMs);
+  }
+
+  void _scheduleControlClientRestart() {
+    if (_isDisposed || _isInBackground || _controlRestartTimer != null) {
+      return;
+    }
+
+    final sshState = ref.read(sshProvider);
+    if (!sshState.isConnected) {
+      if (!sshState.isReconnecting) {
+        unawaited(_attemptReconnect());
+      }
+      return;
+    }
+
+    final delay = _nextControlRestartDelay();
+    _controlRestartAttempt += 1;
+    _controlRestartTimer = Timer(delay, () async {
+      _controlRestartTimer = null;
+      if (!mounted || _isDisposed || _isInBackground) {
+        return;
+      }
+      await _restartTerminalStream(restartControlClient: true);
+    });
+  }
+
+  Future<void> _startControlClient(String sessionName) async {
+    if (_isDisposed || _isInBackground) {
+      return;
+    }
+    if (_controlClient != null &&
+        _controlClientSessionName == sessionName &&
+        _controlClient!.isStarted) {
+      return;
+    }
+
+    _cancelControlClientRestart();
+    await _stopControlClient();
+
+    final sshClient = ref.read(sshProvider.notifier).client;
+    if (sshClient == null || !sshClient.isConnected) {
+      return;
+    }
+
+    final activePane = ref.read(tmuxProvider).activePane;
+    final cols = activePane?.width ?? _viewNotifier.value.paneWidth;
+    final rows = activePane?.height ?? _viewNotifier.value.paneHeight;
+
+    final controlClient = TmuxControlClient(
+      sshClient,
+      onPaneOutput: _handleControlPaneOutput,
+      onNotification: _handleControlNotification,
+      onError: _handleControlClientError,
+      onClosed: _handleControlClientClosed,
+    );
 
     try {
-      final sshNotifier = ref.read(sshProvider.notifier);
-      final sshClient = sshNotifier.client;
+      await controlClient.start(
+        sessionName: sessionName,
+        cols: cols > 0 ? cols : 200,
+        rows: rows > 0 ? rows : 50,
+      );
+      _controlClient = controlClient;
+      _controlClientSessionName = sessionName;
+      _cancelControlClientRestart(resetAttempts: true);
+    } catch (_) {
+      await controlClient.dispose();
+      _controlClient = null;
+      _controlClientSessionName = null;
+      _scheduleControlClientRestart();
+    }
+  }
 
-      // Attempt auto-reconnect if connection is lost
-      if (sshClient == null || !sshClient.isConnected) {
-        // Start reconnection if not already reconnecting
-        final currentState = ref.read(sshProvider);
-        if (!currentState.isReconnecting) {
-          _attemptReconnect();
-        }
-        _isPolling = false;
+  Future<void> _stopControlClient({bool resetRestartState = false}) async {
+    _controlSyncTimer?.cancel();
+    _controlSyncTimer = null;
+    _cancelControlClientRestart(resetAttempts: resetRestartState);
+    final controlClient = _controlClient;
+    _controlClient = null;
+    _controlClientSessionName = null;
+    await controlClient?.dispose();
+  }
+
+  Future<void> _restartTerminalStream({
+    bool restartControlClient = false,
+    bool refreshTree = true,
+  }) async {
+    if (_isDisposed || _isInBackground) {
+      return;
+    }
+
+    final sessionName = ref.read(tmuxProvider).activeSessionName;
+    if (sessionName == null) {
+      await _stopControlClient(resetRestartState: true);
+      return;
+    }
+
+    final shouldRestartControlClient =
+        restartControlClient ||
+        _controlClientSessionName != sessionName ||
+        _controlClient == null ||
+        !_controlClient!.isStarted;
+
+    if (shouldRestartControlClient) {
+      await _stopControlClient();
+    }
+
+    await _resyncActivePane(refreshTree: refreshTree);
+
+    if (shouldRestartControlClient) {
+      await _startControlClient(sessionName);
+      if (!mounted || _isDisposed) {
+        return;
+      }
+      await _resyncActivePane(refreshTree: false);
+    }
+  }
+
+  void _handleControlPaneOutput(String paneId, String data) {
+    if (!mounted || _isDisposed || data.isEmpty) {
+      return;
+    }
+
+    final activePaneId = ref.read(tmuxProvider).activePaneId;
+    if (activePaneId != paneId) {
+      return;
+    }
+
+    if (_terminalMode == TerminalMode.select || _isResyncingPane) {
+      _deferredStreamOutput.write(data);
+      return;
+    }
+
+    final shouldAutoScroll =
+        _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
+    _terminal.write(data);
+    if (shouldAutoScroll || !_hasInitialScrolled) {
+      _hasInitialScrolled = true;
+      _paneTerminalViewKey.currentState?.scrollToBottom();
+    }
+  }
+
+  void _handleControlNotification(TmuxControlNotification notification) {
+    if (!mounted || _isDisposed) {
+      return;
+    }
+
+    switch (notification.name) {
+      case 'layout-change':
+      case 'pane-mode-changed':
+      case 'session-changed':
+      case 'sessions-changed':
+      case 'unlinked-window-add':
+      case 'unlinked-window-close':
+      case 'window-add':
+      case 'window-close':
+      case 'window-pane-changed':
+      case 'window-renamed':
+        _scheduleControlSync(resyncPane: true);
+        break;
+      case 'exit':
+        _handleControlClientClosed();
+        break;
+    }
+  }
+
+  void _handleControlClientError(Object error) {
+    if (_isDisposed || _isInBackground) {
+      return;
+    }
+    _scheduleControlClientRestart();
+  }
+
+  void _handleControlClientClosed() {
+    if (_isDisposed || _isInBackground) {
+      return;
+    }
+    _scheduleControlClientRestart();
+  }
+
+  void _flushDeferredStreamOutput() {
+    if (_deferredStreamOutput.isEmpty ||
+        _terminalMode == TerminalMode.select ||
+        _isResyncingPane) {
+      return;
+    }
+
+    final bufferedOutput = _deferredStreamOutput.takeAll();
+    final shouldAutoScroll =
+        _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
+    _terminal.write(bufferedOutput);
+    if (shouldAutoScroll) {
+      _paneTerminalViewKey.currentState?.scrollToBottom();
+    }
+  }
+
+  String _buildPaneSnapshotCommand(String paneId) {
+    final alternateOnCommand = TmuxCommands.getPaneAlternateOn(paneId);
+    final metadataCommand = TmuxCommands.getPaneSnapshotMetadata(paneId);
+    final mainSnapshotCommand = TmuxCommands.capturePane(
+      paneId,
+      escapeSequences: true,
+      preserveTrailingSpaces: true,
+    );
+    final alternateSnapshotCommand = TmuxCommands.capturePane(
+      paneId,
+      escapeSequences: true,
+      alternateScreen: true,
+      preserveTrailingSpaces: true,
+      quiet: true,
+    );
+
+    return '''
+__muxpod_alt=\$($alternateOnCommand);
+if [ "\$__muxpod_alt" = "1" ]; then
+  printf '\\001__MUXPOD_MAIN__\\001\n';
+  $mainSnapshotCommand;
+  printf '\\001__MUXPOD_ALT__\\001\n';
+  $alternateSnapshotCommand;
+else
+  $mainSnapshotCommand;
+fi;
+printf '\\001__MUXPOD_META__\\001';
+$metadataCommand
+''';
+  }
+
+  _PaneSnapshotPayload _parseSnapshotPayload(String combinedOutput) {
+    final metadataIndex = combinedOutput.lastIndexOf(_snapshotMetadataMarker);
+    if (metadataIndex == -1) {
+      final snapshot = _trimSingleTrailingNewline(combinedOutput);
+      return _PaneSnapshotPayload(
+        activeContent: snapshot,
+        mainContent: snapshot,
+        metadata: '',
+      );
+    }
+
+    final body = combinedOutput.substring(0, metadataIndex);
+    final metadata = combinedOutput
+        .substring(metadataIndex + _snapshotMetadataMarker.length)
+        .trim();
+    final trimmedBody = _trimSingleTrailingNewline(body);
+    final mainMarkerIndex = trimmedBody.indexOf(_snapshotMainMarker);
+    final altMarkerIndex = trimmedBody.indexOf(_snapshotAltMarker);
+
+    if (mainMarkerIndex != -1 &&
+        altMarkerIndex != -1 &&
+        mainMarkerIndex < altMarkerIndex) {
+      final mainContent = _trimSingleTrailingNewline(
+        trimmedBody.substring(
+          mainMarkerIndex + _snapshotMainMarker.length,
+          altMarkerIndex,
+        ),
+      );
+      final activeContent = _trimSingleTrailingNewline(
+        trimmedBody.substring(altMarkerIndex + _snapshotAltMarker.length),
+      );
+      return _PaneSnapshotPayload(
+        activeContent: activeContent,
+        mainContent: mainContent,
+        metadata: metadata,
+      );
+    }
+
+    final snapshot = _trimSingleTrailingNewline(trimmedBody);
+    return _PaneSnapshotPayload(
+      activeContent: snapshot,
+      mainContent: snapshot,
+      metadata: metadata,
+    );
+  }
+
+  String _trimSingleTrailingNewline(String value) {
+    if (value.endsWith('\n')) {
+      return value.substring(0, value.length - 1);
+    }
+    return value;
+  }
+
+  bool _parseTmuxFlag(String? value, {required bool fallback}) {
+    if (value == null) {
+      return fallback;
+    }
+
+    switch (value) {
+      case '1':
+        return true;
+      case '0':
+        return false;
+      default:
+        return fallback;
+    }
+  }
+
+  Future<void> _resyncActivePane({bool refreshTree = true}) async {
+    if (_isDisposed || _isResyncingPane) {
+      return;
+    }
+
+    final sshClient = ref.read(sshProvider.notifier).client;
+    if (sshClient == null || !sshClient.isConnected) {
+      return;
+    }
+
+    try {
+      _isResyncingPane = true;
+
+      if (refreshTree) {
+        await _refreshSessionTree(syncActive: true);
+      }
+      if (!mounted || _isDisposed) {
         return;
       }
 
-      // Get target from tmux_provider
-      final target = ref.read(tmuxProvider.notifier).currentTarget;
-      if (target == null) {
-        _isPolling = false;
+      final activePane = ref.read(tmuxProvider).activePane;
+      if (activePane == null) {
+        final emptyView = _viewNotifier.value.copyWith(
+          content: '',
+          mainContent: '',
+          alternateScreen: false,
+        );
+        _applyTerminalFrame(emptyView);
+        _viewNotifier.value = emptyView;
+        _hasInitialScrolled = false;
         return;
       }
+
+      final scrollbackLines = ref.read(settingsProvider).scrollbackLines;
+      final snapshotCommand = _buildPaneSnapshotCommand(activePane.id);
 
       final startTime = DateTime.now();
-
-      // Combine 3 commands into one execution (persistent shell handles only 1 command at a time)
-      // Get capture-pane + cursor position info + pane mode in a single call
-      // Output format: [pane content]\n[cursor info]\n[pane mode]
-      final combinedCommand =
-          '${TmuxCommands.capturePane(target, escapeSequences: true, startLine: -1000)}; '
-          '${TmuxCommands.getCursorPosition(target)}; '
-          '${TmuxCommands.getPaneMode(target)}';
-
       final combinedOutput = await sshClient.execPersistent(
-        combinedCommand,
+        snapshotCommand,
         timeout: const Duration(seconds: 2),
       );
-
-      // Split output (last line is pane mode, the one before is cursor info)
-      final lines = combinedOutput.split('\n');
-      final paneModeOutput = lines.isNotEmpty ? lines.removeLast() : '';
-      final cursorOutput = lines.isNotEmpty ? lines.removeLast() : '';
-      final output = lines.join('\n');
-
-      // Remove trailing newline from capture-pane output
-      final processedOutput = output.endsWith('\n')
-          ? output.substring(0, output.length - 1)
-          : output;
-
-      final endTime = DateTime.now();
-
-      // Skip if already unmounted
-      if (!mounted || _isDisposed) return;
-
-      // Update cursor position and pane size
-      if (cursorOutput.isNotEmpty) {
-        final parts = cursorOutput.trim().split(',');
-        if (parts.length >= 4) {
-          final x = int.tryParse(parts[0]);
-          final y = int.tryParse(parts[1]);
-          final w = int.tryParse(parts[2]);
-          final h = int.tryParse(parts[3]);
-
-          // Detect pane size updates
-          if (w != null && h != null && (w != _viewNotifier.value.paneWidth || h != _viewNotifier.value.paneHeight)) {
-            _viewNotifier.value = _viewNotifier.value.copyWith(paneWidth: w, paneHeight: h);
-            // Notify for font size recalculation
-            final currentActivePane = ref.read(tmuxProvider).activePane;
-            if (currentActivePane != null) {
-              ref.read(terminalDisplayProvider.notifier).updatePane(
-                    currentActivePane.copyWith(width: w, height: h),
-                  );
-            }
-          }
-
-          final activePaneId = ref.read(tmuxProvider).activePaneId;
-          if (activePaneId != null && x != null && y != null) {
-            ref.read(tmuxProvider.notifier).updateCursorPosition(activePaneId, x, y);
-          }
-        }
-      }
-
-      // Update latency
-      final latency = endTime.difference(startTime).inMilliseconds;
-
-      // Update if there are differences (with throttling)
-      final currentView = _viewNotifier.value;
-      if (processedOutput != currentView.content || latency != currentView.latency) {
-        // Buffer updates only during manual scroll mode to preserve selection state
-        // During tmux copy-mode, capture-pane returns content at the scroll position so display in real-time
-        if (_terminalMode == TerminalMode.scroll && _scrollModeSource == ScrollModeSource.manual) {
-          _bufferedContent = processedOutput;
-          _bufferedLatency = latency;
-          _hasBufferedUpdate = true;
-          // Only update latency (does not affect selection)
-          if (mounted && !_isDisposed) {
-            _viewNotifier.value = currentView.copyWith(latency: latency);
-          }
-        } else {
-          _scheduleUpdate(processedOutput, latency);
-        }
-      }
-
-      // Auto mode switching via tmux copy-mode detection
-      if (mounted && !_isDisposed) {
-        final paneMode = paneModeOutput.trim();
-        final isTmuxCopyMode = paneMode.isNotEmpty;
-
-        if (isTmuxCopyMode && _scrollModeSource == ScrollModeSource.none) {
-          // Entered tmux copy-mode -> auto-switch to scroll mode
-          setState(() {
-            _terminalMode = TerminalMode.scroll;
-            _scrollModeSource = ScrollModeSource.tmux;
-          });
-        } else if (!isTmuxCopyMode && _scrollModeSource == ScrollModeSource.tmux) {
-          // tmux copy-mode ended -> auto-return to normal mode
-          setState(() {
-            _terminalMode = TerminalMode.normal;
-            _scrollModeSource = ScrollModeSource.none;
-          });
-          _applyBufferedUpdate();
-        }
-      }
-
-      // Update adaptive polling interval
-      _updatePollingInterval();
-    } catch (e) {
-      // Attempt auto-reconnect on communication error
+      final latency = DateTime.now().difference(startTime).inMilliseconds;
       if (!_isDisposed) {
-        final currentState = ref.read(sshProvider);
-        if (!currentState.isReconnecting) {
-          _attemptReconnect();
+        _latencyNotifier.value = latency;
+      }
+
+      if (!mounted || _isDisposed) {
+        return;
+      }
+
+      final snapshotPayload = _parseSnapshotPayload(combinedOutput);
+
+      var nextView = _viewNotifier.value.copyWith(
+        content: snapshotPayload.activeContent,
+        mainContent: snapshotPayload.mainContent,
+        alternateScreen: false,
+        paneWidth: activePane.width,
+        paneHeight: activePane.height,
+        cursorX: activePane.cursorX,
+        cursorY: activePane.cursorY,
+      );
+
+      final metadataParts = snapshotPayload.metadata.split(',');
+      if (metadataParts.length >= 5) {
+        final alternateScreen = metadataParts[0] == '1';
+        final x = int.tryParse(metadataParts[1]);
+        final y = int.tryParse(metadataParts[2]);
+        final w = int.tryParse(metadataParts[3]);
+        final h = int.tryParse(metadataParts[4]);
+        final insertMode = _parseTmuxFlag(
+          metadataParts.length > 5 ? metadataParts[5] : null,
+          fallback: nextView.insertMode,
+        );
+        final cursorKeysMode = _parseTmuxFlag(
+          metadataParts.length > 6 ? metadataParts[6] : null,
+          fallback: nextView.cursorKeysMode,
+        );
+        final appKeypadMode = _parseTmuxFlag(
+          metadataParts.length > 7 ? metadataParts[7] : null,
+          fallback: nextView.appKeypadMode,
+        );
+        final autoWrapMode = _parseTmuxFlag(
+          metadataParts.length > 8 ? metadataParts[8] : null,
+          fallback: nextView.autoWrapMode,
+        );
+        final cursorVisible = _parseTmuxFlag(
+          metadataParts.length > 9 ? metadataParts[9] : null,
+          fallback: nextView.cursorVisible,
+        );
+        final originMode = _parseTmuxFlag(
+          metadataParts.length > 10 ? metadataParts[10] : null,
+          fallback: nextView.originMode,
+        );
+        final scrollRegionUpper = metadataParts.length > 11
+            ? int.tryParse(metadataParts[11])
+            : null;
+        final scrollRegionLower = metadataParts.length > 12
+            ? int.tryParse(metadataParts[12])
+            : null;
+
+        nextView = nextView.copyWith(
+          alternateScreen: alternateScreen,
+          insertMode: insertMode,
+          cursorKeysMode: cursorKeysMode,
+          appKeypadMode: appKeypadMode,
+          autoWrapMode: autoWrapMode,
+          cursorVisible: cursorVisible,
+          originMode: originMode,
+          scrollRegionUpper: scrollRegionUpper,
+          scrollRegionLower: scrollRegionLower,
+        );
+
+        if (w != null && h != null) {
+          nextView = nextView.copyWith(paneWidth: w, paneHeight: h);
+          ref
+              .read(terminalDisplayProvider.notifier)
+              .updatePane(activePane.copyWith(width: w, height: h));
         }
+
+        if (x != null && y != null) {
+          ref
+              .read(tmuxProvider.notifier)
+              .updateCursorPosition(activePane.id, x, y);
+          nextView = nextView.copyWith(cursorX: x, cursorY: y);
+        }
+      }
+
+      _applyResyncUpdate(nextView);
+      await _prependHistoryScrollback(
+        sshClient: sshClient,
+        paneId: activePane.id,
+        scrollbackLines: scrollbackLines,
+        alternateScreen: nextView.alternateScreen,
+      );
+    } catch (_) {
+      final currentState = ref.read(sshProvider);
+      if (!currentState.isReconnecting) {
+        unawaited(_attemptReconnect());
       }
     } finally {
-      _isPolling = false;
+      _isResyncingPane = false;
+      _flushDeferredStreamOutput();
     }
   }
 
-  /// Apply buffered updates (called when scroll mode ends)
-  void _applyBufferedUpdate() {
-    if (_hasBufferedUpdate) {
-      _scheduleUpdate(_bufferedContent, _bufferedLatency);
-      _hasBufferedUpdate = false;
-      _bufferedContent = '';
-      _bufferedLatency = 0;
+  void _applyResyncUpdate(TerminalSnapshotFrame viewData) {
+    _pendingViewData = viewData;
+    _applyUpdate();
+  }
+
+  Future<void> _prependHistoryScrollback({
+    required SshClient sshClient,
+    required String paneId,
+    required int scrollbackLines,
+    required bool alternateScreen,
+  }) async {
+    if (alternateScreen || scrollbackLines <= _terminal.viewHeight) {
+      return;
+    }
+
+    final historyOutput = await sshClient.execPersistent(
+      TmuxCommands.capturePane(
+        paneId,
+        escapeSequences: false,
+        preserveTrailingSpaces: true,
+        startLine: -scrollbackLines,
+        endLine: -1,
+      ),
+      timeout: const Duration(seconds: 2),
+    );
+
+    final normalized = _trimSingleTrailingNewline(
+      historyOutput.replaceAll('\r\n', '\n'),
+    );
+    if (normalized.isEmpty) {
+      return;
+    }
+
+    final historyLines = normalized
+        .split('\n')
+        .map((line) => _buildHistoryBufferLine(line, _terminal.viewWidth))
+        .toList(growable: false);
+    if (historyLines.isEmpty) {
+      return;
+    }
+
+    _terminal.mainBuffer.lines.insertAll(0, historyLines);
+    _terminal.notifyListeners();
+    if (_terminalMode == TerminalMode.normal &&
+        (_paneTerminalViewKey.currentState?.shouldAutoFollow ??
+            !_hasInitialScrolled)) {
+      _paneTerminalViewKey.currentState?.scrollToBottom();
     }
   }
 
-  /// Schedule update considering frame skipping
-  ///
-  /// Throttle to avoid updating every frame during high-frequency updates (htop, etc.).
-  /// Consecutive updates within 16ms (~60fps) are deferred to the next frame.
-  void _scheduleUpdate(String content, int latency) {
-    _pendingContent = content;
-    _pendingLatency = latency;
+  BufferLine _buildHistoryBufferLine(String text, int width) {
+    final line = BufferLine(width);
+    var column = 0;
 
-    // Do nothing if an update is already scheduled
-    if (_pendingUpdate) return;
+    for (final rune in text.runes) {
+      if (column >= width) {
+        break;
+      }
 
-    final now = DateTime.now();
-    final elapsed = now.difference(_lastFrameTime);
+      if (rune == 0x09) {
+        final nextTabStop = ((column ~/ 8) + 1) * 8;
+        while (column < nextTabStop && column < width) {
+          line.setCodePoint(column, 0x20);
+          column += 1;
+        }
+        continue;
+      }
 
-    if (elapsed >= _minFrameInterval) {
-      // Enough time has elapsed, update immediately
-      _applyUpdate();
-    } else {
-      // Frame skip: update on the next frame
-      _pendingUpdate = true;
-      SchedulerBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || _isDisposed) return;
-        _pendingUpdate = false;
-        _applyUpdate();
-      });
+      line.setCodePoint(column, rune);
+      final cellWidth = line.getWidth(column);
+      if (cellWidth <= 0) {
+        continue;
+      }
+      column += cellWidth;
     }
+
+    return line;
   }
 
   /// Apply pending update
   void _applyUpdate() {
     if (!mounted || _isDisposed) return;
-    _lastFrameTime = DateTime.now();
-    // Update ValueNotifier (avoids parent setState(), only rebuilds ValueListenableBuilder)
-    _viewNotifier.value = _viewNotifier.value.copyWith(
-      content: _pendingContent,
-      latency: _pendingLatency,
-    );
+    final shouldAutoScroll =
+        _paneTerminalViewKey.currentState?.shouldAutoFollow ??
+        !_hasInitialScrolled;
+    _applyTerminalFrame(_pendingViewData);
+    _viewNotifier.value = _pendingViewData;
+    if (_terminalMode == TerminalMode.normal && shouldAutoScroll) {
+      _paneTerminalViewKey.currentState?.scrollToBottom();
+    }
 
     // Scroll to bottom on first content received
-    if (!_hasInitialScrolled && _pendingContent.isNotEmpty) {
+    if (!_hasInitialScrolled && _pendingViewData.content.isNotEmpty) {
       _hasInitialScrolled = true;
-      _scrollToCaret();
+      _paneTerminalViewKey.currentState?.scrollToBottom();
     }
+  }
+
+  void _applyTerminalFrame(TerminalSnapshotFrame viewData) {
+    _terminal = createTerminalFromSnapshot(
+      frame: viewData,
+      maxLines: _terminalScrollbackLines,
+      showCursor: ref.read(settingsProvider).showTerminalCursor,
+      onOutput: _handleTerminalOutput,
+      controller: _terminalController,
+    );
+  }
+
+  void _handleTerminalOutput(String data) {
+    if (_terminalMode == TerminalMode.select) {
+      return;
+    }
+
+    unawaited(_sendTerminalData(normalizeTerminalOutput(data)));
   }
 
   /// Attempt auto-reconnection
@@ -741,7 +1164,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       // Retry on reconnection failure (until max attempts reached)
       final currentState = ref.read(sshProvider);
       if (currentState.reconnectAttempt < 5) {
-        // Will be retried on next poll
+        // Will be retried on the next reconnect attempt.
       }
     }
   }
@@ -781,7 +1204,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // Disable WakeLock
     WakelockPlus.disable();
     // Clear reconnection success callback
-    ref.read(sshProvider.notifier).onReconnectSuccess = null;
+    _sshNotifier?.onReconnectSuccess = null;
+    _sshNotifier = null;
     // Cancel Riverpod subscriptions
     _sshSubscription?.close();
     _sshSubscription = null;
@@ -791,23 +1215,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _settingsSubscription = null;
     _networkSubscription?.close();
     _networkSubscription = null;
-    // Stop timers
-    _pollTimer?.cancel();
-    _pollTimer = null;
-    _treeRefreshTimer?.cancel();
-    _treeRefreshTimer = null;
+    _controlSyncTimer?.cancel();
+    _controlSyncTimer = null;
+    _stopLatencyPolling();
+    unawaited(_stopControlClient(resetRestartState: true));
     // Dispose ValueNotifier
     _viewNotifier.dispose();
+    _latencyNotifier.dispose();
     // Dispose scroll controller
     _terminalScrollController.dispose();
+    _terminalController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     // Use local state (do not use ref.watch)
-    // Note: tmuxProvider is obtained via ref.watch within each Consumer
-    // This prevents parent build() from being called by polling, stabilizing BottomSheet
+    // Note: tmuxProvider is obtained via ref.watch within each Consumer.
+    // This keeps high-frequency terminal output out of the parent build path.
     final sshState = _sshState;
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
@@ -830,7 +1255,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   duration: const Duration(milliseconds: 200),
                   decoration: BoxDecoration(
                     border: Border.all(
-                      color: _terminalMode == TerminalMode.scroll
+                      color: _terminalMode == TerminalMode.select
                           ? DesignColors.warning
                           : Colors.transparent,
                       width: 3,
@@ -838,41 +1263,38 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   ),
                   child: Stack(
                     children: [
-                      // Terminal display: ValueListenableBuilder + Consumer
-                      // Polling updates only rebuild this subtree via ValueNotifier
                       RepaintBoundary(
-                        child: ValueListenableBuilder<_TerminalViewData>(
+                        child: ValueListenableBuilder<TerminalSnapshotFrame>(
                           valueListenable: _viewNotifier,
                           builder: (context, viewData, _) {
-                            return Consumer(
-                              builder: (context, ref, _) {
-                                final cursor = ref.watch(tmuxProvider.select((s) => (
-                                  x: s.activePane?.cursorX ?? 0,
-                                  y: s.activePane?.cursorY ?? 0,
-                                )));
-                                return AnsiTextView(
-                                  key: _ansiTextViewKey,
-                                  text: viewData.content,
-                                  paneWidth: viewData.paneWidth,
-                                  paneHeight: viewData.paneHeight,
-                                  backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-                                  foregroundColor: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.9),
-                                  onKeyInput: _handleKeyInput,
-                                  mode: _terminalMode,
-                                  zoomEnabled: true,
-                                  onZoomChanged: (scale) {
-                                    setState(() {
-                                      _zoomScale = scale;
-                                    });
-                                  },
-                                  verticalScrollController: _terminalScrollController,
-                                  cursorX: cursor.x,
-                                  cursorY: cursor.y,
-                                  onArrowSwipe: _sendSpecialKey,
-                                  onTwoFingerSwipe: _handleTwoFingerSwipe,
-                                  navigableDirections: _getNavigableDirections(),
-                                );
+                            return PaneTerminalView(
+                              key: _paneTerminalViewKey,
+                              terminal: _terminal,
+                              terminalController: _terminalController,
+                              paneWidth: viewData.paneWidth,
+                              paneHeight: viewData.paneHeight,
+                              backgroundColor: Theme.of(
+                                context,
+                              ).scaffoldBackgroundColor,
+                              foregroundColor: Theme.of(
+                                context,
+                              ).colorScheme.onSurface.withValues(alpha: 0.9),
+                              mode: _terminalMode == TerminalMode.select
+                                  ? PaneTerminalMode.select
+                                  : PaneTerminalMode.normal,
+                              zoomEnabled: true,
+                              showCursor: ref
+                                  .watch(settingsProvider)
+                                  .showTerminalCursor,
+                              onZoomChanged: (scale) {
+                                setState(() {
+                                  _zoomScale = scale;
+                                });
                               },
+                              verticalScrollController:
+                                  _terminalScrollController,
+                              onTwoFingerSwipe: _handleTwoFingerSwipe,
+                              navigableDirections: _getNavigableDirections(),
                             );
                           },
                         ),
@@ -893,9 +1315,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 ),
               ),
               SpecialKeysBar(
-                onKeyPressed: _sendKey,
+                onKeyPressed: _sendLiteralKey,
                 onSpecialKeyPressed: _sendSpecialKey,
-                onInputTap: _showInputDialog,
+                onInputTap: _terminalMode == TerminalMode.select
+                    ? null
+                    : _showInputDialog,
                 directInputEnabled: _directInputEnabled,
                 onDirectInputToggle: () {
                   ref.read(settingsProvider.notifier).toggleDirectInput();
@@ -907,9 +1331,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           if (_isConnecting || sshState.isConnecting)
             Container(
               color: isDark ? Colors.black54 : Colors.white70,
-              child: const Center(
-                child: CircularProgressIndicator(),
-              ),
+              child: const Center(child: CircularProgressIndicator()),
             ),
           // Error overlay
           if (_connectionError != null || sshState.hasError)
@@ -917,17 +1339,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ],
       ),
     );
-  }
-
-  /// Handle key input from AnsiTextView
-  void _handleKeyInput(KeyInputEvent event) {
-    // Send in tmux format for special keys
-    if (event.isSpecialKey && event.tmuxKeyName != null) {
-      _sendSpecialKey(event.tmuxKeyName!);
-    } else {
-      // Send normal characters as literal
-      _sendKeyData(event.data);
-    }
   }
 
   /// Switch pane via two-finger swipe
@@ -978,14 +1389,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     return rawDirections;
   }
 
-  /// Send key data via tmux send-keys
-  Future<void> _sendKeyData(String data) async {
+  Future<void> _sendTerminalData(String data) async {
     final sshClient = ref.read(sshProvider.notifier).client;
 
-    // Add to queue if disconnected
+    if (data.isEmpty) {
+      return;
+    }
+
     if (sshClient == null || !sshClient.isConnected) {
       _inputQueue.enqueue(data);
-      if (mounted) setState(() {}); // Update queuing state
+      if (mounted) setState(() {});
       return;
     }
 
@@ -993,11 +1406,46 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (target == null) return;
 
     try {
-      // Send escape sequences and special keys as literal
-      await sshClient.exec(TmuxCommands.sendKeys(target, data, literal: true));
-      _boostPolling();
+      final commands = TmuxCommands.sendKeysLiteralChunks(
+        target,
+        data,
+        maxChunkLength: _literalInputChunkLength,
+      );
+      for (final command in commands) {
+        await sshClient.execPersistentInput(
+          command,
+          timeout: const Duration(seconds: 2),
+        );
+      }
     } catch (_) {
-      // Silently ignore key send errors
+      // Silently ignore key send errors.
+    }
+  }
+
+  void _sendLiteralKey(String key) {
+    if (_terminalMode == TerminalMode.select) {
+      return;
+    }
+    _ensureTerminalViewportAtBottomForInput();
+    XtermInputAdapter.sendText(_terminal, key);
+  }
+
+  void _sendSpecialKey(String tmuxKey) {
+    if (_terminalMode == TerminalMode.select) {
+      return;
+    }
+    _ensureTerminalViewportAtBottomForInput();
+    XtermInputAdapter.sendTmuxKey(_terminal, tmuxKey);
+  }
+
+  void _ensureTerminalViewportAtBottomForInput() {
+    final paneView = _paneTerminalViewKey.currentState;
+    if (paneView == null) {
+      return;
+    }
+
+    if (paneView.shouldAutoFollow || paneView.isNearBottom) {
+      paneView.scrollToBottom();
     }
   }
 
@@ -1006,17 +1454,40 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null) return;
 
+    final previousPaneId = ref.read(tmuxProvider).activePaneId;
+    await _refreshSessionTree();
     // Update active session in tmux_provider
     ref.read(tmuxProvider.notifier).setActiveSession(sessionName);
 
-    // Set the active pane to selected state (execute select-pane command)
-    final activePaneId = ref.read(tmuxProvider).activePaneId;
-    if (activePaneId != null) {
-      await _selectPane(activePaneId);
-    } else {
-      // Clear and re-fetch terminal content
-      _viewNotifier.value = _viewNotifier.value.copyWith(content: '');
+    final nextPane = ref.read(tmuxProvider).activePane;
+    if (nextPane == null) {
+      await _stopControlClient(resetRestartState: true);
+      final emptyView = _viewNotifier.value.copyWith(
+        content: '',
+        mainContent: '',
+        alternateScreen: false,
+      );
+      _applyTerminalFrame(emptyView);
+      _viewNotifier.value = emptyView;
       _hasInitialScrolled = false;
+      return;
+    }
+
+    try {
+      if (previousPaneId != null && previousPaneId != nextPane.id) {
+        await sshClient.execPersistentInput(
+          TmuxCommands.sendKeys(previousPaneId, '\x1b[O', literal: true),
+        );
+      }
+      await _restartTerminalStream(
+        restartControlClient: true,
+        refreshTree: false,
+      );
+      await sshClient.execPersistentInput(
+        TmuxCommands.sendKeys(nextPane.id, '\x1b[I', literal: true),
+      );
+    } catch (_) {
+      return;
     }
   }
 
@@ -1032,11 +1503,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     try {
-      // Execute tmux select-window
-      await sshClient.exec(TmuxCommands.selectWindow(sessionName, windowIndex));
-    } catch (e) {
-      // Ignore if SSH connection is closed
-      debugPrint('[Terminal] Failed to select window: $e');
+      await sshClient.execPersistent(
+        TmuxCommands.selectWindow(sessionName, windowIndex),
+      );
+      await _refreshSessionTree(syncActive: true);
+    } catch (_) {
       return;
     }
     if (!mounted || _isDisposed) return;
@@ -1044,14 +1515,26 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     // Update active window in tmux_provider
     ref.read(tmuxProvider.notifier).setActiveWindow(windowIndex);
 
-    // Set the active pane to selected state (execute select-pane command)
-    final activePaneId = ref.read(tmuxProvider).activePaneId;
-    if (activePaneId != null) {
-      await _selectPane(activePaneId);
-    } else {
-      // Clear and re-fetch terminal content
-      _viewNotifier.value = _viewNotifier.value.copyWith(content: '');
+    final activePane = ref.read(tmuxProvider).activePane;
+    if (activePane == null) {
+      final emptyView = _viewNotifier.value.copyWith(
+        content: '',
+        mainContent: '',
+        alternateScreen: false,
+      );
+      _applyTerminalFrame(emptyView);
+      _viewNotifier.value = emptyView;
       _hasInitialScrolled = false;
+      return;
+    }
+
+    try {
+      await _restartTerminalStream(refreshTree: false);
+      await sshClient.execPersistentInput(
+        TmuxCommands.sendKeys(activePane.id, '\x1b[I', literal: true),
+      );
+    } catch (_) {
+      return;
     }
   }
 
@@ -1065,17 +1548,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     try {
       // Send focus-out to the previous pane
       if (oldPaneId != null && oldPaneId != paneId) {
-        await sshClient.exec(TmuxCommands.sendKeys(oldPaneId, '\x1b[O', literal: true));
+        await sshClient.execPersistentInput(
+          TmuxCommands.sendKeys(oldPaneId, '\x1b[O', literal: true),
+        );
       }
 
-      // Execute tmux select-pane
-      await sshClient.exec(TmuxCommands.selectPane(paneId));
+      await sshClient.execPersistent(TmuxCommands.selectPane(paneId));
+      await _refreshSessionTree(syncActive: true);
 
       // Send focus-in to the new pane (so apps like Claude Code can detect focus)
-      await sshClient.exec(TmuxCommands.sendKeys(paneId, '\x1b[I', literal: true));
-    } catch (e) {
-      // Ignore if SSH connection is closed
-      debugPrint('[Terminal] Failed to select pane: $e');
+      await sshClient.execPersistentInput(
+        TmuxCommands.sendKeys(paneId, '\x1b[I', literal: true),
+      );
+    } catch (_) {
       return;
     }
     if (!mounted || _isDisposed) return;
@@ -1092,16 +1577,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         paneWidth: activePane.width,
         paneHeight: activePane.height,
         content: '',
+        mainContent: '',
+        alternateScreen: false,
       );
-      // Reset initial scroll flag when switching panes
-      // Will scroll to bottom on next content received
-      _hasInitialScrolled = false;
+      await _restartTerminalStream(refreshTree: false);
 
       // Save session info (for restoration)
       final sessionName = tmuxState.activeSessionName;
       final windowIndex = tmuxState.activeWindowIndex;
       if (sessionName != null && windowIndex != null) {
-        ref.read(activeSessionsProvider.notifier).updateLastPane(
+        ref
+            .read(activeSessionsProvider.notifier)
+            .updateLastPane(
               connectionId: widget.connectionId,
               sessionName: sessionName,
               windowIndex: windowIndex,
@@ -1109,17 +1596,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             );
       }
     }
-  }
-
-  /// Scroll to caret position
-  ///
-  /// Called on first display after panel/window switch,
-  /// scrolls so the cursor line is near the center of the screen
-  void _scrollToCaret() {
-    Future.delayed(const Duration(milliseconds: 100), () {
-      if (!mounted || _isDisposed) return;
-      _ansiTextViewKey.currentState?.scrollToCaret();
-    });
   }
 
   /// Error overlay
@@ -1137,7 +1613,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           children: [
             Icon(
               isWaitingForNetwork ? Icons.signal_wifi_off : Icons.error_outline,
-              color: isWaitingForNetwork ? DesignColors.warning : colorScheme.error,
+              color: isWaitingForNetwork
+                  ? DesignColors.warning
+                  : colorScheme.error,
               size: 48,
             ),
             const SizedBox(height: 16),
@@ -1153,7 +1631,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             if (queuedCount > 0) ...[
               const SizedBox(height: 12),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
                 decoration: BoxDecoration(
                   color: DesignColors.primary.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(8),
@@ -1161,11 +1642,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(
-                      Icons.keyboard,
-                      size: 16,
-                      color: DesignColors.primary,
-                    ),
+                    Icon(Icons.keyboard, size: 16, color: DesignColors.primary),
                     const SizedBox(width: 8),
                     Text(
                       '$queuedCount chars queued',
@@ -1277,23 +1754,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 ),
               ),
             ),
-            // Scroll mode indicator
-            if (_terminalMode == TerminalMode.scroll)
+            // Select mode indicator
+            if (_terminalMode == TerminalMode.select)
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 margin: const EdgeInsets.only(right: 8),
                 decoration: BoxDecoration(
                   color: DesignColors.warning.withValues(alpha: 0.2),
                   borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: DesignColors.warning.withValues(alpha: 0.5)),
+                  border: Border.all(
+                    color: DesignColors.warning.withValues(alpha: 0.5),
+                  ),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.unfold_more, size: 12, color: DesignColors.warning),
+                    Icon(
+                      Icons.content_copy,
+                      size: 12,
+                      color: DesignColors.warning,
+                    ),
                     const SizedBox(width: 4),
                     Text(
-                      'Scroll',
+                      'Select',
                       style: GoogleFonts.jetBrainsMono(
                         fontSize: 10,
                         color: DesignColors.warning,
@@ -1320,10 +1803,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   ),
                 ),
               ),
-            // Latency / Reconnect indicator (scope polling updates via ValueListenableBuilder)
-            ValueListenableBuilder<_TerminalViewData>(
-              valueListenable: _viewNotifier,
-              builder: (context, viewData, _) => _buildConnectionIndicator(viewData.latency),
+            // Latency / Reconnect indicator
+            ValueListenableBuilder<int>(
+              valueListenable: _latencyNotifier,
+              builder: (context, latency, _) =>
+                  _buildConnectionIndicator(latency),
             ),
             // Settings button
             IconButton(
@@ -1386,22 +1870,33 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                     itemCount: tmuxState.sessions.length,
                     itemBuilder: (context, index) {
                       final session = tmuxState.sessions[index];
-                      final isActive = session.name == tmuxState.activeSessionName;
+                      final isActive =
+                          session.name == tmuxState.activeSessionName;
                       return ListTile(
                         leading: Icon(
                           Icons.folder,
-                          color: isActive ? colorScheme.primary : colorScheme.onSurface.withValues(alpha: 0.6),
+                          color: isActive
+                              ? colorScheme.primary
+                              : colorScheme.onSurface.withValues(alpha: 0.6),
                         ),
                         title: Text(
                           session.name,
                           style: TextStyle(
-                            color: isActive ? colorScheme.primary : colorScheme.onSurface,
-                            fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                            color: isActive
+                                ? colorScheme.primary
+                                : colorScheme.onSurface,
+                            fontWeight: isActive
+                                ? FontWeight.bold
+                                : FontWeight.normal,
                           ),
                         ),
                         subtitle: Text(
                           '${session.windowCount} windows',
-                          style: TextStyle(color: colorScheme.onSurface.withValues(alpha: 0.38)),
+                          style: TextStyle(
+                            color: colorScheme.onSurface.withValues(
+                              alpha: 0.38,
+                            ),
+                          ),
                         ),
                         trailing: isActive
                             ? Icon(Icons.check, color: colorScheme.primary)
@@ -1469,22 +1964,33 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                     itemCount: session.windows.length,
                     itemBuilder: (context, index) {
                       final window = session.windows[index];
-                      final isActive = window.index == tmuxState.activeWindowIndex;
+                      final isActive =
+                          window.index == tmuxState.activeWindowIndex;
                       return ListTile(
                         leading: Icon(
                           Icons.tab,
-                          color: isActive ? colorScheme.primary : colorScheme.onSurface.withValues(alpha: 0.6),
+                          color: isActive
+                              ? colorScheme.primary
+                              : colorScheme.onSurface.withValues(alpha: 0.6),
                         ),
                         title: Text(
                           '${window.index}: ${window.name}',
                           style: TextStyle(
-                            color: isActive ? colorScheme.primary : colorScheme.onSurface,
-                            fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                            color: isActive
+                                ? colorScheme.primary
+                                : colorScheme.onSurface,
+                            fontWeight: isActive
+                                ? FontWeight.bold
+                                : FontWeight.normal,
                           ),
                         ),
                         subtitle: Text(
                           '${window.paneCount} panes',
-                          style: TextStyle(color: colorScheme.onSurface.withValues(alpha: 0.38)),
+                          style: TextStyle(
+                            color: colorScheme.onSurface.withValues(
+                              alpha: 0.38,
+                            ),
+                          ),
                         ),
                         trailing: isActive
                             ? Icon(Icons.check, color: colorScheme.primary)
@@ -1569,8 +2075,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       final paneTitle = pane.title?.isNotEmpty == true
                           ? pane.title!
                           : (pane.currentCommand?.isNotEmpty == true
-                              ? pane.currentCommand!
-                              : 'Pane ${pane.index}');
+                                ? pane.currentCommand!
+                                : 'Pane ${pane.index}');
                       return ListTile(
                         leading: Container(
                           width: 32,
@@ -1583,7 +2089,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                             border: Border.all(
                               color: isActive
                                   ? colorScheme.primary.withValues(alpha: 0.5)
-                                  : colorScheme.onSurface.withValues(alpha: 0.1),
+                                  : colorScheme.onSurface.withValues(
+                                      alpha: 0.1,
+                                    ),
                             ),
                           ),
                           child: Center(
@@ -1592,7 +2100,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                               style: GoogleFonts.jetBrainsMono(
                                 fontSize: 14,
                                 fontWeight: FontWeight.w700,
-                                color: isActive ? colorScheme.primary : colorScheme.onSurface.withValues(alpha: 0.6),
+                                color: isActive
+                                    ? colorScheme.primary
+                                    : colorScheme.onSurface.withValues(
+                                        alpha: 0.6,
+                                      ),
                               ),
                             ),
                           ),
@@ -1600,13 +2112,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                         title: Text(
                           paneTitle,
                           style: TextStyle(
-                            color: isActive ? colorScheme.primary : colorScheme.onSurface,
-                            fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                            color: isActive
+                                ? colorScheme.primary
+                                : colorScheme.onSurface,
+                            fontWeight: isActive
+                                ? FontWeight.bold
+                                : FontWeight.normal,
                           ),
                         ),
                         subtitle: Text(
                           '${pane.width}x${pane.height}',
-                          style: TextStyle(color: colorScheme.onSurface.withValues(alpha: 0.38)),
+                          style: TextStyle(
+                            color: colorScheme.onSurface.withValues(
+                              alpha: 0.38,
+                            ),
+                          ),
                         ),
                         trailing: isActive
                             ? Icon(Icons.check, color: colorScheme.primary)
@@ -1644,7 +2164,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             ? BoxDecoration(
                 color: colorScheme.onSurface.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: colorScheme.onSurface.withValues(alpha: 0.05)),
+                border: Border.all(
+                  color: colorScheme.onSurface.withValues(alpha: 0.05),
+                ),
               )
             : null,
         child: Row(
@@ -1656,7 +2178,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 size: 12,
                 color: isActive
                     ? colorScheme.primary
-                    : (isSelected ? colorScheme.onSurface : colorScheme.onSurface.withValues(alpha: 0.6)),
+                    : (isSelected
+                          ? colorScheme.onSurface
+                          : colorScheme.onSurface.withValues(alpha: 0.6)),
               ),
               const SizedBox(width: 4),
             ],
@@ -1664,10 +2188,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               label.isEmpty ? '...' : label,
               style: GoogleFonts.jetBrainsMono(
                 fontSize: 11,
-                fontWeight: isActive || isSelected ? FontWeight.w700 : FontWeight.w400,
+                fontWeight: isActive || isSelected
+                    ? FontWeight.w700
+                    : FontWeight.w400,
                 color: isActive
                     ? colorScheme.primary
-                    : (isSelected ? colorScheme.onSurface : colorScheme.onSurface.withValues(alpha: 0.5)),
+                    : (isSelected
+                          ? colorScheme.onSurface
+                          : colorScheme.onSurface.withValues(alpha: 0.5)),
               ),
             ),
             if (onTap != null) ...[
@@ -1704,7 +2232,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// Show terminal menu
   void _showTerminalMenu() {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final menuBgColor = isDark ? DesignColors.surfaceDark : DesignColors.surfaceLight;
+    final menuBgColor = isDark
+        ? DesignColors.surfaceDark
+        : DesignColors.surfaceLight;
     final textColor = isDark ? Colors.white : Colors.black87;
     final mutedTextColor = isDark ? Colors.white38 : Colors.black38;
     final inactiveIconColor = isDark ? Colors.white60 : Colors.black45;
@@ -1739,70 +2269,69 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   ],
                 ),
               ),
-              Divider(height: 1, color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300),
+              Divider(
+                height: 1,
+                color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
+              ),
               // Mode switching (Normal / Scroll & Select)
               ListTile(
                 leading: Icon(
-                  _terminalMode == TerminalMode.scroll
-                      ? Icons.unfold_more
+                  _terminalMode == TerminalMode.select
+                      ? Icons.content_copy
                       : Icons.keyboard,
-                  color: _terminalMode == TerminalMode.scroll
+                  color: _terminalMode == TerminalMode.select
                       ? DesignColors.warning
                       : inactiveIconColor,
                 ),
                 title: Text(
-                  _terminalMode == TerminalMode.scroll
-                      ? 'Scroll & Select Mode'
+                  _terminalMode == TerminalMode.select
+                      ? 'Select Mode'
                       : 'Normal Mode',
                   style: TextStyle(
-                    color: _terminalMode == TerminalMode.scroll
+                    color: _terminalMode == TerminalMode.select
                         ? DesignColors.warning
                         : textColor,
-                    fontWeight: _terminalMode == TerminalMode.scroll
+                    fontWeight: _terminalMode == TerminalMode.select
                         ? FontWeight.bold
                         : FontWeight.normal,
                   ),
                 ),
                 subtitle: Text(
-                  _terminalMode == TerminalMode.scroll
-                      ? 'Tap to return to normal mode'
-                      : 'Tap to enable text selection',
+                  _terminalMode == TerminalMode.select
+                      ? 'Selection is local and input is paused'
+                      : 'Tap to enable touch selection and copying',
                   style: TextStyle(color: mutedTextColor, fontSize: 12),
                 ),
                 trailing: Switch(
-                  value: _terminalMode == TerminalMode.scroll,
+                  value: _terminalMode == TerminalMode.select,
                   onChanged: (value) {
                     final newMode = value
-                        ? TerminalMode.scroll
+                        ? TerminalMode.select
                         : TerminalMode.normal;
                     setState(() {
                       _terminalMode = newMode;
-                      _scrollModeSource = value ? ScrollModeSource.manual : ScrollModeSource.none;
                     });
-                    if (newMode == TerminalMode.scroll) {
-                      _enterTmuxCopyMode();
+                    if (newMode == TerminalMode.normal) {
+                      _flushDeferredStreamOutput();
                     } else {
-                      _cancelTmuxCopyMode();
-                      _applyBufferedUpdate();
+                      _terminalController.clearSelection();
                     }
                     Navigator.pop(context);
                   },
                   activeThumbColor: DesignColors.warning,
                 ),
                 onTap: () {
-                  final isScrolling = _terminalMode == TerminalMode.scroll;
-                  final newMode = isScrolling
+                  final isSelecting = _terminalMode == TerminalMode.select;
+                  final newMode = isSelecting
                       ? TerminalMode.normal
-                      : TerminalMode.scroll;
+                      : TerminalMode.select;
                   setState(() {
                     _terminalMode = newMode;
-                    _scrollModeSource = isScrolling ? ScrollModeSource.none : ScrollModeSource.manual;
                   });
-                  if (newMode == TerminalMode.scroll) {
-                    _enterTmuxCopyMode();
+                  if (newMode == TerminalMode.normal) {
+                    _flushDeferredStreamOutput();
                   } else {
-                    _cancelTmuxCopyMode();
-                    _applyBufferedUpdate();
+                    _terminalController.clearSelection();
                   }
                   Navigator.pop(context);
                 },
@@ -1811,7 +2340,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               ListTile(
                 leading: Icon(
                   Icons.zoom_out_map,
-                  color: _zoomScale != 1.0 ? DesignColors.warning : inactiveIconColor,
+                  color: _zoomScale != 1.0
+                      ? DesignColors.warning
+                      : inactiveIconColor,
                 ),
                 title: Text(
                   'Reset Zoom',
@@ -1828,7 +2359,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                 enabled: _zoomScale != 1.0,
                 onTap: _zoomScale != 1.0
                     ? () {
-                        _ansiTextViewKey.currentState?.resetZoom();
+                        _paneTerminalViewKey.currentState?.resetZoom();
                         setState(() {
                           _zoomScale = 1.0;
                         });
@@ -1836,17 +2367,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                       }
                     : null,
               ),
-              Divider(height: 1, color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300),
+              Divider(
+                height: 1,
+                color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
+              ),
               // Go to settings screen
               ListTile(
-                leading: Icon(
-                  Icons.settings,
-                  color: inactiveIconColor,
-                ),
-                title: Text(
-                  'Settings',
-                  style: TextStyle(color: textColor),
-                ),
+                leading: Icon(Icons.settings, color: inactiveIconColor),
+                title: Text('Settings', style: TextStyle(color: textColor)),
                 subtitle: Text(
                   'Font, theme, and other options',
                   style: TextStyle(color: mutedTextColor, fontSize: 12),
@@ -1861,7 +2389,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
                   );
                 },
               ),
-              Divider(height: 1, color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300),
+              Divider(
+                height: 1,
+                color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
+              ),
               // Disconnect button
               ListTile(
                 leading: Icon(
@@ -1899,7 +2430,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       context: context,
       builder: (context) {
         return AlertDialog(
-          backgroundColor: isDark ? DesignColors.surfaceDark : DesignColors.surfaceLight,
+          backgroundColor: isDark
+              ? DesignColors.surfaceDark
+              : DesignColors.surfaceLight,
           title: Text(
             'Disconnect?',
             style: TextStyle(color: isDark ? Colors.white : Colors.black87),
@@ -1913,7 +2446,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               onPressed: () => Navigator.pop(context),
               child: Text(
                 'Cancel',
-                style: TextStyle(color: isDark ? Colors.white60 : Colors.black54),
+                style: TextStyle(
+                  color: isDark ? Colors.white60 : Colors.black54,
+                ),
               ),
             ),
             ElevatedButton(
@@ -1935,9 +2470,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   /// Disconnect SSH and go back to the previous screen
   Future<void> _disconnect() async {
-    // Stop polling
-    _pollTimer?.cancel();
-    _treeRefreshTimer?.cancel();
+    await _stopControlClient(resetRestartState: true);
 
     // Disconnect SSH
     await ref.read(sshProvider.notifier).disconnect();
@@ -1954,9 +2487,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
-        border: Border(
-          left: BorderSide(color: colorScheme.outline, width: 1),
-        ),
+        border: Border(left: BorderSide(color: colorScheme.outline, width: 1)),
       ),
       child: _sshState.isReconnecting
           ? _buildReconnectingIndicator()
@@ -2104,76 +2635,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
-  /// Send a key via tmux send-keys
-  ///
-  /// [key] The key to send
-  /// [literal] If true, send as literal (-l flag)
-  Future<void> _sendKey(String key, {bool literal = true}) async {
-    final sshClient = ref.read(sshProvider.notifier).client;
-
-    // If disconnected, add to queue (only for literal keys)
-    if (sshClient == null || !sshClient.isConnected) {
-      if (literal) {
-        _inputQueue.enqueue(key);
-        if (mounted) setState(() {}); // Update queuing status
-      }
-      return;
-    }
-
-    final target = ref.read(tmuxProvider.notifier).currentTarget;
-    if (target == null) return;
-
-    try {
-      await sshClient.exec(TmuxCommands.sendKeys(target, key, literal: literal));
-      _boostPolling();
-    } catch (_) {
-      // Silently ignore key send errors (state is updated via polling)
-    }
-  }
-
-  /// Enter tmux copy-mode
-  Future<void> _enterTmuxCopyMode() async {
-    final sshClient = ref.read(sshProvider.notifier).client;
-    if (sshClient == null || !sshClient.isConnected) return;
-    final target = ref.read(tmuxProvider.notifier).currentTarget;
-    if (target == null) return;
-    try {
-      await sshClient.exec(TmuxCommands.enterCopyMode(target));
-      _boostPolling();
-    } catch (_) {}
-  }
-
-  /// Exit tmux copy-mode
-  Future<void> _cancelTmuxCopyMode() async {
-    final sshClient = ref.read(sshProvider.notifier).client;
-    if (sshClient == null || !sshClient.isConnected) return;
-    final target = ref.read(tmuxProvider.notifier).currentTarget;
-    if (target == null) return;
-    try {
-      await sshClient.exec(TmuxCommands.cancelCopyMode(target));
-      _boostPolling();
-    } catch (_) {}
-  }
-
-  /// Send tmux special key (Ctrl+C, Escape, etc.)
-  Future<void> _sendSpecialKey(String tmuxKey) async {
-    final sshClient = ref.read(sshProvider.notifier).client;
-
-    // Do not send special keys when disconnected (not queued)
-    if (sshClient == null || !sshClient.isConnected) return;
-
-    final target = ref.read(tmuxProvider.notifier).currentTarget;
-    if (target == null) return;
-
-    try {
-      // Send special keys in tmux format, not as literals
-      await sshClient.exec(TmuxCommands.sendKeys(target, tmuxKey, literal: false));
-      _boostPolling();
-    } catch (_) {
-      // Silently ignore key send errors (state is updated via polling)
-    }
-  }
-
   void _showInputDialog() {
     showModalBottomSheet(
       context: context,
@@ -2197,23 +2658,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
   }
 
-  /// Send multiline text (sends text + Enter for each line)
   Future<void> _sendMultilineText(String text) async {
-    final lines = text.split('\n');
-    for (int i = 0; i < lines.length; i++) {
-      final line = lines[i];
-      if (line.isNotEmpty) {
-        await _sendKey(line);
-      }
-      // Send Enter for all lines except the last, or send Enter for empty lines
-      if (i < lines.length - 1 || line.isEmpty) {
-        await _sendSpecialKey('Enter');
-      }
+    if (text.isEmpty) {
+      return;
     }
-    // Send Enter if the last line is not empty
-    if (lines.isNotEmpty && lines.last.isNotEmpty) {
-      await _sendSpecialKey('Enter');
-    }
+    final normalized = text.replaceAll('\r\n', '\n');
+    final payload = normalized.replaceAll('\n', '\r');
+    await _sendTerminalData(payload.endsWith('\r') ? payload : '$payload\r');
   }
 
   /// Top-right pane indicator
@@ -2319,7 +2770,9 @@ class _PaneLayoutPainter extends CustomPainter {
 
       // Border
       final borderPaint = Paint()
-        ..color = isActive ? activeColor : (isDark ? Colors.white30 : Colors.grey.shade500)
+        ..color = isActive
+            ? activeColor
+            : (isDark ? Colors.white30 : Colors.grey.shade500)
         ..style = PaintingStyle.stroke
         ..strokeWidth = isActive ? 1.5 : 1.0;
       canvas.drawRect(rect, borderPaint);
@@ -2577,14 +3030,18 @@ class _InputDialogContentState extends State<_InputDialogContent> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: isDark ? DesignColors.keyBackground : DesignColors.keyBackgroundLight,
+                  color: isDark
+                      ? DesignColors.keyBackground
+                      : DesignColors.keyBackgroundLight,
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
                   'Shift+Enter: New line',
                   style: GoogleFonts.jetBrainsMono(
                     fontSize: 10,
-                    color: isDark ? DesignColors.textMuted : DesignColors.textMutedLight,
+                    color: isDark
+                        ? DesignColors.textMuted
+                        : DesignColors.textMutedLight,
                   ),
                 ),
               ),
@@ -2602,15 +3059,20 @@ class _InputDialogContentState extends State<_InputDialogContent> {
               maxLines: null, // Unlimited lines with internal scrolling
               minLines: 1,
               keyboardType: TextInputType.multiline,
-              textInputAction: TextInputAction.newline, // Support multiline on paste
+              textInputAction:
+                  TextInputAction.newline, // Support multiline on paste
               style: GoogleFonts.jetBrainsMono(color: colorScheme.onSurface),
               decoration: InputDecoration(
                 hintText: 'Type your command... (Enter to send)',
                 hintStyle: GoogleFonts.jetBrainsMono(
-                  color: isDark ? DesignColors.textMuted : DesignColors.textMutedLight,
+                  color: isDark
+                      ? DesignColors.textMuted
+                      : DesignColors.textMutedLight,
                 ),
                 filled: true,
-                fillColor: isDark ? DesignColors.inputDark : DesignColors.inputLight,
+                fillColor: isDark
+                    ? DesignColors.inputDark
+                    : DesignColors.inputLight,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide.none,
@@ -2631,7 +3093,9 @@ class _InputDialogContentState extends State<_InputDialogContent> {
                   onPressed: () => Navigator.pop(context),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: colorScheme.onSurface,
-                    side: BorderSide(color: colorScheme.onSurface.withValues(alpha: 0.3)),
+                    side: BorderSide(
+                      color: colorScheme.onSurface.withValues(alpha: 0.3),
+                    ),
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),

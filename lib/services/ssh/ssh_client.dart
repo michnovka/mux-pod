@@ -15,7 +15,8 @@ class SshConnectionError implements Exception {
   SshConnectionError(this.message, [this.cause]);
 
   @override
-  String toString() => 'SshConnectionError: $message${cause != null ? ' ($cause)' : ''}';
+  String toString() =>
+      'SshConnectionError: $message${cause != null ? ' ($cause)' : ''}';
 }
 
 /// SSH authentication error
@@ -26,7 +27,8 @@ class SshAuthenticationError implements Exception {
   SshAuthenticationError(this.message, [this.cause]);
 
   @override
-  String toString() => 'SshAuthenticationError: $message${cause != null ? ' ($cause)' : ''}';
+  String toString() =>
+      'SshAuthenticationError: $message${cause != null ? ' ($cause)' : ''}';
 }
 
 /// SSH connection options
@@ -84,11 +86,7 @@ class SshEvents {
   /// On error occurred
   final void Function(Object error)? onError;
 
-  const SshEvents({
-    this.onData,
-    this.onClose,
-    this.onError,
-  });
+  const SshEvents({this.onData, this.onClose, this.onError});
 
   SshEvents copyWith({
     void Function(Uint8List data)? onData,
@@ -104,19 +102,17 @@ class SshEvents {
 }
 
 /// SSH connection state
-enum SshConnectionState {
-  disconnected,
-  connecting,
-  connected,
-  error,
-}
+enum SshConnectionState { disconnected, connecting, connected, error }
 
 /// SSH client
 ///
 /// Wraps dartssh2 and manages SSH connections.
 class SshClient {
+  static final RegExp _safeTmuxPathPattern = RegExp(r'^/[A-Za-z0-9._/-]+$');
+
   SSHClient? _client;
   SSHSession? _session;
+  SSHSession? _streamingShellSession;
   SSHSocket? _socket;
 
   SshConnectionState _state = SshConnectionState.disconnected;
@@ -126,9 +122,18 @@ class SshClient {
 
   StreamSubscription<Uint8List>? _stdoutSubscription;
   StreamSubscription<Uint8List>? _stderrSubscription;
+  StreamSubscription<Uint8List>? _streamingShellStdoutSubscription;
+  StreamSubscription<Uint8List>? _streamingShellStderrSubscription;
 
-  /// Persistent shell session (for polling)
-  PersistentShell? _persistentShell;
+  /// Persistent shell used for serialized control commands and polling.
+  PersistentShell? _controlShell;
+
+  /// Dedicated persistent shell for terminal input writes.
+  PersistentShell? _inputShell;
+
+  void Function(Uint8List data)? _streamingShellOnData;
+  void Function()? _streamingShellOnDone;
+  void Function(Object error)? _streamingShellOnError;
 
   /// Detected absolute path of the tmux binary
   String? _tmuxPath;
@@ -143,10 +148,12 @@ class SshClient {
   Timer? _keepAliveTimer;
 
   /// StreamController for connection monitoring
-  final _connectionStateController = StreamController<SshConnectionState>.broadcast();
+  final _connectionStateController =
+      StreamController<SshConnectionState>.broadcast();
 
   /// Stream of connection state (for external monitoring)
-  Stream<SshConnectionState> get connectionStateStream => _connectionStateController.stream;
+  Stream<SshConnectionState> get connectionStateStream =>
+      _connectionStateController.stream;
 
   /// Keep-alive minimum interval (seconds)
   static const int _minKeepAliveIntervalSeconds = 5;
@@ -168,6 +175,9 @@ class SshClient {
 
   /// Whether currently connected
   bool get isConnected => _state == SshConnectionState.connected;
+
+  /// Whether the dedicated streaming shell is active.
+  bool get isStreamingShellActive => _streamingShellSession != null;
 
   /// Last error message
   String? get lastError => _lastError;
@@ -230,10 +240,11 @@ class SshClient {
       _connectionStateController.add(_state);
 
       // Detect tmux path (use user-specified path if provided, otherwise auto-detect)
-      if (options.tmuxPath != null && options.tmuxPath!.isNotEmpty) {
+      final sanitizedTmuxPath = _sanitizeTmuxPath(options.tmuxPath);
+      if (sanitizedTmuxPath != null) {
         // Verify user-specified path exists
         final verifyExitCode = await _withExecLock(() async {
-          final session = await _client!.execute('test -x ${options.tmuxPath}');
+          final session = await _client!.execute('test -x $sanitizedTmuxPath');
           await session.stdout.drain();
           await session.stderr.drain();
           final code = session.exitCode;
@@ -241,10 +252,7 @@ class SshClient {
           return code;
         });
         if (verifyExitCode == 0) {
-          _tmuxPath = options.tmuxPath;
-          debugPrint('connect: user-specified tmux path verified: $_tmuxPath');
-        } else {
-          debugPrint('connect: user-specified tmux path not found: ${options.tmuxPath}');
+          _tmuxPath = sanitizedTmuxPath;
         }
       } else {
         await _detectTmuxPath();
@@ -310,7 +318,9 @@ class SshClient {
     } catch (e) {
       if (e is SshAuthenticationError) rethrow;
       if (passphrase == null && privateKey.contains('ENCRYPTED')) {
-        throw SshAuthenticationError('Private key is encrypted, passphrase required');
+        throw SshAuthenticationError(
+          'Private key is encrypted, passphrase required',
+        );
       }
       throw SshAuthenticationError('Failed to parse private key: $e');
     }
@@ -342,8 +352,11 @@ class SshClient {
     _stopKeepAlive();
 
     // Release persistent shell
-    await _persistentShell?.dispose();
-    _persistentShell = null;
+    await _controlShell?.dispose();
+    _controlShell = null;
+    await _inputShell?.dispose();
+    _inputShell = null;
+    await stopStreamingShell();
 
     await _stdoutSubscription?.cancel();
     await _stderrSubscription?.cancel();
@@ -365,25 +378,52 @@ class SshClient {
     if (_client == null) return;
 
     try {
-      _persistentShell = PersistentShell(_client!);
-      await _persistentShell!.start();
+      _controlShell = PersistentShell(_client!);
+      await _controlShell!.start();
     } catch (e) {
       // Even if persistent shell fails to start, the connection itself continues
       // Falls back to the traditional exec() method
-      _persistentShell = null;
+      _controlShell = null;
+    }
+
+    try {
+      _inputShell = PersistentShell(_client!);
+      await _inputShell!.start();
+    } catch (e) {
+      _inputShell = null;
     }
   }
 
   /// Restart persistent shell
-  Future<void> restartPersistentShell() async {
+  Future<void> restartPersistentShell({
+    bool restartControlShell = true,
+    bool restartInputShell = true,
+  }) async {
     if (_client == null || !isConnected) return;
 
+    if (restartControlShell) {
+      _controlShell = await _restartPersistentShellInstance(_controlShell);
+    }
+
+    if (restartInputShell) {
+      _inputShell = await _restartPersistentShellInstance(_inputShell);
+    }
+  }
+
+  Future<PersistentShell?> _restartPersistentShellInstance(
+    PersistentShell? shell,
+  ) async {
+    if (_client == null || !isConnected) {
+      return null;
+    }
+
     try {
-      await _persistentShell?.dispose();
-      _persistentShell = PersistentShell(_client!);
-      await _persistentShell!.start();
-    } catch (e) {
-      _persistentShell = null;
+      await shell?.dispose();
+      final nextShell = PersistentShell(_client!);
+      await nextShell.start();
+      return nextShell;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -412,22 +452,20 @@ class SshClient {
     // Step 1: Detect via login shell
     try {
       final path = await _withExecLock(() async {
-        final session = await _client!.execute(
-          r"$SHELL -lc 'command -v tmux'",
-        );
+        final session = await _client!.execute(r"$SHELL -lc 'command -v tmux'");
         final stdoutBytes = <int>[];
         await session.stdout.forEach((data) => stdoutBytes.addAll(data));
         await session.stderr.drain();
         session.close();
         return utf8.decode(stdoutBytes, allowMalformed: true).trim();
       });
-      if (path.isNotEmpty && path.startsWith('/')) {
-        _tmuxPath = path;
-        debugPrint('_detectTmuxPath: found via login shell: $path');
+      final sanitizedPath = _sanitizeTmuxPath(path);
+      if (sanitizedPath != null) {
+        _tmuxPath = sanitizedPath;
         return;
       }
-    } catch (e) {
-      debugPrint('_detectTmuxPath: login shell detection failed: $e');
+    } catch (_) {
+      // Fall back to known tmux locations below.
     }
 
     // Step 2: Fallback to known paths
@@ -449,30 +487,38 @@ class SshClient {
         });
         if (exitCode == 0) {
           _tmuxPath = candidate;
-          debugPrint('_detectTmuxPath: found via fallback: $candidate');
           return;
         }
-      } catch (e) {
-        debugPrint('_detectTmuxPath: error checking $candidate: $e');
+      } catch (_) {
+        // Try the next candidate path.
       }
     }
-    debugPrint('_detectTmuxPath: tmux not found');
   }
 
   /// Replace `tmux` in command with detected absolute path
   String _resolveTmuxCommand(String command) {
     if (_tmuxPath == null) {
-      debugPrint('_resolveTmuxCommand: _tmuxPath=null, command unchanged');
       return command;
     }
     final resolved = command.replaceAllMapped(
       RegExp(r'(^|;\s*)tmux\b'),
       (m) => '${m[1]}$_tmuxPath',
     );
-    if (resolved != command) {
-      debugPrint('_resolveTmuxCommand: "$command" => "$resolved"');
-    }
     return resolved;
+  }
+
+  @visibleForTesting
+  static bool isSafeTmuxPath(String path) => _sanitizeTmuxPath(path) != null;
+
+  static String? _sanitizeTmuxPath(String? path) {
+    final trimmed = path?.trim();
+    if (trimmed == null || trimmed.isEmpty) {
+      return null;
+    }
+    if (!_safeTmuxPathPattern.hasMatch(trimmed)) {
+      return null;
+    }
+    return trimmed;
   }
 
   /// Start keep-alive
@@ -513,8 +559,11 @@ class SshClient {
       _keepAliveSuccessCount++;
       // Extend interval after 3 consecutive successes
       if (_keepAliveSuccessCount >= 3) {
-        _currentKeepAliveIntervalSeconds = (_currentKeepAliveIntervalSeconds + 5)
-            .clamp(_minKeepAliveIntervalSeconds, _maxKeepAliveIntervalSeconds);
+        _currentKeepAliveIntervalSeconds =
+            (_currentKeepAliveIntervalSeconds + 5).clamp(
+              _minKeepAliveIntervalSeconds,
+              _maxKeepAliveIntervalSeconds,
+            );
         _keepAliveSuccessCount = 0;
       }
     } else {
@@ -590,6 +639,64 @@ class SshClient {
     }
   }
 
+  /// Start a dedicated long-lived streaming shell session.
+  ///
+  /// This is used for tmux control-mode or other live transports and stays
+  /// separate from both the legacy shell session and the persistent exec shells.
+  Future<void> startStreamingShell({
+    required String startupCommand,
+    required void Function(Uint8List data) onData,
+    void Function()? onDone,
+    void Function(Object error)? onError,
+    ShellOptions options = const ShellOptions(
+      term: 'dumb',
+      cols: 200,
+      rows: 50,
+    ),
+  }) async {
+    if (_isDisposed) {
+      throw SshConnectionError('Client has been disposed');
+    }
+    if (!isConnected || _client == null) {
+      throw SshConnectionError('Not connected');
+    }
+
+    await stopStreamingShell();
+
+    _streamingShellOnData = onData;
+    _streamingShellOnDone = onDone;
+    _streamingShellOnError = onError;
+
+    try {
+      _streamingShellSession = await _client!.shell(
+        pty: SSHPtyConfig(
+          type: options.term,
+          width: options.cols,
+          height: options.rows,
+        ),
+      );
+
+      _streamingShellStdoutSubscription = _streamingShellSession!.stdout.listen(
+        _handleStreamingShellData,
+        onError: _handleStreamingShellError,
+        onDone: _handleStreamingShellDone,
+      );
+
+      _streamingShellStderrSubscription = _streamingShellSession!.stderr.listen(
+        _handleStreamingShellData,
+        onError: _handleStreamingShellError,
+      );
+
+      final command = startupCommand.endsWith('\n')
+          ? startupCommand
+          : '$startupCommand\n';
+      _streamingShellSession!.write(utf8.encode(command));
+    } catch (e) {
+      await stopStreamingShell();
+      throw SshConnectionError('Failed to start streaming shell: $e', e);
+    }
+  }
+
   /// Data reception handler
   void _handleData(Uint8List data) {
     _events.onData?.call(data);
@@ -627,6 +734,36 @@ class SshClient {
     _session!.write(data);
   }
 
+  /// Write text data to the dedicated streaming shell.
+  void writeStreamingShell(String data) {
+    if (_isDisposed || !isConnected || _streamingShellSession == null) {
+      throw SshConnectionError('Streaming shell not started');
+    }
+    _streamingShellSession!.write(utf8.encode(data));
+  }
+
+  /// Stop the dedicated streaming shell without disconnecting SSH.
+  Future<void> stopStreamingShell() async {
+    final stdoutSubscription = _streamingShellStdoutSubscription;
+    final stderrSubscription = _streamingShellStderrSubscription;
+    final session = _streamingShellSession;
+
+    _streamingShellStdoutSubscription = null;
+    _streamingShellStderrSubscription = null;
+    _streamingShellSession = null;
+    _streamingShellOnData = null;
+    _streamingShellOnDone = null;
+    _streamingShellOnError = null;
+
+    await stdoutSubscription?.cancel();
+    await stderrSubscription?.cancel();
+    try {
+      session?.close();
+    } catch (_) {
+      // Ignore races with remote shutdown.
+    }
+  }
+
   /// Resize the terminal
   ///
   /// [cols] Number of columns
@@ -642,6 +779,32 @@ class SshClient {
       // Resize error is warning only (not fatal)
       _lastError = 'Failed to resize: $e';
     }
+  }
+
+  void _handleStreamingShellData(Uint8List data) {
+    _streamingShellOnData?.call(data);
+  }
+
+  void _handleStreamingShellError(Object error) {
+    _streamingShellOnError?.call(error);
+  }
+
+  void _handleStreamingShellDone() {
+    final onDone = _streamingShellOnDone;
+    final stdoutSubscription = _streamingShellStdoutSubscription;
+    final stderrSubscription = _streamingShellStderrSubscription;
+
+    _streamingShellStdoutSubscription = null;
+    _streamingShellStderrSubscription = null;
+    _streamingShellSession = null;
+    _streamingShellOnData = null;
+    _streamingShellOnDone = null;
+    _streamingShellOnError = null;
+
+    unawaited(stdoutSubscription?.cancel() ?? Future<void>.value());
+    unawaited(stderrSubscription?.cancel() ?? Future<void>.value());
+
+    onDone?.call();
   }
 
   /// Execute a command and get the result
@@ -685,10 +848,7 @@ class SshClient {
             stderrCompleter.future,
           ]).timeout(timeout);
         } else {
-          await Future.wait([
-            stdoutCompleter.future,
-            stderrCompleter.future,
-          ]);
+          await Future.wait([stdoutCompleter.future, stderrCompleter.future]);
         }
 
         session.close();
@@ -696,22 +856,11 @@ class SshClient {
         // Decode byte sequence as UTF-8 (invalid bytes become replacement characters)
         final stdout = utf8.decode(stdoutBytes, allowMalformed: true);
         final stderr = utf8.decode(stderrBytes, allowMalformed: true);
-
-        // Treat stderr as error if present (optional)
-        if (stderr.isNotEmpty) {
-          // Include stderr in result (tmux commands may output to stderr)
-          debugPrint('exec: stdout="${stdout.trim()}", stderr="${stderr.trim()}"');
-          return stdout + stderr;
-        }
-
-        debugPrint('exec: stdout="${stdout.trim()}"');
-        return stdout;
+        return stderr.isNotEmpty ? stdout + stderr : stdout;
       });
     } on TimeoutException {
-      debugPrint('exec: timed out');
       throw SshConnectionError('Command execution timed out');
     } catch (e) {
-      debugPrint('exec: error=$e');
       throw SshConnectionError('Failed to execute command: $e', e);
     }
   }
@@ -732,18 +881,20 @@ class SshClient {
     final resolvedCommand = _resolveTmuxCommand(command);
 
     // Fall back to traditional exec() if persistent shell is unavailable
-    if (_persistentShell == null || !_persistentShell!.isStarted) {
+    if (_controlShell == null || !_controlShell!.isStarted) {
       return exec(resolvedCommand, timeout: timeout);
     }
 
     try {
-      return await _persistentShell!.exec(resolvedCommand, timeout: timeout);
+      return await _controlShell!.exec(resolvedCommand, timeout: timeout);
     } on PersistentShellError catch (e) {
       // Attempt restart if shell session has been disconnected
       if (e.message.contains('closed') || e.message.contains('disposed')) {
         try {
-          await restartPersistentShell();
-          return await _persistentShell!.exec(resolvedCommand, timeout: timeout);
+          await restartPersistentShell(restartInputShell: false);
+          if (_controlShell != null && _controlShell!.isStarted) {
+            return await _controlShell!.exec(resolvedCommand, timeout: timeout);
+          }
         } catch (_) {
           // Fall back to traditional exec() if restart also fails
           return exec(resolvedCommand, timeout: timeout);
@@ -751,6 +902,41 @@ class SshClient {
       }
       // Fall back to traditional exec() for other errors
       return exec(resolvedCommand, timeout: timeout);
+    }
+  }
+
+  /// Execute a command via the dedicated input shell.
+  ///
+  /// Used by the terminal screen to avoid contention with polling and control
+  /// commands on the primary persistent shell.
+  Future<String> execPersistentInput(
+    String command, {
+    Duration? timeout,
+  }) async {
+    if (_isDisposed || !isConnected || _client == null) {
+      throw SshConnectionError('Not connected');
+    }
+
+    final resolvedCommand = _resolveTmuxCommand(command);
+
+    if (_inputShell == null || !_inputShell!.isStarted) {
+      return execPersistent(resolvedCommand, timeout: timeout);
+    }
+
+    try {
+      return await _inputShell!.exec(resolvedCommand, timeout: timeout);
+    } on PersistentShellError catch (e) {
+      if (e.message.contains('closed') || e.message.contains('disposed')) {
+        try {
+          await restartPersistentShell(restartControlShell: false);
+          if (_inputShell != null && _inputShell!.isStarted) {
+            return await _inputShell!.exec(resolvedCommand, timeout: timeout);
+          }
+        } catch (_) {
+          return execPersistent(resolvedCommand, timeout: timeout);
+        }
+      }
+      return execPersistent(resolvedCommand, timeout: timeout);
     }
   }
 
@@ -796,10 +982,7 @@ class SshClient {
             stderrCompleter.future,
           ]).timeout(timeout);
         } else {
-          await Future.wait([
-            stdoutCompleter.future,
-            stderrCompleter.future,
-          ]);
+          await Future.wait([stdoutCompleter.future, stderrCompleter.future]);
         }
 
         final exitCode = session.exitCode;
