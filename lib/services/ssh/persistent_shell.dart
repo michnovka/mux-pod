@@ -35,6 +35,14 @@ class PersistentShell {
   /// Output buffer (accumulated as byte sequence to prevent UTF-8 multibyte boundary splits)
   final _rawBuffer = <int>[];
 
+  /// Maximum buffer size (16 MB). If exceeded, the pending command is failed
+  /// and the shell is restarted to prevent unbounded memory growth from hung
+  /// commands that never produce an end marker. The biggest expected payload
+  /// is scrollback history (capture-pane -p -N): at 10k lines × 270 cols
+  /// that's ~2.6 MB without escapes. 16 MB provides ample headroom for wider
+  /// panes, higher scrollback settings, and Unicode-heavy content.
+  static const int _maxBufferSize = 16 * 1024 * 1024;
+
   /// Completer for the currently executing command
   Completer<String>? _pendingCommand;
 
@@ -125,6 +133,11 @@ class PersistentShell {
       return await _pendingCommand!.future.timeout(effectiveTimeout);
     } on TimeoutException {
       _pendingCommand = null;
+      _rawBuffer.clear();
+      // The timed-out command may still be running on the remote side,
+      // consuming stdin. Restart the shell so subsequent exec() calls
+      // get a clean session.
+      unawaited(restart());
       throw PersistentShellError('Command execution timed out');
     }
   }
@@ -138,6 +151,20 @@ class PersistentShell {
     }
 
     _rawBuffer.addAll(data);
+
+    // Guard against unbounded growth from hung commands that produce output
+    // but never emit an end marker.
+    if (_rawBuffer.length > _maxBufferSize) {
+      _pendingCommand = null;
+      _rawBuffer.clear();
+      // Restart the shell so subsequent commands get a clean session —
+      // the hung command may still be running and consuming stdin.
+      unawaited(restart());
+      pending.completeError(
+        PersistentShellError('Buffer overflow (>${_maxBufferSize ~/ 1024} KB)'),
+      );
+      return;
+    }
 
     final startIndex = _indexOfBytes(_rawBuffer, _startMarkerBytes);
     if (startIndex == -1) {
