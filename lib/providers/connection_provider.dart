@@ -5,6 +5,8 @@ import 'dart:developer' as developer;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'shared_preferences_provider.dart';
+
 /// Connection settings
 class Connection {
   final String id;
@@ -118,48 +120,74 @@ class ConnectionsState {
 /// Notifier that manages the connections list
 class ConnectionsNotifier extends Notifier<ConnectionsState> {
   static const String _storageKey = 'connections';
+  final Completer<void> _initialLoadCompleter = Completer<void>();
+  SharedPreferences? _sharedPreferences;
 
   @override
   ConnectionsState build() {
-    // Initial state
+    final prefs = _sharedPreferences = ref.read(sharedPreferencesProvider);
+    if (prefs != null) {
+      final state = _loadConnectionsSync(prefs);
+      if (!_initialLoadCompleter.isCompleted) {
+        _initialLoadCompleter.complete();
+      }
+      return state;
+    }
+
     _loadConnections();
     return const ConnectionsState(isLoading: true);
   }
 
-  Future<void> _loadConnections() async {
-    developer.log('_loadConnections() started', name: 'ConnectionsProvider');
+  ConnectionsState _loadConnectionsSync(SharedPreferences prefs) {
     try {
-      final prefs = await SharedPreferences.getInstance();
       final jsonString = prefs.getString(_storageKey);
       developer.log(
         'JSON from storage: ${jsonString != null ? 'exists' : 'null'}',
         name: 'ConnectionsProvider',
       );
 
-      if (jsonString != null) {
-        final jsonList = jsonDecode(jsonString) as List<dynamic>;
-        final connections = jsonList
-            .map((json) => Connection.fromJson(json as Map<String, dynamic>))
-            .toList();
-
-        developer.log(
-          'Loaded ${connections.length} connections from storage',
-          name: 'ConnectionsProvider',
-        );
-
-        // Sorting is done by filteredConnectionsProvider, so no sorting here
-        state = ConnectionsState(connections: connections);
-        developer.log(
-          'State updated with ${connections.length} connections',
-          name: 'ConnectionsProvider',
-        );
-      } else {
-        state = const ConnectionsState();
+      if (jsonString == null) {
         developer.log(
           'No saved connections, initialized empty state',
           name: 'ConnectionsProvider',
         );
+        return const ConnectionsState();
       }
+
+      final jsonList = jsonDecode(jsonString) as List<dynamic>;
+      final connections = jsonList
+          .map((json) => Connection.fromJson(json as Map<String, dynamic>))
+          .toList();
+
+      developer.log(
+        'Loaded ${connections.length} connections from storage',
+        name: 'ConnectionsProvider',
+      );
+      return ConnectionsState(connections: connections);
+    } catch (e) {
+      return ConnectionsState(error: e.toString());
+    }
+  }
+
+  Future<SharedPreferences> _getPrefs() async {
+    final prefs = _sharedPreferences;
+    if (prefs != null) {
+      return prefs;
+    }
+
+    final loadedPrefs = await SharedPreferences.getInstance();
+    _sharedPreferences = loadedPrefs;
+    return loadedPrefs;
+  }
+
+  Future<void> _loadConnections() async {
+    developer.log('_loadConnections() started', name: 'ConnectionsProvider');
+    try {
+      state = _loadConnectionsSync(await _getPrefs());
+      developer.log(
+        'State updated with ${state.connections.length} connections',
+        name: 'ConnectionsProvider',
+      );
     } catch (e, stackTrace) {
       developer.log(
         'Error loading connections: $e',
@@ -168,17 +196,24 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
         stackTrace: stackTrace,
       );
       state = ConnectionsState(error: e.toString());
+    } finally {
+      if (!_initialLoadCompleter.isCompleted) {
+        _initialLoadCompleter.complete();
+      }
     }
   }
 
+  Future<void> _waitForInitialLoad() => _initialLoadCompleter.future;
+
   Future<void> _saveConnections() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await _getPrefs();
     final jsonList = state.connections.map((c) => c.toJson()).toList();
     await prefs.setString(_storageKey, jsonEncode(jsonList));
   }
 
   /// Add a connection
   Future<void> add(Connection connection) async {
+    await _waitForInitialLoad();
     developer.log(
       'add() called: ${connection.name} (${connection.id})',
       name: 'ConnectionsProvider',
@@ -209,6 +244,7 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
 
   /// Remove a connection
   Future<void> remove(String id) async {
+    await _waitForInitialLoad();
     developer.log('remove() called: $id', name: 'ConnectionsProvider');
     final connections = state.connections.where((c) => c.id != id).toList();
     state = state.copyWith(connections: connections);
@@ -221,6 +257,7 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
 
   /// Update a connection
   Future<void> update(Connection connection) async {
+    await _waitForInitialLoad();
     developer.log(
       'update() called: ${connection.name} (${connection.id})',
       name: 'ConnectionsProvider',
@@ -235,6 +272,7 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
 
   /// Update the last connected time
   Future<void> updateLastConnected(String id) async {
+    await _waitForInitialLoad();
     final connections = state.connections.map((c) {
       if (c.id == id) {
         return c.copyWith(lastConnectedAt: DateTime.now());

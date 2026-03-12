@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -5,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/keychain/secure_storage.dart';
 import '../services/keychain/ssh_key_service.dart';
+import 'shared_preferences_provider.dart';
 
 /// Enum indicating the origin of the key
 enum KeySource {
@@ -98,17 +100,9 @@ class KeysState {
   final bool isLoading;
   final String? error;
 
-  const KeysState({
-    this.keys = const [],
-    this.isLoading = false,
-    this.error,
-  });
+  const KeysState({this.keys = const [], this.isLoading = false, this.error});
 
-  KeysState copyWith({
-    List<SshKeyMeta>? keys,
-    bool? isLoading,
-    String? error,
-  }) {
+  KeysState copyWith({List<SshKeyMeta>? keys, bool? isLoading, String? error}) {
     return KeysState(
       keys: keys ?? this.keys,
       isLoading: isLoading ?? this.isLoading,
@@ -120,44 +114,78 @@ class KeysState {
 /// Notifier that manages SSH keys
 class KeysNotifier extends Notifier<KeysState> {
   static const String _storageKey = 'ssh_keys_meta';
+  final Completer<void> _initialLoadCompleter = Completer<void>();
+  SharedPreferences? _sharedPreferences;
 
   @override
   KeysState build() {
+    final prefs = _sharedPreferences = ref.read(sharedPreferencesProvider);
+    if (prefs != null) {
+      final state = _loadKeysSync(prefs);
+      if (!_initialLoadCompleter.isCompleted) {
+        _initialLoadCompleter.complete();
+      }
+      return state;
+    }
+
     _loadKeys();
     return const KeysState(isLoading: true);
   }
 
-  Future<void> _loadKeys() async {
+  KeysState _loadKeysSync(SharedPreferences prefs) {
     try {
-      final prefs = await SharedPreferences.getInstance();
       final jsonString = prefs.getString(_storageKey);
 
-      if (jsonString != null) {
-        final jsonList = jsonDecode(jsonString) as List<dynamic>;
-        final keys = jsonList
-            .map((json) => SshKeyMeta.fromJson(json as Map<String, dynamic>))
-            .toList();
-
-        // Sort by creation date (descending)
-        keys.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-
-        state = KeysState(keys: keys);
-      } else {
-        state = const KeysState();
+      if (jsonString == null) {
+        return const KeysState();
       }
+
+      final jsonList = jsonDecode(jsonString) as List<dynamic>;
+      final keys = jsonList
+          .map((json) => SshKeyMeta.fromJson(json as Map<String, dynamic>))
+          .toList();
+
+      keys.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      return KeysState(keys: keys);
     } catch (e) {
-      state = KeysState(error: e.toString());
+      return KeysState(error: e.toString());
     }
   }
 
+  Future<SharedPreferences> _getPrefs() async {
+    final prefs = _sharedPreferences;
+    if (prefs != null) {
+      return prefs;
+    }
+
+    final loadedPrefs = await SharedPreferences.getInstance();
+    _sharedPreferences = loadedPrefs;
+    return loadedPrefs;
+  }
+
+  Future<void> _loadKeys() async {
+    try {
+      state = _loadKeysSync(await _getPrefs());
+    } catch (e) {
+      state = KeysState(error: e.toString());
+    } finally {
+      if (!_initialLoadCompleter.isCompleted) {
+        _initialLoadCompleter.complete();
+      }
+    }
+  }
+
+  Future<void> _waitForInitialLoad() => _initialLoadCompleter.future;
+
   Future<void> _saveKeys() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await _getPrefs();
     final jsonList = state.keys.map((k) => k.toJson()).toList();
     await prefs.setString(_storageKey, jsonEncode(jsonList));
   }
 
   /// Add a key
   Future<void> add(SshKeyMeta key) async {
+    await _waitForInitialLoad();
     final keys = [...state.keys, key];
     state = state.copyWith(keys: keys);
     await _saveKeys();
@@ -165,6 +193,7 @@ class KeysNotifier extends Notifier<KeysState> {
 
   /// Remove a key
   Future<void> remove(String id) async {
+    await _waitForInitialLoad();
     final keys = state.keys.where((k) => k.id != id).toList();
     state = state.copyWith(keys: keys);
     await _saveKeys();
@@ -172,6 +201,7 @@ class KeysNotifier extends Notifier<KeysState> {
 
   /// Update a key
   Future<void> update(SshKeyMeta key) async {
+    await _waitForInitialLoad();
     final keys = state.keys.map((k) {
       return k.id == key.id ? key : k;
     }).toList();

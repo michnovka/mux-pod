@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/tmux/tmux_parser.dart';
+import 'shared_preferences_provider.dart';
 
 /// Active session information
 class ActiveSession {
@@ -93,7 +95,9 @@ class ActiveSession {
       isAttached: json['isAttached'] as bool? ?? false,
       lastWindowIndex: json['lastWindowIndex'] as int?,
       lastPaneId: json['lastPaneId'] as String?,
-      lastAccessedAt: lastAccessedAtStr != null ? DateTime.parse(lastAccessedAtStr) : null,
+      lastAccessedAt: lastAccessedAtStr != null
+          ? DateTime.parse(lastAccessedAtStr)
+          : null,
     );
   }
 
@@ -106,10 +110,7 @@ class ActiveSessionsState {
   final List<ActiveSession> sessions;
   final String? currentSessionKey; // connectionId:sessionName
 
-  const ActiveSessionsState({
-    this.sessions = const [],
-    this.currentSessionKey,
-  });
+  const ActiveSessionsState({this.sessions = const [], this.currentSessionKey});
 
   ActiveSessionsState copyWith({
     List<ActiveSession>? sessions,
@@ -118,8 +119,9 @@ class ActiveSessionsState {
   }) {
     return ActiveSessionsState(
       sessions: sessions ?? this.sessions,
-      currentSessionKey:
-          clearCurrentSession ? null : (currentSessionKey ?? this.currentSessionKey),
+      currentSessionKey: clearCurrentSession
+          ? null
+          : (currentSessionKey ?? this.currentSessionKey),
     );
   }
 
@@ -144,35 +146,100 @@ class ActiveSessionsState {
 /// Notifier that manages active sessions
 class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
   static const _storageKey = 'active_sessions';
+  final Completer<void> _initialLoadCompleter = Completer<void>();
+  final List<void Function()> _deferredMutations = [];
+  bool _isFlushingDeferredMutations = false;
+  SharedPreferences? _sharedPreferences;
 
   @override
   ActiveSessionsState build() {
-    // Load from storage on initialization
+    final prefs = _sharedPreferences = ref.read(sharedPreferencesProvider);
+    if (prefs != null) {
+      final state = _loadFromStorageSync(prefs);
+      if (!_initialLoadCompleter.isCompleted) {
+        _initialLoadCompleter.complete();
+      }
+      return state;
+    }
+
     _loadFromStorage();
     return const ActiveSessionsState();
+  }
+
+  ActiveSessionsState _loadFromStorageSync(SharedPreferences prefs) {
+    try {
+      final jsonStr = prefs.getString(_storageKey);
+      if (jsonStr == null) {
+        return const ActiveSessionsState();
+      }
+
+      final jsonList = jsonDecode(jsonStr) as List<dynamic>;
+      final sessions = jsonList
+          .map((json) => ActiveSession.fromJson(json as Map<String, dynamic>))
+          .toList();
+      return ActiveSessionsState(sessions: sessions);
+    } catch (e) {
+      return const ActiveSessionsState();
+    }
+  }
+
+  Future<SharedPreferences> _getPrefs() async {
+    final prefs = _sharedPreferences;
+    if (prefs != null) {
+      return prefs;
+    }
+
+    final loadedPrefs = await SharedPreferences.getInstance();
+    _sharedPreferences = loadedPrefs;
+    return loadedPrefs;
   }
 
   /// Load session information from storage
   Future<void> _loadFromStorage() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final jsonStr = prefs.getString(_storageKey);
-      if (jsonStr != null) {
-        final jsonList = jsonDecode(jsonStr) as List<dynamic>;
-        final sessions = jsonList
-            .map((json) => ActiveSession.fromJson(json as Map<String, dynamic>))
-            .toList();
-        state = state.copyWith(sessions: sessions);
-      }
+      state = _loadFromStorageSync(await _getPrefs());
     } catch (e) {
       // Ignore load errors (e.g., on first launch)
+    } finally {
+      if (!_initialLoadCompleter.isCompleted) {
+        _initialLoadCompleter.complete();
+      }
+      _flushDeferredMutations();
+    }
+  }
+
+  bool get _hasLoadedInitialState => _initialLoadCompleter.isCompleted;
+
+  void _runOrDeferMutation(void Function() mutation) {
+    if (_hasLoadedInitialState || _isFlushingDeferredMutations) {
+      mutation();
+      return;
+    }
+
+    _deferredMutations.add(mutation);
+  }
+
+  void _flushDeferredMutations() {
+    if (_isFlushingDeferredMutations || _deferredMutations.isEmpty) {
+      return;
+    }
+
+    _isFlushingDeferredMutations = true;
+    try {
+      final pending = List<void Function()>.from(_deferredMutations);
+      _deferredMutations.clear();
+      for (final mutation in pending) {
+        mutation();
+      }
+    } finally {
+      _isFlushingDeferredMutations = false;
     }
   }
 
   /// Save session information to storage
   Future<void> _saveToStorage() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
+      final prefs = await _getPrefs();
       final jsonList = state.sessions.map((s) => s.toJson()).toList();
       await prefs.setString(_storageKey, jsonEncode(jsonList));
     } catch (e) {
@@ -191,36 +258,38 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     int? lastWindowIndex,
     String? lastPaneId,
   }) {
-    final key = '$connectionId:$sessionName';
-    final existingIndex = state.sessions.indexWhere(
-      (s) => s.key == key,
-    );
+    _runOrDeferMutation(() {
+      final key = '$connectionId:$sessionName';
+      final existingIndex = state.sessions.indexWhere((s) => s.key == key);
 
-    final existingSession = existingIndex >= 0 ? state.sessions[existingIndex] : null;
-    final now = DateTime.now();
+      final existingSession = existingIndex >= 0
+          ? state.sessions[existingIndex]
+          : null;
+      final now = DateTime.now();
 
-    final session = ActiveSession(
-      connectionId: connectionId,
-      connectionName: connectionName,
-      host: host,
-      sessionName: sessionName,
-      windowCount: windowCount,
-      connectedAt: existingSession?.connectedAt ?? now,
-      isAttached: isAttached,
-      lastWindowIndex: lastWindowIndex ?? existingSession?.lastWindowIndex,
-      lastPaneId: lastPaneId ?? existingSession?.lastPaneId,
-      lastAccessedAt: isAttached ? now : existingSession?.lastAccessedAt,
-    );
+      final session = ActiveSession(
+        connectionId: connectionId,
+        connectionName: connectionName,
+        host: host,
+        sessionName: sessionName,
+        windowCount: windowCount,
+        connectedAt: existingSession?.connectedAt ?? now,
+        isAttached: isAttached,
+        lastWindowIndex: lastWindowIndex ?? existingSession?.lastWindowIndex,
+        lastPaneId: lastPaneId ?? existingSession?.lastPaneId,
+        lastAccessedAt: isAttached ? now : existingSession?.lastAccessedAt,
+      );
 
-    final sessions = [...state.sessions];
-    if (existingIndex >= 0) {
-      sessions[existingIndex] = session;
-    } else {
-      sessions.add(session);
-    }
+      final sessions = [...state.sessions];
+      if (existingIndex >= 0) {
+        sessions[existingIndex] = session;
+      } else {
+        sessions.add(session);
+      }
 
-    state = state.copyWith(sessions: sessions);
-    _saveToStorage();
+      state = state.copyWith(sessions: sessions);
+      _saveToStorage();
+    });
   }
 
   /// Update the last opened pane information for a session
@@ -230,34 +299,38 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     required int windowIndex,
     required String paneId,
   }) {
-    final key = '$connectionId:$sessionName';
-    final existingIndex = state.sessions.indexWhere((s) => s.key == key);
-    if (existingIndex < 0) return;
+    _runOrDeferMutation(() {
+      final key = '$connectionId:$sessionName';
+      final existingIndex = state.sessions.indexWhere((s) => s.key == key);
+      if (existingIndex < 0) return;
 
-    final sessions = [...state.sessions];
-    sessions[existingIndex] = sessions[existingIndex].copyWith(
-      lastWindowIndex: windowIndex,
-      lastPaneId: paneId,
-      lastAccessedAt: DateTime.now(),
-    );
+      final sessions = [...state.sessions];
+      sessions[existingIndex] = sessions[existingIndex].copyWith(
+        lastWindowIndex: windowIndex,
+        lastPaneId: paneId,
+        lastAccessedAt: DateTime.now(),
+      );
 
-    state = state.copyWith(sessions: sessions);
-    _saveToStorage();
+      state = state.copyWith(sessions: sessions);
+      _saveToStorage();
+    });
   }
 
   /// Update the last accessed time when a session is opened
   void touchSession(String connectionId, String sessionName) {
-    final key = '$connectionId:$sessionName';
-    final existingIndex = state.sessions.indexWhere((s) => s.key == key);
-    if (existingIndex < 0) return;
+    _runOrDeferMutation(() {
+      final key = '$connectionId:$sessionName';
+      final existingIndex = state.sessions.indexWhere((s) => s.key == key);
+      if (existingIndex < 0) return;
 
-    final sessions = [...state.sessions];
-    sessions[existingIndex] = sessions[existingIndex].copyWith(
-      lastAccessedAt: DateTime.now(),
-    );
+      final sessions = [...state.sessions];
+      sessions[existingIndex] = sessions[existingIndex].copyWith(
+        lastAccessedAt: DateTime.now(),
+      );
 
-    state = state.copyWith(sessions: sessions);
-    _saveToStorage();
+      state = state.copyWith(sessions: sessions);
+      _saveToStorage();
+    });
   }
 
   /// Update the session list for a connection (from tmux session list)
@@ -268,54 +341,68 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     required String host,
     required List<TmuxSession> tmuxSessions,
   }) {
-    // Save existing session information to a map
-    final existingMap = <String, ActiveSession>{};
-    for (final s in state.sessions.where((s) => s.connectionId == connectionId)) {
-      existingMap[s.sessionName] = s;
-    }
+    _runOrDeferMutation(() {
+      // Save existing session information to a map
+      final existingMap = <String, ActiveSession>{};
+      for (final s in state.sessions.where(
+        (s) => s.connectionId == connectionId,
+      )) {
+        existingMap[s.sessionName] = s;
+      }
 
-    // Preserve sessions from other connections
-    final otherSessions = state.sessions
-        .where((s) => s.connectionId != connectionId)
-        .toList();
+      // Preserve sessions from other connections
+      final otherSessions = state.sessions
+          .where((s) => s.connectionId != connectionId)
+          .toList();
 
-    final newSessions = tmuxSessions.map((ts) {
-      final existing = existingMap[ts.name];
-      return ActiveSession(
-        connectionId: connectionId,
-        connectionName: connectionName,
-        host: host,
-        sessionName: ts.name,
-        windowCount: ts.windowCount,
-        connectedAt: existing?.connectedAt ?? DateTime.now(),
-        isAttached: ts.attached,
-        lastWindowIndex: existing?.lastWindowIndex,
-        lastPaneId: existing?.lastPaneId,
-        lastAccessedAt: existing?.lastAccessedAt,
-      );
-    }).toList();
+      final newSessions = tmuxSessions.map((ts) {
+        final existing = existingMap[ts.name];
+        return ActiveSession(
+          connectionId: connectionId,
+          connectionName: connectionName,
+          host: host,
+          sessionName: ts.name,
+          windowCount: ts.windowCount,
+          connectedAt: existing?.connectedAt ?? DateTime.now(),
+          isAttached: ts.attached,
+          lastWindowIndex: existing?.lastWindowIndex,
+          lastPaneId: existing?.lastPaneId,
+          lastAccessedAt: existing?.lastAccessedAt,
+        );
+      }).toList();
 
-    state = state.copyWith(sessions: [...otherSessions, ...newSessions]);
-    _saveToStorage();
+      state = state.copyWith(sessions: [...otherSessions, ...newSessions]);
+      _saveToStorage();
+    });
   }
 
   /// Set the current session
   void setCurrentSession(String connectionId, String sessionName) {
-    state = state.copyWith(currentSessionKey: '$connectionId:$sessionName');
+    _runOrDeferMutation(() {
+      state = state.copyWith(currentSessionKey: '$connectionId:$sessionName');
+    });
   }
 
   /// Clear the current session
   void clearCurrentSession() {
-    state = state.copyWith(clearCurrentSession: true);
+    _runOrDeferMutation(() {
+      state = state.copyWith(clearCurrentSession: true);
+    });
   }
 
   /// Explicitly close (delete) a session
   void closeSession(String connectionId, String sessionName) {
-    final sessions = state.sessions
-        .where((s) => !(s.connectionId == connectionId && s.sessionName == sessionName))
-        .toList();
-    state = state.copyWith(sessions: sessions);
-    _saveToStorage();
+    _runOrDeferMutation(() {
+      final sessions = state.sessions
+          .where(
+            (s) =>
+                !(s.connectionId == connectionId &&
+                    s.sessionName == sessionName),
+          )
+          .toList();
+      state = state.copyWith(sessions: sessions);
+      _saveToStorage();
+    });
   }
 
   /// Remove a session (alias for closeSession)
@@ -325,21 +412,26 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
 
   /// Remove all sessions for a connection
   void removeSessionsForConnection(String connectionId) {
-    final sessions =
-        state.sessions.where((s) => s.connectionId != connectionId).toList();
-    state = state.copyWith(sessions: sessions);
-    _saveToStorage();
+    _runOrDeferMutation(() {
+      final sessions = state.sessions
+          .where((s) => s.connectionId != connectionId)
+          .toList();
+      state = state.copyWith(sessions: sessions);
+      _saveToStorage();
+    });
   }
 
   /// Clear all sessions
   void clear() {
-    state = const ActiveSessionsState();
-    _saveToStorage();
+    _runOrDeferMutation(() {
+      state = const ActiveSessionsState();
+      _saveToStorage();
+    });
   }
 }
 
 /// Active sessions provider
 final activeSessionsProvider =
     NotifierProvider<ActiveSessionsNotifier, ActiveSessionsState>(() {
-  return ActiveSessionsNotifier();
-});
+      return ActiveSessionsNotifier();
+    });
