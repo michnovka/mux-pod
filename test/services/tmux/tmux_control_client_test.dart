@@ -9,6 +9,17 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('TmuxControlClient', () {
+    test('builds a control-mode startup command with ignore-size', () {
+      final command = TmuxControlClient.debugBuildStartupCommand(
+        tmuxBinary: '/usr/local/bin/tmux',
+        sessionName: 'demo-session',
+      );
+
+      expect(command, contains("exec '/usr/local/bin/tmux' -C"));
+      expect(command, contains('attach-session -f ignore-size -t'));
+      expect(command, contains("'demo-session'"));
+    });
+
     test('parses pane output notifications and unescapes octal payloads', () {
       final outputs = <({String paneId, String data})>[];
       final client = TmuxControlClient(
@@ -46,6 +57,44 @@ void main() {
       expect(outputs.single.data, 'hello\n');
     });
 
+    test('preserves leading spaces in pane output payloads', () {
+      final outputs = <({String paneId, String data})>[];
+      final client = TmuxControlClient(
+        SshClient(),
+        onPaneOutput: (paneId, data) {
+          outputs.add((paneId: paneId, data: data));
+        },
+      );
+
+      client.debugAddBytes(
+        Uint8List.fromList(utf8.encode('%output %1    prompt redraw\n')),
+      );
+
+      expect(outputs, hasLength(1));
+      expect(outputs.single.paneId, '%1');
+      expect(outputs.single.data, '   prompt redraw');
+    });
+
+    test('preserves leading spaces in extended output payloads', () {
+      final outputs = <({String paneId, String data})>[];
+      final client = TmuxControlClient(
+        SshClient(),
+        onPaneOutput: (paneId, data) {
+          outputs.add((paneId: paneId, data: data));
+        },
+      );
+
+      client.debugAddBytes(
+        Uint8List.fromList(
+          utf8.encode('%extended-output %1 0 :   prompt redraw\n'),
+        ),
+      );
+
+      expect(outputs, hasLength(1));
+      expect(outputs.single.paneId, '%1');
+      expect(outputs.single.data, '  prompt redraw');
+    });
+
     test('parses control notifications outside command blocks', () {
       final notifications = <TmuxControlNotification>[];
       final client = TmuxControlClient(
@@ -80,27 +129,28 @@ void main() {
       expect(await future, '%1 1 bash\n%window-add @1');
     });
 
-    test('completes pending control command futures with error on %error', () async {
-      final client = TmuxControlClient(SshClient());
-      final future = client.debugPrimePendingCommand();
+    test(
+      'completes pending control command futures with error on %error',
+      () async {
+        final client = TmuxControlClient(SshClient());
+        final future = client.debugPrimePendingCommand();
 
-      client.debugAddBytes(Uint8List.fromList(utf8.encode('%begin 1 2 0\n')));
-      client.debugAddBytes(
-        Uint8List.fromList(
-          utf8.encode('no current client\n%error 1 2 0\n'),
-        ),
-      );
+        client.debugAddBytes(Uint8List.fromList(utf8.encode('%begin 1 2 0\n')));
+        client.debugAddBytes(
+          Uint8List.fromList(utf8.encode('no current client\n%error 1 2 0\n')),
+        );
 
-      await expectLater(
-        future,
-        throwsA(
-          isA<TmuxControlClientError>().having(
-            (error) => error.message,
-            'message',
-            'no current client',
+        await expectLater(
+          future,
+          throwsA(
+            isA<TmuxControlClientError>().having(
+              (error) => error.message,
+              'message',
+              'no current client',
+            ),
           ),
-        ),
-      );
-    });
+        );
+      },
+    );
   });
 }

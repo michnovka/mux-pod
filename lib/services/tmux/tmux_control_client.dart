@@ -52,7 +52,11 @@ class TmuxControlClient {
 
   bool get isStarted => _isStarted;
 
-  Future<void> start({required String sessionName}) async {
+  Future<void> start({
+    required String sessionName,
+    required int cols,
+    required int rows,
+  }) async {
     if (_isStopped) {
       throw TmuxControlClientError('Client has been disposed');
     }
@@ -60,21 +64,41 @@ class TmuxControlClient {
     await stop();
     _resetDecoder();
 
-    final tmuxBinary = _escapeShellArg(_sshClient.tmuxPath ?? 'tmux');
-    final targetSession = _escapeShellArg(sessionName);
-    final startupCommand =
-        'export PS1="" PS2="" 2>/dev/null; '
-        'stty -echo 2>/dev/null; '
-        'exec $tmuxBinary -C attach-session -t $targetSession';
+    final startupCommand = _buildStartupCommand(
+      tmuxBinary: _sshClient.tmuxPath ?? 'tmux',
+      sessionName: sessionName,
+    );
 
     await _sshClient.startStreamingShell(
       startupCommand: startupCommand,
       onData: _handleBytes,
       onDone: _handleDone,
       onError: _handleStreamError,
+      options: ShellOptions(term: 'dumb', cols: cols, rows: rows),
     );
 
     _isStarted = true;
+
+    try {
+      await sendCommand(
+        'refresh-client -C ${cols}x$rows',
+        timeout: const Duration(seconds: 1),
+      );
+    } catch (_) {
+      // Best effort: the PTY size is already correct, and some older tmux
+      // setups may reject explicit refresh-client sizing.
+    }
+  }
+
+  @visibleForTesting
+  static String debugBuildStartupCommand({
+    required String tmuxBinary,
+    required String sessionName,
+  }) {
+    return _buildStartupCommand(
+      tmuxBinary: tmuxBinary,
+      sessionName: sessionName,
+    );
   }
 
   Future<void> stop() async {
@@ -107,7 +131,9 @@ class TmuxControlClient {
       throw TmuxControlClientError('Control session is not running');
     }
     if (_pendingCommand != null && !_pendingCommand!.isCompleted) {
-      throw TmuxControlClientError('Another control command is already running');
+      throw TmuxControlClientError(
+        'Another control command is already running',
+      );
     }
 
     final completer = Completer<String>();
@@ -202,26 +228,25 @@ class TmuxControlClient {
     }
 
     if (line.startsWith('%output ')) {
-      final match = RegExp(r'^%output\s+(\S+)\s+(.*)$').firstMatch(line);
-      if (match == null) {
+      final parsed = _parseOutputLine(line);
+      if (parsed == null) {
         return;
       }
 
-      final paneId = match.group(1)!;
-      final payload = _unescapeControlPayload(match.group(2)!);
+      final paneId = parsed.paneId;
+      final payload = _unescapeControlPayload(parsed.payload);
       onPaneOutput?.call(paneId, payload);
       return;
     }
 
     if (line.startsWith('%extended-output ')) {
-      final match = RegExp(r'^%extended-output\s+(\S+)\s+.*?:\s(.*)$')
-          .firstMatch(line);
-      if (match == null) {
+      final parsed = _parseExtendedOutputLine(line);
+      if (parsed == null) {
         return;
       }
 
-      final paneId = match.group(1)!;
-      final payload = _unescapeControlPayload(match.group(2)!);
+      final paneId = parsed.paneId;
+      final payload = _unescapeControlPayload(parsed.payload);
       onPaneOutput?.call(paneId, payload);
       return;
     }
@@ -239,11 +264,7 @@ class TmuxControlClient {
         : line.substring(firstSpace + 1).split(' ');
 
     onNotification?.call(
-      TmuxControlNotification(
-        name: name,
-        arguments: arguments,
-        rawLine: line,
-      ),
+      TmuxControlNotification(name: name, arguments: arguments, rawLine: line),
     );
   }
 
@@ -275,6 +296,60 @@ class TmuxControlClient {
   static String _escapeShellArg(String value) {
     final escaped = value.replaceAll("'", "'\"'\"'");
     return "'$escaped'";
+  }
+
+  static String _buildStartupCommand({
+    required String tmuxBinary,
+    required String sessionName,
+  }) {
+    final escapedTmuxBinary = _escapeShellArg(tmuxBinary);
+    final escapedSessionName = _escapeShellArg(sessionName);
+    return 'export PS1="" PS2="" 2>/dev/null; '
+        'stty -echo 2>/dev/null; '
+        'exec $escapedTmuxBinary -C attach-session -f ignore-size -t $escapedSessionName';
+  }
+
+  static _ParsedPaneOutput? _parseOutputLine(String line) {
+    const prefix = '%output ';
+    if (!line.startsWith(prefix)) {
+      return null;
+    }
+
+    final body = line.substring(prefix.length);
+    final separatorIndex = body.indexOf(' ');
+    if (separatorIndex <= 0) {
+      return null;
+    }
+
+    return _ParsedPaneOutput(
+      paneId: body.substring(0, separatorIndex),
+      payload: body.substring(separatorIndex + 1),
+    );
+  }
+
+  static _ParsedPaneOutput? _parseExtendedOutputLine(String line) {
+    const prefix = '%extended-output ';
+    if (!line.startsWith(prefix)) {
+      return null;
+    }
+
+    final body = line.substring(prefix.length);
+    final paneSeparatorIndex = body.indexOf(' ');
+    if (paneSeparatorIndex <= 0) {
+      return null;
+    }
+
+    final paneId = body.substring(0, paneSeparatorIndex);
+    final remainder = body.substring(paneSeparatorIndex + 1);
+    final metadataSeparatorIndex = remainder.indexOf(': ');
+    if (metadataSeparatorIndex == -1) {
+      return null;
+    }
+
+    return _ParsedPaneOutput(
+      paneId: paneId,
+      payload: remainder.substring(metadataSeparatorIndex + 2),
+    );
   }
 
   static String _unescapeControlPayload(String escaped) {
@@ -310,6 +385,13 @@ class _CommandResponseBuffer {
   final List<String> lines = [];
 
   _CommandResponseBuffer({required this.completer});
+}
+
+class _ParsedPaneOutput {
+  final String paneId;
+  final String payload;
+
+  const _ParsedPaneOutput({required this.paneId, required this.payload});
 }
 
 class _StreamingStringSink implements StringSink {

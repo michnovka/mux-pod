@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -13,10 +13,7 @@ import '../../../services/tmux/pane_navigator.dart';
 import '../../../theme/design_colors.dart';
 
 /// Terminal interaction mode.
-enum PaneTerminalMode {
-  normal,
-  select,
-}
+enum PaneTerminalMode { normal, select }
 
 /// xterm-backed pane renderer that preserves the app's single-pane UX.
 class PaneTerminalView extends ConsumerStatefulWidget {
@@ -56,6 +53,8 @@ class PaneTerminalView extends ConsumerStatefulWidget {
 }
 
 class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
+  static const double _autoScrollThresholdPx = 32;
+
   final ScrollController _horizontalScrollController = ScrollController();
   ScrollController? _internalVerticalScrollController;
 
@@ -65,12 +64,15 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   bool _hasSelection = false;
   double _currentScale = 1.0;
   double _baseScale = 1.0;
+  bool _isUserScrollInProgress = false;
+  bool _followBottom = true;
 
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
   Offset _twoFingerPanStart = Offset.zero;
   Offset _twoFingerPanDelta = Offset.zero;
   bool _isTwoFingerPanning = false;
   SwipeDirection? _twoFingerSwipeResult;
+  double _twoFingerStartDistance = 0;
 
   final Map<int, Offset> _pointerStartPositions = {};
   final Map<int, Offset> _pointerCurrentPositions = {};
@@ -128,14 +130,75 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   }
 
   void scrollToBottom() {
+    _followBottom = true;
+    _snapToBottom();
+  }
+
+  void _snapToBottom([int remainingAttempts = 3]) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_verticalScrollController.hasClients) {
+      if (!mounted || !_verticalScrollController.hasClients) {
         return;
       }
-      _verticalScrollController.jumpTo(
-        _verticalScrollController.position.maxScrollExtent,
-      );
+
+      final position = _verticalScrollController.position;
+      final target = position.maxScrollExtent;
+      if ((target - position.pixels).abs() > 0.5) {
+        position.jumpTo(target);
+      }
+
+      if (remainingAttempts <= 0) {
+        return;
+      }
+
+      if (!_isNearBottomForMetrics(position)) {
+        _snapToBottom(remainingAttempts - 1);
+      }
     });
+  }
+
+  bool get isNearBottom {
+    if (!_verticalScrollController.hasClients) {
+      return true;
+    }
+
+    final position = _verticalScrollController.position;
+    return (position.maxScrollExtent - position.pixels) <=
+        _autoScrollThresholdPx;
+  }
+
+  bool get shouldAutoFollow => _followBottom && !_isUserScrollInProgress;
+
+  bool _isNearBottomForMetrics(ScrollMetrics metrics) {
+    return (metrics.maxScrollExtent - metrics.pixels) <= _autoScrollThresholdPx;
+  }
+
+  bool _handleScrollNotification(ScrollNotification notification) {
+    if (notification.metrics.axis != Axis.vertical) {
+      return false;
+    }
+
+    if (notification is ScrollStartNotification &&
+        notification.dragDetails != null) {
+      _isUserScrollInProgress = true;
+      _followBottom = false;
+      return false;
+    }
+
+    final isNearBottom = _isNearBottomForMetrics(notification.metrics);
+
+    if (notification is ScrollEndNotification ||
+        (notification is UserScrollNotification &&
+            notification.direction == ScrollDirection.idle)) {
+      _isUserScrollInProgress = false;
+      _followBottom = isNearBottom;
+      return false;
+    }
+
+    if (!_isUserScrollInProgress && isNearBottom) {
+      _followBottom = true;
+    }
+
+    return false;
   }
 
   Future<void> copySelection() async {
@@ -160,15 +223,64 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   void _onPointerDown(PointerDownEvent event) {
     _pointerStartPositions[event.pointer] = event.position;
     _pointerCurrentPositions[event.pointer] = event.position;
+
+    if (_pointerCurrentPositions.length == 2) {
+      _beginTwoFingerGesture();
+    }
   }
 
   void _onPointerMove(PointerMoveEvent event) {
+    if (!_pointerCurrentPositions.containsKey(event.pointer)) {
+      return;
+    }
+
     _pointerCurrentPositions[event.pointer] = event.position;
+
+    if (_pointerCurrentPositions.length < 2) {
+      return;
+    }
+
+    if (_twoFingerMode == _TwoFingerMode.zoom) {
+      _updateZoomFromPointers();
+      return;
+    }
+
+    if (_twoFingerMode == _TwoFingerMode.pan) {
+      _isTwoFingerPanning = true;
+      _twoFingerPanDelta = _currentTwoFingerFocalPoint() - _twoFingerPanStart;
+      setState(() {});
+      return;
+    }
+
+    _twoFingerMode = _detectModeFromFingerDirections();
+    switch (_twoFingerMode) {
+      case _TwoFingerMode.zoom:
+        _updateZoomFromPointers();
+        return;
+      case _TwoFingerMode.pan:
+        _isTwoFingerPanning = true;
+        _twoFingerPanDelta = _currentTwoFingerFocalPoint() - _twoFingerPanStart;
+        setState(() {});
+        return;
+      case _TwoFingerMode.undetermined:
+        _twoFingerPanDelta = _currentTwoFingerFocalPoint() - _twoFingerPanStart;
+        return;
+    }
   }
 
   void _onPointerUpOrCancel(PointerEvent event) {
+    final hadTwoFingerGesture = _pointerCurrentPositions.length >= 2;
     _pointerStartPositions.remove(event.pointer);
     _pointerCurrentPositions.remove(event.pointer);
+
+    if (hadTwoFingerGesture && _pointerCurrentPositions.length < 2) {
+      _endTwoFingerGesture();
+      return;
+    }
+
+    if (hadTwoFingerGesture && _pointerCurrentPositions.length >= 2) {
+      _beginTwoFingerGesture();
+    }
   }
 
   _TwoFingerMode _detectModeFromFingerDirections() {
@@ -199,49 +311,58 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     return dot > 0 ? _TwoFingerMode.pan : _TwoFingerMode.zoom;
   }
 
-  void _onScaleStart(ScaleStartDetails details) {
+  void _beginTwoFingerGesture() {
     _baseScale = _currentScale;
-    _twoFingerPanStart = details.focalPoint;
+    _twoFingerPanStart = _currentTwoFingerFocalPoint();
     _twoFingerPanDelta = Offset.zero;
     _isTwoFingerPanning = false;
     _twoFingerMode = _TwoFingerMode.undetermined;
-  }
+    _twoFingerStartDistance = _currentTwoFingerDistance();
 
-  void _onScaleUpdate(ScaleUpdateDetails details) {
-    if (details.pointerCount <= 1) {
-      return;
-    }
-
-    if (_twoFingerMode == _TwoFingerMode.zoom) {
-      _applyZoom(details);
-      return;
-    }
-
-    if (_twoFingerMode == _TwoFingerMode.pan) {
-      _isTwoFingerPanning = true;
-      _twoFingerPanDelta = details.focalPoint - _twoFingerPanStart;
-      setState(() {});
-      return;
-    }
-
-    _twoFingerMode = _detectModeFromFingerDirections();
-    switch (_twoFingerMode) {
-      case _TwoFingerMode.zoom:
-        _applyZoom(details);
-        return;
-      case _TwoFingerMode.pan:
-        _isTwoFingerPanning = true;
-        _twoFingerPanDelta = details.focalPoint - _twoFingerPanStart;
-        setState(() {});
-        return;
-      case _TwoFingerMode.undetermined:
-        _twoFingerPanDelta = details.focalPoint - _twoFingerPanStart;
-        return;
+    for (final entry in _pointerCurrentPositions.entries) {
+      _pointerStartPositions[entry.key] = entry.value;
     }
   }
 
-  void _applyZoom(ScaleUpdateDetails details) {
-    final newScale = (_baseScale * details.scale).clamp(0.5, 5.0);
+  Offset _currentTwoFingerFocalPoint() {
+    final pointers = _activeTwoFingerPointers();
+    if (pointers.length < 2) {
+      return Offset.zero;
+    }
+
+    final first = _pointerCurrentPositions[pointers[0]]!;
+    final second = _pointerCurrentPositions[pointers[1]]!;
+    return Offset(
+      (first.dx + second.dx) / 2,
+      (first.dy + second.dy) / 2,
+    );
+  }
+
+  double _currentTwoFingerDistance() {
+    final pointers = _activeTwoFingerPointers();
+    if (pointers.length < 2) {
+      return 0;
+    }
+
+    final first = _pointerCurrentPositions[pointers[0]]!;
+    final second = _pointerCurrentPositions[pointers[1]]!;
+    return (second - first).distance;
+  }
+
+  List<int> _activeTwoFingerPointers() {
+    return _pointerCurrentPositions.keys.take(2).toList(growable: false);
+  }
+
+  void _updateZoomFromPointers() {
+    final distance = _currentTwoFingerDistance();
+    if (_twoFingerStartDistance <= 0 || distance <= 0) {
+      return;
+    }
+
+    final newScale = (_baseScale * (distance / _twoFingerStartDistance)).clamp(
+      0.5,
+      5.0,
+    );
     if (newScale == _currentScale) {
       return;
     }
@@ -252,11 +373,14 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     widget.onZoomChanged?.call(newScale);
   }
 
-  void _onScaleEnd(ScaleEndDetails details) {
+  void _endTwoFingerGesture() {
     final wasPanning = _isTwoFingerPanning;
     _isTwoFingerPanning = false;
     _twoFingerMode = _TwoFingerMode.undetermined;
+    _twoFingerStartDistance = 0;
     if (!wasPanning) {
+      _twoFingerPanDelta = Offset.zero;
+      setState(() {});
       return;
     }
 
@@ -371,9 +495,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         decoration: BoxDecoration(
           color: Colors.black.withValues(alpha: 0.7),
           borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: Colors.white.withValues(alpha: 0.12),
-          ),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -428,22 +550,19 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
               gradient: LinearGradient(
                 begin: isHorizontal
                     ? (direction == SwipeDirection.left
-                        ? Alignment.centerRight
-                        : Alignment.centerLeft)
+                          ? Alignment.centerRight
+                          : Alignment.centerLeft)
                     : (direction == SwipeDirection.up
-                        ? Alignment.bottomCenter
-                        : Alignment.topCenter),
+                          ? Alignment.bottomCenter
+                          : Alignment.topCenter),
                 end: isHorizontal
                     ? (direction == SwipeDirection.left
-                        ? Alignment.centerLeft
-                        : Alignment.centerRight)
+                          ? Alignment.centerLeft
+                          : Alignment.centerRight)
                     : (direction == SwipeDirection.up
-                        ? Alignment.topCenter
-                        : Alignment.bottomCenter),
-                colors: [
-                  Colors.transparent,
-                  Colors.red.withValues(alpha: 0.4),
-                ],
+                          ? Alignment.topCenter
+                          : Alignment.bottomCenter),
+                colors: [Colors.transparent, Colors.red.withValues(alpha: 0.4)],
               ),
             ),
           ),
@@ -493,22 +612,19 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
               gradient: LinearGradient(
                 begin: isHorizontal
                     ? (direction == SwipeDirection.left
-                        ? Alignment.centerRight
-                        : Alignment.centerLeft)
+                          ? Alignment.centerRight
+                          : Alignment.centerLeft)
                     : (direction == SwipeDirection.up
-                        ? Alignment.bottomCenter
-                        : Alignment.topCenter),
+                          ? Alignment.bottomCenter
+                          : Alignment.topCenter),
                 end: isHorizontal
                     ? (direction == SwipeDirection.left
-                        ? Alignment.centerLeft
-                        : Alignment.centerRight)
+                          ? Alignment.centerLeft
+                          : Alignment.centerRight)
                     : (direction == SwipeDirection.up
-                        ? Alignment.topCenter
-                        : Alignment.bottomCenter),
-                colors: [
-                  Colors.transparent,
-                  color,
-                ],
+                          ? Alignment.topCenter
+                          : Alignment.bottomCenter),
+                colors: [Colors.transparent, color],
               ),
             ),
           ),
@@ -543,19 +659,27 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         Widget terminalWidget = SizedBox(
           width: needsHorizontalScroll ? terminalWidth : constraints.maxWidth,
           height: constraints.maxHeight,
-          child: TerminalView(
-            widget.terminal,
-            controller: widget.terminalController,
-            scrollController: _verticalScrollController,
-            autoResize: false,
-            autofocus: true,
-            readOnly: widget.mode == PaneTerminalMode.select,
-            simulateScroll: widget.mode == PaneTerminalMode.normal,
-            theme: _buildTheme(),
-            textStyle: TerminalStyle(
-              fontSize: fontSize,
-              height: 1.4,
-              fontFamily: settings.fontFamily,
+          child: MediaQuery.removePadding(
+            context: context,
+            removeLeft: true,
+            removeTop: true,
+            removeRight: true,
+            removeBottom: true,
+            child: TerminalView(
+              widget.terminal,
+              controller: widget.terminalController,
+              scrollController: _verticalScrollController,
+              autoResize: false,
+              autofocus: true,
+              deleteDetection: true,
+              readOnly: widget.mode == PaneTerminalMode.select,
+              simulateScroll: widget.mode == PaneTerminalMode.normal,
+              theme: _buildTheme(),
+              textStyle: TerminalStyle(
+                fontSize: fontSize,
+                height: 1.4,
+                fontFamily: settings.fontFamily,
+              ),
             ),
           ),
         );
@@ -570,23 +694,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         }
 
         if (widget.zoomEnabled) {
-          terminalWidget = RawGestureDetector(
-            gestures: <Type, GestureRecognizerFactory>{
-              ScaleGestureRecognizer:
-                  GestureRecognizerFactoryWithHandlers<
-                    ScaleGestureRecognizer
-                  >(
-                    ScaleGestureRecognizer.new,
-                    (ScaleGestureRecognizer instance) {
-                      instance
-                        ..onStart = _onScaleStart
-                        ..onUpdate = _onScaleUpdate
-                        ..onEnd = _onScaleEnd;
-                    },
-                  ),
-            },
-            child: terminalWidget,
-          );
           terminalWidget = Listener(
             onPointerDown: _onPointerDown,
             onPointerMove: _onPointerMove,
@@ -596,15 +703,18 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
           );
         }
 
-        return Container(
-          color: widget.backgroundColor,
-          child: Stack(
-            children: [
-              terminalWidget,
-              if (_isTwoFingerPanning || _twoFingerSwipeResult != null)
-                _buildTwoFingerSwipeOverlay(),
-              _buildSelectionActions(),
-            ],
+        return NotificationListener<ScrollNotification>(
+          onNotification: _handleScrollNotification,
+          child: Container(
+            color: widget.backgroundColor,
+            child: Stack(
+              children: [
+                terminalWidget,
+                if (_isTwoFingerPanning || _twoFingerSwipeResult != null)
+                  _buildTwoFingerSwipeOverlay(),
+                _buildSelectionActions(),
+              ],
+            ),
           ),
         );
       },
@@ -612,8 +722,4 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   }
 }
 
-enum _TwoFingerMode {
-  undetermined,
-  zoom,
-  pan,
-}
+enum _TwoFingerMode { undetermined, zoom, pan }

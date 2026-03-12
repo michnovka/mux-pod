@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -15,7 +14,10 @@ import '../../providers/tmux_provider.dart';
 import '../../services/keychain/secure_storage.dart';
 import '../../services/network/network_monitor.dart';
 import '../../services/ssh/input_queue.dart';
-import '../../services/ssh/ssh_client.dart' show SshConnectOptions;
+import '../../services/ssh/ssh_client.dart' show SshClient, SshConnectOptions;
+import '../../services/terminal/bounded_text_buffer.dart';
+import '../../services/terminal/terminal_output_normalizer.dart';
+import '../../services/terminal/terminal_snapshot.dart';
 import '../../services/terminal/xterm_input_adapter.dart';
 import '../../services/tmux/pane_navigator.dart';
 import '../../services/tmux/tmux_commands.dart';
@@ -28,45 +30,18 @@ import '../settings/settings_screen.dart';
 import 'widgets/pane_terminal_view.dart';
 
 /// Terminal mode used by the mobile UI.
-enum TerminalMode {
-  normal,
-  select,
-}
+enum TerminalMode { normal, select }
 
-/// Terminal display data used to seed or resync the emulator surface.
-///
-/// Managed via ValueNotifier to avoid parent widget setState().
-/// This prevents parent rebuilds during BottomSheet display,
-/// enabling stable operation even with isDismissible: true.
-class _TerminalViewData {
-  final String content;
-  final int paneWidth;
-  final int paneHeight;
-  final int cursorX;
-  final int cursorY;
+class _PaneSnapshotPayload {
+  final String activeContent;
+  final String mainContent;
+  final String metadata;
 
-  const _TerminalViewData({
-    this.content = '',
-    this.paneWidth = 80,
-    this.paneHeight = 24,
-    this.cursorX = 0,
-    this.cursorY = 0,
+  const _PaneSnapshotPayload({
+    required this.activeContent,
+    required this.mainContent,
+    required this.metadata,
   });
-
-  _TerminalViewData copyWith({
-    String? content,
-    int? paneWidth,
-    int? paneHeight,
-    int? cursorX,
-    int? cursorY,
-  }) =>
-      _TerminalViewData(
-        content: content ?? this.content,
-        paneWidth: paneWidth ?? this.paneWidth,
-        paneHeight: paneHeight ?? this.paneHeight,
-        cursorX: cursorX ?? this.cursorX,
-        cursorY: cursorY ?? this.cursorY,
-      );
 }
 
 /// Terminal screen (compliant with HTML design specification)
@@ -94,6 +69,17 @@ class TerminalScreen extends ConsumerStatefulWidget {
 
 class _TerminalScreenState extends ConsumerState<TerminalScreen>
     with WidgetsBindingObserver {
+  static const int _maxDeferredStreamOutputChars = 256 * 1024;
+  static const int _literalInputChunkLength = 1024;
+  static const Duration _connectionLookupTimeout = Duration(seconds: 3);
+  static const Duration _initialControlRestartDelay = Duration(
+    milliseconds: 250,
+  );
+  static const Duration _maxControlRestartDelay = Duration(seconds: 4);
+  static const String _snapshotMainMarker = '\x01__MUXPOD_MAIN__\x01';
+  static const String _snapshotAltMarker = '\x01__MUXPOD_ALT__\x01';
+  static const String _snapshotMetadataMarker = '\x01__MUXPOD_META__\x01';
+
   final _secureStorage = SecureStorageService();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   final _paneTerminalViewKey = GlobalKey<PaneTerminalViewState>();
@@ -108,22 +94,26 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   SshState _sshState = const SshState();
 
   // Terminal display data used for bootstrap/resync (managed via ValueNotifier)
-  final _viewNotifier = ValueNotifier<_TerminalViewData>(const _TerminalViewData());
+  final _viewNotifier = ValueNotifier<TerminalSnapshotFrame>(
+    const TerminalSnapshotFrame(),
+  );
   final _latencyNotifier = ValueNotifier<int>(0);
-  final _deferredStreamOutput = StringBuffer();
+  final _deferredStreamOutput = BoundedTextBuffer(
+    maxLength: _maxDeferredStreamOutputChars,
+  );
 
   TmuxControlClient? _controlClient;
   String? _controlClientSessionName;
   Timer? _controlSyncTimer;
+  Timer? _controlRestartTimer;
+  Timer? _latencyTimer;
+  int _controlRestartAttempt = 0;
+  bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
 
-  // For frame skipping (optimization for infrequent snapshot resyncs)
-  static const _minFrameInterval = Duration(milliseconds: 16); // ~60fps
-  DateTime _lastFrameTime = DateTime.now();
-  bool _pendingUpdate = false;
-  _TerminalViewData _pendingViewData = const _TerminalViewData();
+  TerminalSnapshotFrame _pendingViewData = const TerminalSnapshotFrame();
 
   // Initial scroll completed flag
   bool _hasInitialScrolled = false;
@@ -145,6 +135,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   // Local cache of directInput setting (to avoid ref.watch)
   bool _directInputEnabled = true;
+  SshNotifier? _sshNotifier;
 
   // Riverpod listeners
   ProviderSubscription<SshState>? _sshSubscription;
@@ -155,10 +146,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   @override
   void initState() {
     super.initState();
-    _terminal = Terminal(
-      maxLines: _terminalScrollbackLines,
-      reflowEnabled: false,
-    )..onOutput = _handleTerminalOutput;
+    _terminal = _createTerminalEmulator();
     WidgetsBinding.instance.addObserver(this);
 
     // Set up listeners on the next frame (because ref is needed)
@@ -192,7 +180,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _isInBackground = true;
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
-    unawaited(_stopControlClient());
+    _stopLatencyPolling(resetValue: true);
+    unawaited(_stopControlClient(resetRestartState: true));
     WakelockPlus.disable();
   }
 
@@ -201,6 +190,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!_isInBackground || _isDisposed) return;
     _isInBackground = false;
     _applyKeepScreenOn();
+    _startLatencyPolling();
     unawaited(_restartTerminalStream(restartControlClient: true));
   }
 
@@ -217,50 +207,47 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   /// Set up Provider listeners
   void _setupListeners() {
     // Monitor SSH state changes
-    _sshSubscription = ref.listenManual<SshState>(
-      sshProvider,
-      (previous, next) {
-        if (!mounted || _isDisposed) return;
-        setState(() {
-          _sshState = next;
-        });
-      },
-      fireImmediately: true,
-    );
+    _sshSubscription = ref.listenManual<SshState>(sshProvider, (
+      previous,
+      next,
+    ) {
+      if (!mounted || _isDisposed) return;
+      setState(() {
+        _sshState = next;
+      });
+    }, fireImmediately: true);
 
     // Monitor Tmux state changes
     // Note: Parent setState() is not needed. Breadcrumbs and pane indicators
     // directly watch tmuxProvider via Consumer widgets, so they are
     // only rebuilt within the subtree.
-    _tmuxSubscription = ref.listenManual<TmuxState>(
-      tmuxProvider,
-      (previous, next) {
-        // Consumer widgets directly watch tmuxProvider, so
-        // parent setState() is not needed (removed for BottomSheet stability)
-      },
-      fireImmediately: true,
-    );
+    _tmuxSubscription = ref.listenManual<TmuxState>(tmuxProvider, (
+      previous,
+      next,
+    ) {
+      // Consumer widgets directly watch tmuxProvider, so
+      // parent setState() is not needed (removed for BottomSheet stability)
+    }, fireImmediately: true);
 
     // Monitor settings changes (for Keep screen on / directInput)
-    _settingsSubscription = ref.listenManual<AppSettings>(
-      settingsProvider,
-      (previous, next) {
-        if (!mounted || _isDisposed) return;
-        if (previous?.keepScreenOn != next.keepScreenOn) {
-          _applyKeepScreenOn();
-        }
-        if (previous?.directInputEnabled != next.directInputEnabled) {
-          setState(() {
-            _directInputEnabled = next.directInputEnabled;
-          });
-        }
-        if (previous?.scrollbackLines != next.scrollbackLines) {
-          _reconfigureTerminal(next);
-          unawaited(_resyncActivePane(refreshTree: false));
-        }
-      },
-      fireImmediately: false,
-    );
+    _settingsSubscription = ref.listenManual<AppSettings>(settingsProvider, (
+      previous,
+      next,
+    ) {
+      if (!mounted || _isDisposed) return;
+      if (previous?.keepScreenOn != next.keepScreenOn) {
+        _applyKeepScreenOn();
+      }
+      if (previous?.directInputEnabled != next.directInputEnabled) {
+        setState(() {
+          _directInputEnabled = next.directInputEnabled;
+        });
+      }
+      if (previous?.scrollbackLines != next.scrollbackLines) {
+        _reconfigureTerminal(next);
+        unawaited(_resyncActivePane(refreshTree: false));
+      }
+    }, fireImmediately: false);
 
     // Explicitly set initial value
     _directInputEnabled = ref.read(settingsProvider).directInputEnabled;
@@ -281,21 +268,74 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     );
 
     // Set up handler for successful reconnection
-    final sshNotifier = ref.read(sshProvider.notifier);
-    sshNotifier.onReconnectSuccess = _onReconnectSuccess;
+    _sshNotifier = ref.read(sshProvider.notifier);
+    _sshNotifier!.onReconnectSuccess = _onReconnectSuccess;
   }
 
   /// Handler for successful reconnection
   Future<void> _onReconnectSuccess() async {
     if (!mounted || _isDisposed) return;
 
-    await _stopControlClient();
+    await _stopControlClient(resetRestartState: true);
     await _refreshSessionTree(syncActive: true);
-    await _restartTerminalStream(restartControlClient: true, refreshTree: false);
+    await _restartTerminalStream(
+      restartControlClient: true,
+      refreshTree: false,
+    );
     await _flushInputQueue();
+    _startLatencyPolling();
 
     // Update UI
     if (mounted) setState(() {});
+  }
+
+  void _startLatencyPolling() {
+    _stopLatencyPolling();
+    if (_isDisposed || _isInBackground) {
+      return;
+    }
+
+    unawaited(_refreshLatency());
+    _latencyTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(_refreshLatency());
+    });
+  }
+
+  void _stopLatencyPolling({bool resetValue = false}) {
+    _latencyTimer?.cancel();
+    _latencyTimer = null;
+    _isLatencyProbeInFlight = false;
+    if (resetValue && !_isDisposed) {
+      _latencyNotifier.value = 0;
+    }
+  }
+
+  Future<void> _refreshLatency() async {
+    if (_isDisposed || _isInBackground || _isLatencyProbeInFlight || !mounted) {
+      return;
+    }
+
+    final sshClient = _sshNotifier?.client;
+    if (sshClient == null || !sshClient.isConnected) {
+      return;
+    }
+
+    _isLatencyProbeInFlight = true;
+    final startTime = DateTime.now();
+
+    try {
+      await sshClient.exec('true', timeout: const Duration(seconds: 3));
+      if (!_isDisposed && mounted) {
+        _latencyNotifier.value = DateTime.now()
+            .difference(startTime)
+            .inMilliseconds;
+      }
+    } catch (_) {
+      // Ignore latency probe failures. Connection keep-alive and reconnect
+      // paths already own transport error handling.
+    } finally {
+      _isLatencyProbeInFlight = false;
+    }
   }
 
   /// Send queued input
@@ -308,16 +348,22 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
+  Terminal _createTerminalEmulator() {
+    return Terminal(maxLines: _terminalScrollbackLines, reflowEnabled: false)
+      ..onOutput = _handleTerminalOutput;
+  }
+
+  void _resetTerminalEmulator() {
+    _terminal = _createTerminalEmulator();
+  }
+
   void _reconfigureTerminal(AppSettings settings) {
     if (_terminalScrollbackLines == settings.scrollbackLines) {
       _terminal.onOutput = _handleTerminalOutput;
       return;
     }
     _terminalScrollbackLines = settings.scrollbackLines;
-    _terminal = Terminal(
-      maxLines: settings.scrollbackLines,
-      reflowEnabled: false,
-    )..onOutput = _handleTerminalOutput;
+    _resetTerminalEmulator();
     if (mounted) {
       setState(() {});
     }
@@ -325,7 +371,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   /// Connect via SSH and set up tmux session
   Future<void> _connectAndSetup() async {
-    if (!mounted) {
+    if (!mounted || _isDisposed || _isConnecting) {
       return;
     }
     setState(() {
@@ -335,7 +381,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     try {
       // 1. Get connection info
-      final connection = ref.read(connectionsProvider.notifier).getById(widget.connectionId);
+      final connection = await ref
+          .read(connectionsProvider.notifier)
+          .getByIdWhenReady(
+            widget.connectionId,
+            timeout: _connectionLookupTimeout,
+          );
+      if (!mounted || _isDisposed) {
+        return;
+      }
       if (connection == null) {
         throw Exception('Connection not found');
       }
@@ -347,7 +401,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
 
       // 3. SSH connection (no shell startup - exec only)
-      final sshNotifier = ref.read(sshProvider.notifier);
+      final SshNotifier sshNotifier = ref.read(sshProvider.notifier);
+      _sshNotifier ??= sshNotifier;
       await sshNotifier.connectWithoutShell(connection, options);
       if (!mounted || _isDisposed) {
         return;
@@ -375,10 +430,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         } else {
           // Create new session
           final sshClient = ref.read(sshProvider.notifier).client;
-          await sshClient?.execPersistent(TmuxCommands.newSession(
-            name: widget.sessionName!,
-            detached: true,
-          ));
+          await sshClient?.execPersistent(
+            TmuxCommands.newSession(name: widget.sessionName!, detached: true),
+          );
           if (!mounted || _isDisposed) return;
           await _refreshSessionTree();
           if (!mounted || _isDisposed) return;
@@ -439,6 +493,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         restartControlClient: true,
         refreshTree: false,
       );
+      _startLatencyPolling();
 
       if (activePane != null) {
         // Send focus-in to pane (so apps like Claude Code can detect focus).
@@ -452,6 +507,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _isConnecting = false;
       });
     } catch (e) {
+      _stopLatencyPolling(resetValue: true);
       if (!mounted) return;
       setState(() {
         _isConnecting = false;
@@ -521,6 +577,50 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     });
   }
 
+  void _cancelControlClientRestart({bool resetAttempts = false}) {
+    _controlRestartTimer?.cancel();
+    _controlRestartTimer = null;
+    if (resetAttempts) {
+      _controlRestartAttempt = 0;
+    }
+  }
+
+  Duration _nextControlRestartDelay() {
+    var delayMs = _initialControlRestartDelay.inMilliseconds;
+    for (var attempt = 0; attempt < _controlRestartAttempt; attempt++) {
+      delayMs *= 2;
+      if (delayMs >= _maxControlRestartDelay.inMilliseconds) {
+        delayMs = _maxControlRestartDelay.inMilliseconds;
+        break;
+      }
+    }
+    return Duration(milliseconds: delayMs);
+  }
+
+  void _scheduleControlClientRestart() {
+    if (_isDisposed || _isInBackground || _controlRestartTimer != null) {
+      return;
+    }
+
+    final sshState = ref.read(sshProvider);
+    if (!sshState.isConnected) {
+      if (!sshState.isReconnecting) {
+        unawaited(_attemptReconnect());
+      }
+      return;
+    }
+
+    final delay = _nextControlRestartDelay();
+    _controlRestartAttempt += 1;
+    _controlRestartTimer = Timer(delay, () async {
+      _controlRestartTimer = null;
+      if (!mounted || _isDisposed || _isInBackground) {
+        return;
+      }
+      await _restartTerminalStream(restartControlClient: true);
+    });
+  }
+
   Future<void> _startControlClient(String sessionName) async {
     if (_isDisposed || _isInBackground) {
       return;
@@ -531,12 +631,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    _cancelControlClientRestart();
     await _stopControlClient();
 
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected) {
       return;
     }
+
+    final activePane = ref.read(tmuxProvider).activePane;
+    final cols = activePane?.width ?? _viewNotifier.value.paneWidth;
+    final rows = activePane?.height ?? _viewNotifier.value.paneHeight;
 
     final controlClient = TmuxControlClient(
       sshClient,
@@ -546,14 +651,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       onClosed: _handleControlClientClosed,
     );
 
-    await controlClient.start(sessionName: sessionName);
-    _controlClient = controlClient;
-    _controlClientSessionName = sessionName;
+    try {
+      await controlClient.start(
+        sessionName: sessionName,
+        cols: cols > 0 ? cols : 200,
+        rows: rows > 0 ? rows : 50,
+      );
+      _controlClient = controlClient;
+      _controlClientSessionName = sessionName;
+      _cancelControlClientRestart(resetAttempts: true);
+    } catch (_) {
+      await controlClient.dispose();
+      _controlClient = null;
+      _controlClientSessionName = null;
+      _scheduleControlClientRestart();
+    }
   }
 
-  Future<void> _stopControlClient() async {
+  Future<void> _stopControlClient({bool resetRestartState = false}) async {
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
+    _cancelControlClientRestart(resetAttempts: resetRestartState);
     final controlClient = _controlClient;
     _controlClient = null;
     _controlClientSessionName = null;
@@ -570,18 +688,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     final sessionName = ref.read(tmuxProvider).activeSessionName;
     if (sessionName == null) {
-      await _stopControlClient();
+      await _stopControlClient(resetRestartState: true);
       return;
     }
 
-    if (restartControlClient ||
+    final shouldRestartControlClient =
+        restartControlClient ||
         _controlClientSessionName != sessionName ||
         _controlClient == null ||
-        !_controlClient!.isStarted) {
-      await _startControlClient(sessionName);
+        !_controlClient!.isStarted;
+
+    if (shouldRestartControlClient) {
+      await _stopControlClient();
     }
 
     await _resyncActivePane(refreshTree: refreshTree);
+
+    if (shouldRestartControlClient) {
+      await _startControlClient(sessionName);
+      if (!mounted || _isDisposed) {
+        return;
+      }
+      await _resyncActivePane(refreshTree: false);
+    }
   }
 
   void _handleControlPaneOutput(String paneId, String data) {
@@ -599,8 +728,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    final shouldAutoScroll =
+        _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
     _terminal.write(data);
-    if (!_hasInitialScrolled) {
+    if (shouldAutoScroll || !_hasInitialScrolled) {
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
     }
@@ -634,35 +765,129 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (_isDisposed || _isInBackground) {
       return;
     }
-    unawaited(_restartTerminalStream(restartControlClient: true));
+    _scheduleControlClientRestart();
   }
 
   void _handleControlClientClosed() {
     if (_isDisposed || _isInBackground) {
       return;
     }
-
-    final sshState = ref.read(sshProvider);
-    if (!sshState.isConnected) {
-      if (!sshState.isReconnecting) {
-        unawaited(_attemptReconnect());
-      }
-      return;
-    }
-
-    unawaited(_restartTerminalStream(restartControlClient: true));
+    _scheduleControlClientRestart();
   }
 
   void _flushDeferredStreamOutput() {
-    if (_deferredStreamOutput.length == 0 ||
+    if (_deferredStreamOutput.isEmpty ||
         _terminalMode == TerminalMode.select ||
         _isResyncingPane) {
       return;
     }
 
-    final bufferedOutput = _deferredStreamOutput.toString();
-    _deferredStreamOutput.clear();
+    final bufferedOutput = _deferredStreamOutput.takeAll();
+    final shouldAutoScroll =
+        _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
     _terminal.write(bufferedOutput);
+    if (shouldAutoScroll) {
+      _paneTerminalViewKey.currentState?.scrollToBottom();
+    }
+  }
+
+  String _buildPaneSnapshotCommand(String paneId) {
+    final alternateOnCommand = TmuxCommands.getPaneAlternateOn(paneId);
+    final metadataCommand = TmuxCommands.getPaneSnapshotMetadata(paneId);
+    final mainSnapshotCommand = TmuxCommands.capturePane(
+      paneId,
+      escapeSequences: true,
+      preserveTrailingSpaces: true,
+    );
+    final alternateSnapshotCommand = TmuxCommands.capturePane(
+      paneId,
+      escapeSequences: true,
+      alternateScreen: true,
+      preserveTrailingSpaces: true,
+      quiet: true,
+    );
+
+    return '''
+__muxpod_alt=\$($alternateOnCommand);
+if [ "\$__muxpod_alt" = "1" ]; then
+  printf '\\001__MUXPOD_MAIN__\\001\n';
+  $mainSnapshotCommand;
+  printf '\\001__MUXPOD_ALT__\\001\n';
+  $alternateSnapshotCommand;
+else
+  $mainSnapshotCommand;
+fi;
+printf '\\001__MUXPOD_META__\\001';
+$metadataCommand
+''';
+  }
+
+  _PaneSnapshotPayload _parseSnapshotPayload(String combinedOutput) {
+    final metadataIndex = combinedOutput.lastIndexOf(_snapshotMetadataMarker);
+    if (metadataIndex == -1) {
+      final snapshot = _trimSingleTrailingNewline(combinedOutput);
+      return _PaneSnapshotPayload(
+        activeContent: snapshot,
+        mainContent: snapshot,
+        metadata: '',
+      );
+    }
+
+    final body = combinedOutput.substring(0, metadataIndex);
+    final metadata = combinedOutput
+        .substring(metadataIndex + _snapshotMetadataMarker.length)
+        .trim();
+    final trimmedBody = _trimSingleTrailingNewline(body);
+    final mainMarkerIndex = trimmedBody.indexOf(_snapshotMainMarker);
+    final altMarkerIndex = trimmedBody.indexOf(_snapshotAltMarker);
+
+    if (mainMarkerIndex != -1 &&
+        altMarkerIndex != -1 &&
+        mainMarkerIndex < altMarkerIndex) {
+      final mainContent = _trimSingleTrailingNewline(
+        trimmedBody.substring(
+          mainMarkerIndex + _snapshotMainMarker.length,
+          altMarkerIndex,
+        ),
+      );
+      final activeContent = _trimSingleTrailingNewline(
+        trimmedBody.substring(altMarkerIndex + _snapshotAltMarker.length),
+      );
+      return _PaneSnapshotPayload(
+        activeContent: activeContent,
+        mainContent: mainContent,
+        metadata: metadata,
+      );
+    }
+
+    final snapshot = _trimSingleTrailingNewline(trimmedBody);
+    return _PaneSnapshotPayload(
+      activeContent: snapshot,
+      mainContent: snapshot,
+      metadata: metadata,
+    );
+  }
+
+  String _trimSingleTrailingNewline(String value) {
+    if (value.endsWith('\n')) {
+      return value.substring(0, value.length - 1);
+    }
+    return value;
+  }
+
+  bool _parseTmuxFlag(String? value, {required bool fallback}) {
+    if (value == null) {
+      return fallback;
+    }
+
+    switch (value) {
+      case '1':
+        return true;
+      case '0':
+        return false;
+      default:
+        return fallback;
+    }
   }
 
   Future<void> _resyncActivePane({bool refreshTree = true}) async {
@@ -687,24 +912,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
       final activePane = ref.read(tmuxProvider).activePane;
       if (activePane == null) {
-        _viewNotifier.value = _viewNotifier.value.copyWith(content: '');
-        _applyTerminalFrame(_viewNotifier.value);
+        final emptyView = _viewNotifier.value.copyWith(
+          content: '',
+          mainContent: '',
+          alternateScreen: false,
+        );
+        _applyTerminalFrame(emptyView);
+        _viewNotifier.value = emptyView;
         _hasInitialScrolled = false;
         return;
       }
 
       final scrollbackLines = ref.read(settingsProvider).scrollbackLines;
-      final metadataCommand = TmuxCommands.getPaneSnapshotMetadata(activePane.id);
-      final snapshotCommand = '''
-__muxpod_meta=\$($metadataCommand);
-__muxpod_alt=\${__muxpod_meta%%,*};
-if [ "\$__muxpod_alt" = "1" ]; then
-  ${TmuxCommands.capturePane(activePane.id, escapeSequences: true, alternateScreen: true, quiet: true)};
-else
-  ${TmuxCommands.capturePane(activePane.id, escapeSequences: true, startLine: -scrollbackLines)};
-fi;
-printf '%s\n' "\$__muxpod_meta"
-''';
+      final snapshotCommand = _buildPaneSnapshotCommand(activePane.id);
 
       final startTime = DateTime.now();
       final combinedOutput = await sshClient.execPersistent(
@@ -720,45 +940,90 @@ printf '%s\n' "\$__muxpod_meta"
         return;
       }
 
-      final lines = combinedOutput.split('\n');
-      final metadataLine = lines.isNotEmpty ? lines.removeLast() : '';
-      final rawSnapshot = lines.join('\n');
-      final processedSnapshot = rawSnapshot.endsWith('\n')
-          ? rawSnapshot.substring(0, rawSnapshot.length - 1)
-          : rawSnapshot;
+      final snapshotPayload = _parseSnapshotPayload(combinedOutput);
 
       var nextView = _viewNotifier.value.copyWith(
-        content: processedSnapshot,
+        content: snapshotPayload.activeContent,
+        mainContent: snapshotPayload.mainContent,
+        alternateScreen: false,
         paneWidth: activePane.width,
         paneHeight: activePane.height,
         cursorX: activePane.cursorX,
         cursorY: activePane.cursorY,
       );
 
-      final metadataParts = metadataLine.trim().split(',');
+      final metadataParts = snapshotPayload.metadata.split(',');
       if (metadataParts.length >= 5) {
+        final alternateScreen = metadataParts[0] == '1';
         final x = int.tryParse(metadataParts[1]);
         final y = int.tryParse(metadataParts[2]);
         final w = int.tryParse(metadataParts[3]);
         final h = int.tryParse(metadataParts[4]);
+        final insertMode = _parseTmuxFlag(
+          metadataParts.length > 5 ? metadataParts[5] : null,
+          fallback: nextView.insertMode,
+        );
+        final cursorKeysMode = _parseTmuxFlag(
+          metadataParts.length > 6 ? metadataParts[6] : null,
+          fallback: nextView.cursorKeysMode,
+        );
+        final appKeypadMode = _parseTmuxFlag(
+          metadataParts.length > 7 ? metadataParts[7] : null,
+          fallback: nextView.appKeypadMode,
+        );
+        final autoWrapMode = _parseTmuxFlag(
+          metadataParts.length > 8 ? metadataParts[8] : null,
+          fallback: nextView.autoWrapMode,
+        );
+        final cursorVisible = _parseTmuxFlag(
+          metadataParts.length > 9 ? metadataParts[9] : null,
+          fallback: nextView.cursorVisible,
+        );
+        final originMode = _parseTmuxFlag(
+          metadataParts.length > 10 ? metadataParts[10] : null,
+          fallback: nextView.originMode,
+        );
+        final scrollRegionUpper = metadataParts.length > 11
+            ? int.tryParse(metadataParts[11])
+            : null;
+        final scrollRegionLower = metadataParts.length > 12
+            ? int.tryParse(metadataParts[12])
+            : null;
+
+        nextView = nextView.copyWith(
+          alternateScreen: alternateScreen,
+          insertMode: insertMode,
+          cursorKeysMode: cursorKeysMode,
+          appKeypadMode: appKeypadMode,
+          autoWrapMode: autoWrapMode,
+          cursorVisible: cursorVisible,
+          originMode: originMode,
+          scrollRegionUpper: scrollRegionUpper,
+          scrollRegionLower: scrollRegionLower,
+        );
 
         if (w != null && h != null) {
-          nextView = nextView.copyWith(
-            paneWidth: w,
-            paneHeight: h,
-          );
-          ref.read(terminalDisplayProvider.notifier).updatePane(
-            activePane.copyWith(width: w, height: h),
-          );
+          nextView = nextView.copyWith(paneWidth: w, paneHeight: h);
+          ref
+              .read(terminalDisplayProvider.notifier)
+              .updatePane(activePane.copyWith(width: w, height: h));
         }
 
         if (x != null && y != null) {
-          ref.read(tmuxProvider.notifier).updateCursorPosition(activePane.id, x, y);
+          ref
+              .read(tmuxProvider.notifier)
+              .updateCursorPosition(activePane.id, x, y);
           nextView = nextView.copyWith(cursorX: x, cursorY: y);
         }
       }
 
-      _scheduleUpdate(nextView);
+      _applyResyncUpdate(nextView);
+      await _prependHistoryScrollback(
+        sshClient: sshClient,
+        paneId: activePane.id,
+        scrollbackLines: scrollbackLines,
+        alternateScreen: nextView.alternateScreen,
+      );
     } catch (_) {
       final currentState = ref.read(sshProvider);
       if (!currentState.isReconnecting) {
@@ -770,40 +1035,94 @@ printf '%s\n' "\$__muxpod_meta"
     }
   }
 
-  /// Schedule update considering frame skipping
-  ///
-  /// Throttle to avoid updating every frame during high-frequency updates (htop, etc.).
-  /// Consecutive updates within 16ms (~60fps) are deferred to the next frame.
-  void _scheduleUpdate(_TerminalViewData viewData) {
+  void _applyResyncUpdate(TerminalSnapshotFrame viewData) {
     _pendingViewData = viewData;
+    _applyUpdate();
+  }
 
-    // Do nothing if an update is already scheduled
-    if (_pendingUpdate) return;
-
-    final now = DateTime.now();
-    final elapsed = now.difference(_lastFrameTime);
-
-    if (elapsed >= _minFrameInterval) {
-      // Enough time has elapsed, update immediately
-      _applyUpdate();
-    } else {
-      // Frame skip: update on the next frame
-      _pendingUpdate = true;
-      SchedulerBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || _isDisposed) return;
-        _pendingUpdate = false;
-        _applyUpdate();
-      });
+  Future<void> _prependHistoryScrollback({
+    required SshClient sshClient,
+    required String paneId,
+    required int scrollbackLines,
+    required bool alternateScreen,
+  }) async {
+    if (alternateScreen || scrollbackLines <= _terminal.viewHeight) {
+      return;
     }
+
+    final historyOutput = await sshClient.execPersistent(
+      TmuxCommands.capturePane(
+        paneId,
+        escapeSequences: false,
+        preserveTrailingSpaces: true,
+        startLine: -scrollbackLines,
+        endLine: -1,
+      ),
+      timeout: const Duration(seconds: 2),
+    );
+
+    final normalized = _trimSingleTrailingNewline(
+      historyOutput.replaceAll('\r\n', '\n'),
+    );
+    if (normalized.isEmpty) {
+      return;
+    }
+
+    final historyLines = normalized
+        .split('\n')
+        .map((line) => _buildHistoryBufferLine(line, _terminal.viewWidth))
+        .toList(growable: false);
+    if (historyLines.isEmpty) {
+      return;
+    }
+
+    _terminal.mainBuffer.lines.insertAll(0, historyLines);
+    _terminal.notifyListeners();
+    if (_terminalMode == TerminalMode.normal &&
+        (_paneTerminalViewKey.currentState?.shouldAutoFollow ??
+            !_hasInitialScrolled)) {
+      _paneTerminalViewKey.currentState?.scrollToBottom();
+    }
+  }
+
+  BufferLine _buildHistoryBufferLine(String text, int width) {
+    final line = BufferLine(width);
+    var column = 0;
+
+    for (final rune in text.runes) {
+      if (column >= width) {
+        break;
+      }
+
+      if (rune == 0x09) {
+        final nextTabStop = ((column ~/ 8) + 1) * 8;
+        while (column < nextTabStop && column < width) {
+          line.setCodePoint(column, 0x20);
+          column += 1;
+        }
+        continue;
+      }
+
+      line.setCodePoint(column, rune);
+      final cellWidth = line.getWidth(column);
+      if (cellWidth <= 0) {
+        continue;
+      }
+      column += cellWidth;
+    }
+
+    return line;
   }
 
   /// Apply pending update
   void _applyUpdate() {
     if (!mounted || _isDisposed) return;
-    _lastFrameTime = DateTime.now();
-    _viewNotifier.value = _pendingViewData;
+    final shouldAutoScroll =
+        _paneTerminalViewKey.currentState?.shouldAutoFollow ??
+        !_hasInitialScrolled;
     _applyTerminalFrame(_pendingViewData);
-    if (_terminalMode == TerminalMode.normal) {
+    _viewNotifier.value = _pendingViewData;
+    if (_terminalMode == TerminalMode.normal && shouldAutoScroll) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
     }
 
@@ -814,30 +1133,22 @@ printf '%s\n' "\$__muxpod_meta"
     }
   }
 
-  void _applyTerminalFrame(_TerminalViewData viewData) {
-    final cursorRow = viewData.cursorY + 1;
-    final cursorColumn = viewData.cursorX + 1;
-    final cursorVisibility = ref.read(settingsProvider).showTerminalCursor
-        ? '\x1b[?25h'
-        : '\x1b[?25l';
-    final frame =
-        '\x1b[?25l\x1b[H\x1b[2J\x1b[3J${viewData.content}'
-        '\x1b[$cursorRow;${cursorColumn}H'
-        '$cursorVisibility';
-
-    _terminal.resize(viewData.paneWidth, viewData.paneHeight);
-    _terminal.mainBuffer.clear();
-    _terminal.altBuffer.clear();
-    _terminal.buffer.clear();
-    _terminalController.clearSelection();
-    _terminal.write(frame);
+  void _applyTerminalFrame(TerminalSnapshotFrame viewData) {
+    _terminal = createTerminalFromSnapshot(
+      frame: viewData,
+      maxLines: _terminalScrollbackLines,
+      showCursor: ref.read(settingsProvider).showTerminalCursor,
+      onOutput: _handleTerminalOutput,
+      controller: _terminalController,
+    );
   }
 
   void _handleTerminalOutput(String data) {
     if (_terminalMode == TerminalMode.select) {
       return;
     }
-    unawaited(_sendTerminalData(data));
+
+    unawaited(_sendTerminalData(normalizeTerminalOutput(data)));
   }
 
   /// Attempt auto-reconnection
@@ -893,7 +1204,8 @@ printf '%s\n' "\$__muxpod_meta"
     // Disable WakeLock
     WakelockPlus.disable();
     // Clear reconnection success callback
-    ref.read(sshProvider.notifier).onReconnectSuccess = null;
+    _sshNotifier?.onReconnectSuccess = null;
+    _sshNotifier = null;
     // Cancel Riverpod subscriptions
     _sshSubscription?.close();
     _sshSubscription = null;
@@ -905,7 +1217,8 @@ printf '%s\n' "\$__muxpod_meta"
     _networkSubscription = null;
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
-    unawaited(_stopControlClient());
+    _stopLatencyPolling();
+    unawaited(_stopControlClient(resetRestartState: true));
     // Dispose ValueNotifier
     _viewNotifier.dispose();
     _latencyNotifier.dispose();
@@ -951,7 +1264,7 @@ printf '%s\n' "\$__muxpod_meta"
                   child: Stack(
                     children: [
                       RepaintBoundary(
-                        child: ValueListenableBuilder<_TerminalViewData>(
+                        child: ValueListenableBuilder<TerminalSnapshotFrame>(
                           valueListenable: _viewNotifier,
                           builder: (context, viewData, _) {
                             return PaneTerminalView(
@@ -960,18 +1273,19 @@ printf '%s\n' "\$__muxpod_meta"
                               terminalController: _terminalController,
                               paneWidth: viewData.paneWidth,
                               paneHeight: viewData.paneHeight,
-                              backgroundColor:
-                                  Theme.of(context).scaffoldBackgroundColor,
-                              foregroundColor: Theme.of(context)
-                                  .colorScheme
-                                  .onSurface
-                                  .withValues(alpha: 0.9),
+                              backgroundColor: Theme.of(
+                                context,
+                              ).scaffoldBackgroundColor,
+                              foregroundColor: Theme.of(
+                                context,
+                              ).colorScheme.onSurface.withValues(alpha: 0.9),
                               mode: _terminalMode == TerminalMode.select
                                   ? PaneTerminalMode.select
                                   : PaneTerminalMode.normal,
                               zoomEnabled: true,
-                              showCursor:
-                                  ref.watch(settingsProvider).showTerminalCursor,
+                              showCursor: ref
+                                  .watch(settingsProvider)
+                                  .showTerminalCursor,
                               onZoomChanged: (scale) {
                                 setState(() {
                                   _zoomScale = scale;
@@ -1017,9 +1331,7 @@ printf '%s\n' "\$__muxpod_meta"
           if (_isConnecting || sshState.isConnecting)
             Container(
               color: isDark ? Colors.black54 : Colors.white70,
-              child: const Center(
-                child: CircularProgressIndicator(),
-              ),
+              child: const Center(child: CircularProgressIndicator()),
             ),
           // Error overlay
           if (_connectionError != null || sshState.hasError)
@@ -1094,10 +1406,17 @@ printf '%s\n' "\$__muxpod_meta"
     if (target == null) return;
 
     try {
-      await sshClient.execPersistentInput(
-        TmuxCommands.sendKeys(target, data, literal: true),
-        timeout: const Duration(seconds: 2),
+      final commands = TmuxCommands.sendKeysLiteralChunks(
+        target,
+        data,
+        maxChunkLength: _literalInputChunkLength,
       );
+      for (final command in commands) {
+        await sshClient.execPersistentInput(
+          command,
+          timeout: const Duration(seconds: 2),
+        );
+      }
     } catch (_) {
       // Silently ignore key send errors.
     }
@@ -1107,6 +1426,7 @@ printf '%s\n' "\$__muxpod_meta"
     if (_terminalMode == TerminalMode.select) {
       return;
     }
+    _ensureTerminalViewportAtBottomForInput();
     XtermInputAdapter.sendText(_terminal, key);
   }
 
@@ -1114,7 +1434,19 @@ printf '%s\n' "\$__muxpod_meta"
     if (_terminalMode == TerminalMode.select) {
       return;
     }
+    _ensureTerminalViewportAtBottomForInput();
     XtermInputAdapter.sendTmuxKey(_terminal, tmuxKey);
+  }
+
+  void _ensureTerminalViewportAtBottomForInput() {
+    final paneView = _paneTerminalViewKey.currentState;
+    if (paneView == null) {
+      return;
+    }
+
+    if (paneView.shouldAutoFollow || paneView.isNearBottom) {
+      paneView.scrollToBottom();
+    }
   }
 
   /// Select session
@@ -1129,9 +1461,14 @@ printf '%s\n' "\$__muxpod_meta"
 
     final nextPane = ref.read(tmuxProvider).activePane;
     if (nextPane == null) {
-      await _stopControlClient();
-      _viewNotifier.value = _viewNotifier.value.copyWith(content: '');
-      _applyTerminalFrame(_viewNotifier.value);
+      await _stopControlClient(resetRestartState: true);
+      final emptyView = _viewNotifier.value.copyWith(
+        content: '',
+        mainContent: '',
+        alternateScreen: false,
+      );
+      _applyTerminalFrame(emptyView);
+      _viewNotifier.value = emptyView;
       _hasInitialScrolled = false;
       return;
     }
@@ -1166,7 +1503,9 @@ printf '%s\n' "\$__muxpod_meta"
     }
 
     try {
-      await sshClient.execPersistent(TmuxCommands.selectWindow(sessionName, windowIndex));
+      await sshClient.execPersistent(
+        TmuxCommands.selectWindow(sessionName, windowIndex),
+      );
       await _refreshSessionTree(syncActive: true);
     } catch (_) {
       return;
@@ -1178,8 +1517,13 @@ printf '%s\n' "\$__muxpod_meta"
 
     final activePane = ref.read(tmuxProvider).activePane;
     if (activePane == null) {
-      _viewNotifier.value = _viewNotifier.value.copyWith(content: '');
-      _applyTerminalFrame(_viewNotifier.value);
+      final emptyView = _viewNotifier.value.copyWith(
+        content: '',
+        mainContent: '',
+        alternateScreen: false,
+      );
+      _applyTerminalFrame(emptyView);
+      _viewNotifier.value = emptyView;
       _hasInitialScrolled = false;
       return;
     }
@@ -1233,6 +1577,8 @@ printf '%s\n' "\$__muxpod_meta"
         paneWidth: activePane.width,
         paneHeight: activePane.height,
         content: '',
+        mainContent: '',
+        alternateScreen: false,
       );
       await _restartTerminalStream(refreshTree: false);
 
@@ -1240,7 +1586,9 @@ printf '%s\n' "\$__muxpod_meta"
       final sessionName = tmuxState.activeSessionName;
       final windowIndex = tmuxState.activeWindowIndex;
       if (sessionName != null && windowIndex != null) {
-        ref.read(activeSessionsProvider.notifier).updateLastPane(
+        ref
+            .read(activeSessionsProvider.notifier)
+            .updateLastPane(
               connectionId: widget.connectionId,
               sessionName: sessionName,
               windowIndex: windowIndex,
@@ -1265,7 +1613,9 @@ printf '%s\n' "\$__muxpod_meta"
           children: [
             Icon(
               isWaitingForNetwork ? Icons.signal_wifi_off : Icons.error_outline,
-              color: isWaitingForNetwork ? DesignColors.warning : colorScheme.error,
+              color: isWaitingForNetwork
+                  ? DesignColors.warning
+                  : colorScheme.error,
               size: 48,
             ),
             const SizedBox(height: 16),
@@ -1281,7 +1631,10 @@ printf '%s\n' "\$__muxpod_meta"
             if (queuedCount > 0) ...[
               const SizedBox(height: 12),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
                 decoration: BoxDecoration(
                   color: DesignColors.primary.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(8),
@@ -1289,11 +1642,7 @@ printf '%s\n' "\$__muxpod_meta"
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(
-                      Icons.keyboard,
-                      size: 16,
-                      color: DesignColors.primary,
-                    ),
+                    Icon(Icons.keyboard, size: 16, color: DesignColors.primary),
                     const SizedBox(width: 8),
                     Text(
                       '$queuedCount chars queued',
@@ -1413,12 +1762,18 @@ printf '%s\n' "\$__muxpod_meta"
                 decoration: BoxDecoration(
                   color: DesignColors.warning.withValues(alpha: 0.2),
                   borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: DesignColors.warning.withValues(alpha: 0.5)),
+                  border: Border.all(
+                    color: DesignColors.warning.withValues(alpha: 0.5),
+                  ),
                 ),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.content_copy, size: 12, color: DesignColors.warning),
+                    Icon(
+                      Icons.content_copy,
+                      size: 12,
+                      color: DesignColors.warning,
+                    ),
                     const SizedBox(width: 4),
                     Text(
                       'Select',
@@ -1451,7 +1806,8 @@ printf '%s\n' "\$__muxpod_meta"
             // Latency / Reconnect indicator
             ValueListenableBuilder<int>(
               valueListenable: _latencyNotifier,
-              builder: (context, latency, _) => _buildConnectionIndicator(latency),
+              builder: (context, latency, _) =>
+                  _buildConnectionIndicator(latency),
             ),
             // Settings button
             IconButton(
@@ -1514,22 +1870,33 @@ printf '%s\n' "\$__muxpod_meta"
                     itemCount: tmuxState.sessions.length,
                     itemBuilder: (context, index) {
                       final session = tmuxState.sessions[index];
-                      final isActive = session.name == tmuxState.activeSessionName;
+                      final isActive =
+                          session.name == tmuxState.activeSessionName;
                       return ListTile(
                         leading: Icon(
                           Icons.folder,
-                          color: isActive ? colorScheme.primary : colorScheme.onSurface.withValues(alpha: 0.6),
+                          color: isActive
+                              ? colorScheme.primary
+                              : colorScheme.onSurface.withValues(alpha: 0.6),
                         ),
                         title: Text(
                           session.name,
                           style: TextStyle(
-                            color: isActive ? colorScheme.primary : colorScheme.onSurface,
-                            fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                            color: isActive
+                                ? colorScheme.primary
+                                : colorScheme.onSurface,
+                            fontWeight: isActive
+                                ? FontWeight.bold
+                                : FontWeight.normal,
                           ),
                         ),
                         subtitle: Text(
                           '${session.windowCount} windows',
-                          style: TextStyle(color: colorScheme.onSurface.withValues(alpha: 0.38)),
+                          style: TextStyle(
+                            color: colorScheme.onSurface.withValues(
+                              alpha: 0.38,
+                            ),
+                          ),
                         ),
                         trailing: isActive
                             ? Icon(Icons.check, color: colorScheme.primary)
@@ -1597,22 +1964,33 @@ printf '%s\n' "\$__muxpod_meta"
                     itemCount: session.windows.length,
                     itemBuilder: (context, index) {
                       final window = session.windows[index];
-                      final isActive = window.index == tmuxState.activeWindowIndex;
+                      final isActive =
+                          window.index == tmuxState.activeWindowIndex;
                       return ListTile(
                         leading: Icon(
                           Icons.tab,
-                          color: isActive ? colorScheme.primary : colorScheme.onSurface.withValues(alpha: 0.6),
+                          color: isActive
+                              ? colorScheme.primary
+                              : colorScheme.onSurface.withValues(alpha: 0.6),
                         ),
                         title: Text(
                           '${window.index}: ${window.name}',
                           style: TextStyle(
-                            color: isActive ? colorScheme.primary : colorScheme.onSurface,
-                            fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                            color: isActive
+                                ? colorScheme.primary
+                                : colorScheme.onSurface,
+                            fontWeight: isActive
+                                ? FontWeight.bold
+                                : FontWeight.normal,
                           ),
                         ),
                         subtitle: Text(
                           '${window.paneCount} panes',
-                          style: TextStyle(color: colorScheme.onSurface.withValues(alpha: 0.38)),
+                          style: TextStyle(
+                            color: colorScheme.onSurface.withValues(
+                              alpha: 0.38,
+                            ),
+                          ),
                         ),
                         trailing: isActive
                             ? Icon(Icons.check, color: colorScheme.primary)
@@ -1697,8 +2075,8 @@ printf '%s\n' "\$__muxpod_meta"
                       final paneTitle = pane.title?.isNotEmpty == true
                           ? pane.title!
                           : (pane.currentCommand?.isNotEmpty == true
-                              ? pane.currentCommand!
-                              : 'Pane ${pane.index}');
+                                ? pane.currentCommand!
+                                : 'Pane ${pane.index}');
                       return ListTile(
                         leading: Container(
                           width: 32,
@@ -1711,7 +2089,9 @@ printf '%s\n' "\$__muxpod_meta"
                             border: Border.all(
                               color: isActive
                                   ? colorScheme.primary.withValues(alpha: 0.5)
-                                  : colorScheme.onSurface.withValues(alpha: 0.1),
+                                  : colorScheme.onSurface.withValues(
+                                      alpha: 0.1,
+                                    ),
                             ),
                           ),
                           child: Center(
@@ -1720,7 +2100,11 @@ printf '%s\n' "\$__muxpod_meta"
                               style: GoogleFonts.jetBrainsMono(
                                 fontSize: 14,
                                 fontWeight: FontWeight.w700,
-                                color: isActive ? colorScheme.primary : colorScheme.onSurface.withValues(alpha: 0.6),
+                                color: isActive
+                                    ? colorScheme.primary
+                                    : colorScheme.onSurface.withValues(
+                                        alpha: 0.6,
+                                      ),
                               ),
                             ),
                           ),
@@ -1728,13 +2112,21 @@ printf '%s\n' "\$__muxpod_meta"
                         title: Text(
                           paneTitle,
                           style: TextStyle(
-                            color: isActive ? colorScheme.primary : colorScheme.onSurface,
-                            fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                            color: isActive
+                                ? colorScheme.primary
+                                : colorScheme.onSurface,
+                            fontWeight: isActive
+                                ? FontWeight.bold
+                                : FontWeight.normal,
                           ),
                         ),
                         subtitle: Text(
                           '${pane.width}x${pane.height}',
-                          style: TextStyle(color: colorScheme.onSurface.withValues(alpha: 0.38)),
+                          style: TextStyle(
+                            color: colorScheme.onSurface.withValues(
+                              alpha: 0.38,
+                            ),
+                          ),
                         ),
                         trailing: isActive
                             ? Icon(Icons.check, color: colorScheme.primary)
@@ -1772,7 +2164,9 @@ printf '%s\n' "\$__muxpod_meta"
             ? BoxDecoration(
                 color: colorScheme.onSurface.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(color: colorScheme.onSurface.withValues(alpha: 0.05)),
+                border: Border.all(
+                  color: colorScheme.onSurface.withValues(alpha: 0.05),
+                ),
               )
             : null,
         child: Row(
@@ -1784,7 +2178,9 @@ printf '%s\n' "\$__muxpod_meta"
                 size: 12,
                 color: isActive
                     ? colorScheme.primary
-                    : (isSelected ? colorScheme.onSurface : colorScheme.onSurface.withValues(alpha: 0.6)),
+                    : (isSelected
+                          ? colorScheme.onSurface
+                          : colorScheme.onSurface.withValues(alpha: 0.6)),
               ),
               const SizedBox(width: 4),
             ],
@@ -1792,10 +2188,14 @@ printf '%s\n' "\$__muxpod_meta"
               label.isEmpty ? '...' : label,
               style: GoogleFonts.jetBrainsMono(
                 fontSize: 11,
-                fontWeight: isActive || isSelected ? FontWeight.w700 : FontWeight.w400,
+                fontWeight: isActive || isSelected
+                    ? FontWeight.w700
+                    : FontWeight.w400,
                 color: isActive
                     ? colorScheme.primary
-                    : (isSelected ? colorScheme.onSurface : colorScheme.onSurface.withValues(alpha: 0.5)),
+                    : (isSelected
+                          ? colorScheme.onSurface
+                          : colorScheme.onSurface.withValues(alpha: 0.5)),
               ),
             ),
             if (onTap != null) ...[
@@ -1832,7 +2232,9 @@ printf '%s\n' "\$__muxpod_meta"
   /// Show terminal menu
   void _showTerminalMenu() {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final menuBgColor = isDark ? DesignColors.surfaceDark : DesignColors.surfaceLight;
+    final menuBgColor = isDark
+        ? DesignColors.surfaceDark
+        : DesignColors.surfaceLight;
     final textColor = isDark ? Colors.white : Colors.black87;
     final mutedTextColor = isDark ? Colors.white38 : Colors.black38;
     final inactiveIconColor = isDark ? Colors.white60 : Colors.black45;
@@ -1867,7 +2269,10 @@ printf '%s\n' "\$__muxpod_meta"
                   ],
                 ),
               ),
-              Divider(height: 1, color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300),
+              Divider(
+                height: 1,
+                color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
+              ),
               // Mode switching (Normal / Scroll & Select)
               ListTile(
                 leading: Icon(
@@ -1935,7 +2340,9 @@ printf '%s\n' "\$__muxpod_meta"
               ListTile(
                 leading: Icon(
                   Icons.zoom_out_map,
-                  color: _zoomScale != 1.0 ? DesignColors.warning : inactiveIconColor,
+                  color: _zoomScale != 1.0
+                      ? DesignColors.warning
+                      : inactiveIconColor,
                 ),
                 title: Text(
                   'Reset Zoom',
@@ -1960,17 +2367,14 @@ printf '%s\n' "\$__muxpod_meta"
                       }
                     : null,
               ),
-              Divider(height: 1, color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300),
+              Divider(
+                height: 1,
+                color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
+              ),
               // Go to settings screen
               ListTile(
-                leading: Icon(
-                  Icons.settings,
-                  color: inactiveIconColor,
-                ),
-                title: Text(
-                  'Settings',
-                  style: TextStyle(color: textColor),
-                ),
+                leading: Icon(Icons.settings, color: inactiveIconColor),
+                title: Text('Settings', style: TextStyle(color: textColor)),
                 subtitle: Text(
                   'Font, theme, and other options',
                   style: TextStyle(color: mutedTextColor, fontSize: 12),
@@ -1985,7 +2389,10 @@ printf '%s\n' "\$__muxpod_meta"
                   );
                 },
               ),
-              Divider(height: 1, color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300),
+              Divider(
+                height: 1,
+                color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
+              ),
               // Disconnect button
               ListTile(
                 leading: Icon(
@@ -2023,7 +2430,9 @@ printf '%s\n' "\$__muxpod_meta"
       context: context,
       builder: (context) {
         return AlertDialog(
-          backgroundColor: isDark ? DesignColors.surfaceDark : DesignColors.surfaceLight,
+          backgroundColor: isDark
+              ? DesignColors.surfaceDark
+              : DesignColors.surfaceLight,
           title: Text(
             'Disconnect?',
             style: TextStyle(color: isDark ? Colors.white : Colors.black87),
@@ -2037,7 +2446,9 @@ printf '%s\n' "\$__muxpod_meta"
               onPressed: () => Navigator.pop(context),
               child: Text(
                 'Cancel',
-                style: TextStyle(color: isDark ? Colors.white60 : Colors.black54),
+                style: TextStyle(
+                  color: isDark ? Colors.white60 : Colors.black54,
+                ),
               ),
             ),
             ElevatedButton(
@@ -2059,7 +2470,7 @@ printf '%s\n' "\$__muxpod_meta"
 
   /// Disconnect SSH and go back to the previous screen
   Future<void> _disconnect() async {
-    await _stopControlClient();
+    await _stopControlClient(resetRestartState: true);
 
     // Disconnect SSH
     await ref.read(sshProvider.notifier).disconnect();
@@ -2076,9 +2487,7 @@ printf '%s\n' "\$__muxpod_meta"
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
-        border: Border(
-          left: BorderSide(color: colorScheme.outline, width: 1),
-        ),
+        border: Border(left: BorderSide(color: colorScheme.outline, width: 1)),
       ),
       child: _sshState.isReconnecting
           ? _buildReconnectingIndicator()
@@ -2361,7 +2770,9 @@ class _PaneLayoutPainter extends CustomPainter {
 
       // Border
       final borderPaint = Paint()
-        ..color = isActive ? activeColor : (isDark ? Colors.white30 : Colors.grey.shade500)
+        ..color = isActive
+            ? activeColor
+            : (isDark ? Colors.white30 : Colors.grey.shade500)
         ..style = PaintingStyle.stroke
         ..strokeWidth = isActive ? 1.5 : 1.0;
       canvas.drawRect(rect, borderPaint);
@@ -2619,14 +3030,18 @@ class _InputDialogContentState extends State<_InputDialogContent> {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: isDark ? DesignColors.keyBackground : DesignColors.keyBackgroundLight,
+                  color: isDark
+                      ? DesignColors.keyBackground
+                      : DesignColors.keyBackgroundLight,
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
                   'Shift+Enter: New line',
                   style: GoogleFonts.jetBrainsMono(
                     fontSize: 10,
-                    color: isDark ? DesignColors.textMuted : DesignColors.textMutedLight,
+                    color: isDark
+                        ? DesignColors.textMuted
+                        : DesignColors.textMutedLight,
                   ),
                 ),
               ),
@@ -2644,15 +3059,20 @@ class _InputDialogContentState extends State<_InputDialogContent> {
               maxLines: null, // Unlimited lines with internal scrolling
               minLines: 1,
               keyboardType: TextInputType.multiline,
-              textInputAction: TextInputAction.newline, // Support multiline on paste
+              textInputAction:
+                  TextInputAction.newline, // Support multiline on paste
               style: GoogleFonts.jetBrainsMono(color: colorScheme.onSurface),
               decoration: InputDecoration(
                 hintText: 'Type your command... (Enter to send)',
                 hintStyle: GoogleFonts.jetBrainsMono(
-                  color: isDark ? DesignColors.textMuted : DesignColors.textMutedLight,
+                  color: isDark
+                      ? DesignColors.textMuted
+                      : DesignColors.textMutedLight,
                 ),
                 filled: true,
-                fillColor: isDark ? DesignColors.inputDark : DesignColors.inputLight,
+                fillColor: isDark
+                    ? DesignColors.inputDark
+                    : DesignColors.inputLight,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide.none,
@@ -2673,7 +3093,9 @@ class _InputDialogContentState extends State<_InputDialogContent> {
                   onPressed: () => Navigator.pop(context),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: colorScheme.onSurface,
-                    side: BorderSide(color: colorScheme.onSurface.withValues(alpha: 0.3)),
+                    side: BorderSide(
+                      color: colorScheme.onSurface.withValues(alpha: 0.3),
+                    ),
                     padding: const EdgeInsets.symmetric(vertical: 16),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(12),

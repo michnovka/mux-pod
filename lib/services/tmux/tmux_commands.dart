@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 /// tmux command generation service
 ///
 /// Utility class for generating tmux commands.
@@ -41,10 +43,16 @@ class TmuxCommands {
     bool detached = true,
   }) {
     final parts = ['tmux', 'new-session'];
-    if (detached) parts.add('-d');
+    if (detached) {
+      parts.add('-d');
+    }
     parts.addAll(['-s', _escapeArg(name)]);
-    if (windowName != null) parts.addAll(['-n', _escapeArg(windowName)]);
-    if (startDirectory != null) parts.addAll(['-c', _escapeArg(startDirectory)]);
+    if (windowName != null) {
+      parts.addAll(['-n', _escapeArg(windowName)]);
+    }
+    if (startDirectory != null) {
+      parts.addAll(['-c', _escapeArg(startDirectory)]);
+    }
     return parts.join(' ');
   }
 
@@ -90,9 +98,15 @@ class TmuxCommands {
     bool background = false,
   }) {
     final parts = ['tmux', 'new-window', '-t', _escapeArg(sessionName)];
-    if (background) parts.add('-d');
-    if (windowName != null) parts.addAll(['-n', _escapeArg(windowName)]);
-    if (startDirectory != null) parts.addAll(['-c', _escapeArg(startDirectory)]);
+    if (background) {
+      parts.add('-d');
+    }
+    if (windowName != null) {
+      parts.addAll(['-n', _escapeArg(windowName)]);
+    }
+    if (startDirectory != null) {
+      parts.addAll(['-c', _escapeArg(startDirectory)]);
+    }
     return parts.join(' ');
   }
 
@@ -107,7 +121,11 @@ class TmuxCommands {
   }
 
   /// Rename a window
-  static String renameWindow(String sessionName, int windowIndex, String newName) {
+  static String renameWindow(
+    String sessionName,
+    int windowIndex,
+    String newName,
+  ) {
     return 'tmux rename-window -t ${_escapeArg(sessionName)}:$windowIndex ${_escapeArg(newName)}';
   }
 
@@ -176,8 +194,12 @@ class TmuxCommands {
     int? percentage,
   }) {
     final parts = ['tmux', 'split-window', '-h', '-t', _escapeArg(target)];
-    if (percentage != null) parts.addAll(['-p', percentage.toString()]);
-    if (startDirectory != null) parts.addAll(['-c', _escapeArg(startDirectory)]);
+    if (percentage != null) {
+      parts.addAll(['-p', percentage.toString()]);
+    }
+    if (startDirectory != null) {
+      parts.addAll(['-c', _escapeArg(startDirectory)]);
+    }
     return parts.join(' ');
   }
 
@@ -188,8 +210,12 @@ class TmuxCommands {
     int? percentage,
   }) {
     final parts = ['tmux', 'split-window', '-v', '-t', _escapeArg(target)];
-    if (percentage != null) parts.addAll(['-p', percentage.toString()]);
-    if (startDirectory != null) parts.addAll(['-c', _escapeArg(startDirectory)]);
+    if (percentage != null) {
+      parts.addAll(['-p', percentage.toString()]);
+    }
+    if (startDirectory != null) {
+      parts.addAll(['-c', _escapeArg(startDirectory)]);
+    }
     return parts.join(' ');
   }
 
@@ -207,11 +233,50 @@ class TmuxCommands {
 
   /// Send keys
   static String sendKeys(String paneId, String keys, {bool literal = false}) {
-    final escapedKeys = _escapeArg(keys);
     if (literal) {
-      return 'tmux send-keys -t ${_escapeArg(paneId)} -l $escapedKeys';
+      final encodedKeys = _encodeLiteralKeys(keys);
+      return 'tmux send-keys -t ${_escapeArg(paneId)} -l "\$(printf \'%b\' \'$encodedKeys\')"';
     }
+    final escapedKeys = _escapeArg(keys);
     return 'tmux send-keys -t ${_escapeArg(paneId)} $escapedKeys';
+  }
+
+  /// Send literal text in bounded chunks to avoid shell argv length limits.
+  static List<String> sendKeysLiteralChunks(
+    String paneId,
+    String keys, {
+    int maxChunkLength = 1024,
+  }) {
+    assert(maxChunkLength > 0);
+
+    if (keys.isEmpty) {
+      return const [];
+    }
+
+    final commands = <String>[];
+    final buffer = StringBuffer();
+    final iterator = RuneIterator(keys);
+
+    while (iterator.moveNext()) {
+      final rune = String.fromCharCode(iterator.current);
+      if (buffer.length > 0 && buffer.length + rune.length > maxChunkLength) {
+        commands.add(sendKeys(paneId, buffer.toString(), literal: true));
+        buffer.clear();
+      }
+
+      if (rune.length > maxChunkLength) {
+        commands.add(sendKeys(paneId, rune, literal: true));
+        continue;
+      }
+
+      buffer.write(rune);
+    }
+
+    if (buffer.length > 0) {
+      commands.add(sendKeys(paneId, buffer.toString(), literal: true));
+    }
+
+    return commands;
   }
 
   /// Send Enter key
@@ -242,10 +307,15 @@ class TmuxCommands {
   /// Get bootstrap metadata for snapshotting a pane.
   ///
   /// Output format:
-  /// `alternate_on,cursor_x,cursor_y,pane_width,pane_height`
+  /// `alternate_on,cursor_x,cursor_y,pane_width,pane_height,insert_flag,keypad_cursor_flag,keypad_flag,wrap_flag,cursor_flag,origin_flag,scroll_region_upper,scroll_region_lower`
   static String getPaneSnapshotMetadata(String target) {
     return 'tmux display-message -p -t ${_escapeArg(target)} '
-        '"#{alternate_on},#{cursor_x},#{cursor_y},#{pane_width},#{pane_height}"';
+        '"#{alternate_on},#{cursor_x},#{cursor_y},#{pane_width},#{pane_height},#{insert_flag},#{keypad_cursor_flag},#{keypad_flag},#{wrap_flag},#{cursor_flag},#{origin_flag},#{scroll_region_upper},#{scroll_region_lower}"';
+  }
+
+  /// Get whether a pane is currently using the alternate screen buffer.
+  static String getPaneAlternateOn(String target) {
+    return 'tmux display-message -p -t ${_escapeArg(target)} "#{alternate_on}"';
   }
 
   /// Enter copy-mode
@@ -268,13 +338,31 @@ class TmuxCommands {
     bool escapeSequences = true,
     bool alternateScreen = false,
     bool quiet = false,
+    bool preserveTrailingSpaces = false,
+    bool joinWrappedLines = false,
   }) {
     final parts = ['tmux', 'capture-pane', '-t', _escapeArg(paneId), '-p'];
-    if (alternateScreen) parts.add('-a');
-    if (escapeSequences) parts.add('-e');
-    if (quiet) parts.add('-q');
-    if (startLine != null) parts.addAll(['-S', startLine.toString()]);
-    if (endLine != null) parts.addAll(['-E', endLine.toString()]);
+    if (alternateScreen) {
+      parts.add('-a');
+    }
+    if (escapeSequences) {
+      parts.add('-e');
+    }
+    if (quiet) {
+      parts.add('-q');
+    }
+    if (preserveTrailingSpaces) {
+      parts.add('-N');
+    }
+    if (joinWrappedLines) {
+      parts.add('-J');
+    }
+    if (startLine != null) {
+      parts.addAll(['-S', startLine.toString()]);
+    }
+    if (endLine != null) {
+      parts.addAll(['-E', endLine.toString()]);
+    }
     return parts.join(' ');
   }
 
@@ -338,7 +426,13 @@ class TmuxCommands {
   static String _escapeArg(String arg) {
     // Escape shell special characters
     // Special characters: space, quotes, backslash, variable expansion, backtick, etc.
-    if (arg.contains(RegExp(r'[\s"' "'" r'\\$`!{}\[\]<>|&;()]'))) {
+    if (arg.contains(
+      RegExp(
+        r'[\s"'
+        "'"
+        r'\\$`!{}\[\]<>|&;()]',
+      ),
+    )) {
       // Wrap in double quotes and escape internal special characters
       final escaped = arg
           .replaceAll(r'\', r'\\')
@@ -348,6 +442,17 @@ class TmuxCommands {
       return '"$escaped"';
     }
     return arg;
+  }
+
+  static String _encodeLiteralKeys(String keys) {
+    final bytes = utf8.encode(keys);
+    final buffer = StringBuffer();
+    for (final byte in bytes) {
+      buffer
+        ..write(r'\')
+        ..write(byte.toRadixString(8).padLeft(3, '0'));
+    }
+    return buffer.toString();
   }
 
   /// Chain multiple commands
