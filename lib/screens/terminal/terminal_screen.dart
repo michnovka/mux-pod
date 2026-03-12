@@ -1041,9 +1041,16 @@ $metadataCommand
       // mode channel (same stream as %output).  We awaited the snapshot
       // response before sending this, so tmux processes the fence at
       // Tf > Ts (snapshot time).  By the time the fence response arrives,
-      // all %output generated before Tf — which includes everything
-      // before the snapshot — has been delivered to the deferred buffer.
-      // Clearing after a successful fence drops those duplicates.
+      // all %output generated before Tf has been delivered.  Clearing
+      // after a successful fence drops pre-snapshot duplicates.
+      //
+      // Bounded-loss tradeoff: output produced between Ts and Tf (one
+      // RTT) is NOT in the snapshot but IS cleared by the fence.  This
+      // is an intentional trade — losing at most one RTT of output
+      // avoids the corruption caused by double-applying duplicates.
+      // For append-only streams the gap is visible until the next
+      // %output arrives; for interactive programs the next keypress
+      // triggers a refresh.
       //
       // If the fence fails (timeout / session closed), skip the clear:
       // the deferred buffer may contain duplicates, but flushing
@@ -1146,7 +1153,14 @@ $metadataCommand
       }
     }
 
-    _terminal.mainBuffer.lines.insertAll(0, historyLines);
+    // Use replaceWith instead of insertAll to avoid xterm circular buffer
+    // assertion failures.  insertAll(0, ...) shifts existing elements via
+    // _moveChild, which calls _move on items that may be in an inconsistent
+    // attached state after circular wrapping.  replaceWith properly detaches
+    // all old items first, then attaches every item via _adoptChild, and
+    // resets _startIndex to 0.
+    final currentLines = _terminal.mainBuffer.lines.toList();
+    _terminal.mainBuffer.lines.replaceWith([...historyLines, ...currentLines]);
     _terminal.notifyListeners();
     if (_terminalMode == TerminalMode.normal &&
         (_paneTerminalViewKey.currentState?.shouldAutoFollow ??
