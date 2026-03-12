@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -42,6 +41,15 @@ class _PaneSnapshotPayload {
     required this.mainContent,
     required this.metadata,
   });
+}
+
+class _PendingKeyboardModifiers {
+  final bool ctrl;
+  final bool alt;
+
+  const _PendingKeyboardModifiers({required this.ctrl, required this.alt});
+
+  bool get isEmpty => !ctrl && !alt;
 }
 
 /// Terminal screen (compliant with HTML design specification)
@@ -124,17 +132,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   // Zoom scale
   double _zoomScale = 1.0;
 
-  // EnterCommand input content retention (persists even after closing bottom sheet)
-  String _savedCommandInput = '';
-
   // Input queue (holds input during disconnection)
   final _inputQueue = InputQueue();
 
   // Background state
   bool _isInBackground = false;
 
-  // Local cache of directInput setting (to avoid ref.watch)
-  bool _directInputEnabled = true;
+  // Sticky extra-key modifiers applied to the next keyboard action.
+  bool _ctrlModifierPressed = false;
+  bool _altModifierPressed = false;
   SshNotifier? _sshNotifier;
 
   // Riverpod listeners
@@ -229,7 +235,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       // parent setState() is not needed (removed for BottomSheet stability)
     }, fireImmediately: true);
 
-    // Monitor settings changes (for Keep screen on / directInput)
+    // Monitor settings changes.
     _settingsSubscription = ref.listenManual<AppSettings>(settingsProvider, (
       previous,
       next,
@@ -238,19 +244,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       if (previous?.keepScreenOn != next.keepScreenOn) {
         _applyKeepScreenOn();
       }
-      if (previous?.directInputEnabled != next.directInputEnabled) {
-        setState(() {
-          _directInputEnabled = next.directInputEnabled;
-        });
-      }
       if (previous?.scrollbackLines != next.scrollbackLines) {
         _reconfigureTerminal(next);
         unawaited(_resyncActivePane(refreshTree: false));
       }
     }, fireImmediately: false);
 
-    // Explicitly set initial value
-    _directInputEnabled = ref.read(settingsProvider).directInputEnabled;
     _reconfigureTerminal(ref.read(settingsProvider));
 
     // Monitor network state changes (only update on actual connection state changes)
@@ -1148,7 +1147,18 @@ $metadataCommand
       return;
     }
 
-    unawaited(_sendTerminalData(normalizeTerminalOutput(data)));
+    _ensureTerminalViewportAtBottomForInput();
+    final modifiers = _consumePendingKeyboardModifiers();
+    final output = modifiers == null
+        ? data
+        : XtermInputAdapter.encodeOutputWithModifiers(
+                data,
+                ctrl: modifiers.ctrl,
+                alt: modifiers.alt,
+              ) ??
+              data;
+
+    unawaited(_sendTerminalData(normalizeTerminalOutput(output)));
   }
 
   /// Attempt auto-reconnection
@@ -1315,15 +1325,12 @@ $metadataCommand
                 ),
               ),
               SpecialKeysBar(
-                onKeyPressed: _sendLiteralKey,
+                onLiteralKeyPressed: _sendLiteralKey,
                 onSpecialKeyPressed: _sendSpecialKey,
-                onInputTap: _terminalMode == TerminalMode.select
-                    ? null
-                    : _showInputDialog,
-                directInputEnabled: _directInputEnabled,
-                onDirectInputToggle: () {
-                  ref.read(settingsProvider.notifier).toggleDirectInput();
-                },
+                onCtrlToggle: _toggleCtrlModifier,
+                onAltToggle: _toggleAltModifier,
+                ctrlPressed: _ctrlModifierPressed,
+                altPressed: _altModifierPressed,
               ),
             ],
           ),
@@ -1427,7 +1434,20 @@ $metadataCommand
       return;
     }
     _ensureTerminalViewportAtBottomForInput();
-    XtermInputAdapter.sendText(_terminal, key);
+    final modifiers = _consumePendingKeyboardModifiers();
+    if (modifiers == null || modifiers.isEmpty) {
+      XtermInputAdapter.sendText(_terminal, key);
+      return;
+    }
+
+    XtermInputAdapter.sendTmuxKey(
+      _terminal,
+      XtermInputAdapter.applyModifiersToTmuxKey(
+        key,
+        ctrl: modifiers.ctrl,
+        alt: modifiers.alt,
+      ),
+    );
   }
 
   void _sendSpecialKey(String tmuxKey) {
@@ -1435,7 +1455,48 @@ $metadataCommand
       return;
     }
     _ensureTerminalViewportAtBottomForInput();
-    XtermInputAdapter.sendTmuxKey(_terminal, tmuxKey);
+    final modifiers = _consumePendingKeyboardModifiers();
+    final key = modifiers == null || modifiers.isEmpty
+        ? tmuxKey
+        : XtermInputAdapter.applyModifiersToTmuxKey(
+            tmuxKey,
+            ctrl: modifiers.ctrl,
+            alt: modifiers.alt,
+          );
+    XtermInputAdapter.sendTmuxKey(_terminal, key);
+  }
+
+  void _toggleCtrlModifier() {
+    setState(() {
+      _ctrlModifierPressed = !_ctrlModifierPressed;
+    });
+  }
+
+  void _toggleAltModifier() {
+    setState(() {
+      _altModifierPressed = !_altModifierPressed;
+    });
+  }
+
+  _PendingKeyboardModifiers? _consumePendingKeyboardModifiers() {
+    if (!_ctrlModifierPressed && !_altModifierPressed) {
+      return null;
+    }
+
+    final modifiers = _PendingKeyboardModifiers(
+      ctrl: _ctrlModifierPressed,
+      alt: _altModifierPressed,
+    );
+    if (mounted && !_isDisposed) {
+      setState(() {
+        _ctrlModifierPressed = false;
+        _altModifierPressed = false;
+      });
+    } else {
+      _ctrlModifierPressed = false;
+      _altModifierPressed = false;
+    }
+    return modifiers;
   }
 
   void _ensureTerminalViewportAtBottomForInput() {
@@ -2635,38 +2696,6 @@ $metadataCommand
     );
   }
 
-  void _showInputDialog() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      builder: (sheetContext) => _InputDialogContent(
-        initialValue: _savedCommandInput,
-        onValueChanged: (value) {
-          // Save input content in real time
-          _savedCommandInput = value;
-        },
-        onSend: (value) async {
-          await _sendMultilineText(value);
-          // Clear input content on successful send
-          _savedCommandInput = '';
-          if (sheetContext.mounted) Navigator.pop(sheetContext);
-        },
-      ),
-    );
-  }
-
-  Future<void> _sendMultilineText(String text) async {
-    if (text.isEmpty) {
-      return;
-    }
-    final normalized = text.replaceAll('\r\n', '\n');
-    final payload = normalized.replaceAll('\n', '\r');
-    await _sendTerminalData(payload.endsWith('\r') ? payload : '$payload\r');
-  }
-
   /// Top-right pane indicator
   ///
   /// Displays the layout based on actual pane size ratios
@@ -2900,249 +2929,6 @@ class _PaneLayoutVisualizer extends StatelessWidget {
             );
           },
         ),
-      ),
-    );
-  }
-}
-
-/// Input dialog content (supports multiline, Shift+Enter for newline)
-class _InputDialogContent extends StatefulWidget {
-  final String initialValue;
-  final void Function(String value) onValueChanged;
-  final Future<void> Function(String value) onSend;
-
-  const _InputDialogContent({
-    this.initialValue = '',
-    required this.onValueChanged,
-    required this.onSend,
-  });
-
-  @override
-  State<_InputDialogContent> createState() => _InputDialogContentState();
-}
-
-class _InputDialogContentState extends State<_InputDialogContent> {
-  late final TextEditingController _controller;
-  late final FocusNode _focusNode;
-  late final ScrollController _scrollController;
-  bool _isSending = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = TextEditingController(text: widget.initialValue);
-    _focusNode = FocusNode();
-    _scrollController = ScrollController();
-    // Set onKeyEvent to handle key events
-    _focusNode.onKeyEvent = _handleKeyEvent;
-    // Notify parent on text changes
-    _controller.addListener(_onTextChanged);
-    // Auto-focus (place cursor at end)
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _focusNode.requestFocus();
-      // Move cursor to end
-      _controller.selection = TextSelection.collapsed(
-        offset: _controller.text.length,
-      );
-    });
-  }
-
-  void _onTextChanged() {
-    widget.onValueChanged(_controller.text);
-  }
-
-  @override
-  void dispose() {
-    _controller.removeListener(_onTextChanged);
-    _focusNode.onKeyEvent = null;
-    _focusNode.dispose();
-    _controller.dispose();
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  /// Handle key events (Shift+Enter for newline, Enter to send)
-  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
-    if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.enter) {
-      final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
-      if (isShiftPressed) {
-        // Shift+Enter: insert newline
-        _insertNewline();
-        return KeyEventResult.handled;
-      } else {
-        // Enter only: send
-        _handleSend();
-        return KeyEventResult.handled;
-      }
-    }
-    return KeyEventResult.ignored;
-  }
-
-  /// Insert a newline at the current cursor position
-  void _insertNewline() {
-    final text = _controller.text;
-    final selection = _controller.selection;
-    final newText = text.replaceRange(selection.start, selection.end, '\n');
-    _controller.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: selection.start + 1),
-    );
-  }
-
-  Future<void> _handleSend() async {
-    if (_isSending) return;
-    setState(() => _isSending = true);
-    try {
-      await widget.onSend(_controller.text);
-    } finally {
-      if (mounted) {
-        setState(() => _isSending = false);
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-    return Padding(
-      padding: EdgeInsets.only(
-        bottom: MediaQuery.of(context).viewInsets.bottom,
-        left: 16,
-        right: 16,
-        top: 16,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Text(
-                'Enter Command',
-                style: GoogleFonts.spaceGrotesk(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: colorScheme.onSurface,
-                ),
-              ),
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: isDark
-                      ? DesignColors.keyBackground
-                      : DesignColors.keyBackgroundLight,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text(
-                  'Shift+Enter: New line',
-                  style: GoogleFonts.jetBrainsMono(
-                    fontSize: 10,
-                    color: isDark
-                        ? DesignColors.textMuted
-                        : DesignColors.textMutedLight,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          ConstrainedBox(
-            constraints: const BoxConstraints(
-              maxHeight: 200, // Limit max height to enable scrolling
-            ),
-            child: TextField(
-              controller: _controller,
-              focusNode: _focusNode,
-              scrollController: _scrollController,
-              maxLines: null, // Unlimited lines with internal scrolling
-              minLines: 1,
-              keyboardType: TextInputType.multiline,
-              textInputAction:
-                  TextInputAction.newline, // Support multiline on paste
-              style: GoogleFonts.jetBrainsMono(color: colorScheme.onSurface),
-              decoration: InputDecoration(
-                hintText: 'Type your command... (Enter to send)',
-                hintStyle: GoogleFonts.jetBrainsMono(
-                  color: isDark
-                      ? DesignColors.textMuted
-                      : DesignColors.textMutedLight,
-                ),
-                filled: true,
-                fillColor: isDark
-                    ? DesignColors.inputDark
-                    : DesignColors.inputLight,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide.none,
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: colorScheme.primary),
-                ),
-                contentPadding: const EdgeInsets.all(16),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: () => Navigator.pop(context),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: colorScheme.onSurface,
-                    side: BorderSide(
-                      color: colorScheme.onSurface.withValues(alpha: 0.3),
-                    ),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: Text(
-                    'Cancel',
-                    style: GoogleFonts.spaceGrotesk(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                flex: 2,
-                child: ElevatedButton(
-                  onPressed: _isSending ? null : _handleSend,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: colorScheme.primary,
-                    foregroundColor: colorScheme.onPrimary,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: _isSending
-                      ? SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: colorScheme.onPrimary,
-                          ),
-                        )
-                      : Text(
-                          'Execute',
-                          style: GoogleFonts.spaceGrotesk(
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-        ],
       ),
     );
   }

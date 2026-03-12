@@ -95,6 +95,68 @@ class XtermInputAdapter {
     return true;
   }
 
+  static String applyModifiersToTmuxKey(
+    String baseKey, {
+    bool shift = false,
+    bool alt = false,
+    bool ctrl = false,
+  }) {
+    final modifiers = <String>[];
+    if (shift) {
+      modifiers.add('S');
+    }
+    if (ctrl) {
+      modifiers.add('C');
+    }
+    if (alt) {
+      modifiers.add('M');
+    }
+    if (modifiers.isEmpty) {
+      return baseKey;
+    }
+    return '${modifiers.join('-')}-$baseKey';
+  }
+
+  static String? encodeTmuxKey(String tmuxKey) {
+    final output = <String>[];
+    final terminal = Terminal(onOutput: output.add);
+    final handled = sendTmuxKey(terminal, tmuxKey);
+    if (!handled) {
+      return null;
+    }
+    return output.join();
+  }
+
+  static String? encodeOutputWithModifiers(
+    String output, {
+    bool shift = false,
+    bool alt = false,
+    bool ctrl = false,
+  }) {
+    if (output.isEmpty || (!shift && !alt && !ctrl)) {
+      return output;
+    }
+
+    final specialKey = _tmuxKeyForOutput(output);
+    if (specialKey != null) {
+      return encodeTmuxKey(
+        applyModifiersToTmuxKey(specialKey, shift: shift, alt: alt, ctrl: ctrl),
+      );
+    }
+
+    if (output.runes.length == 1) {
+      return encodeTmuxKey(
+        applyModifiersToTmuxKey(output, shift: shift, alt: alt, ctrl: ctrl),
+      );
+    }
+
+    if (alt && !shift && !ctrl) {
+      return '\x1b$output';
+    }
+
+    return null;
+  }
+
   static bool sendPaste(Terminal terminal, String text) {
     if (text.isEmpty) {
       return false;
@@ -161,9 +223,7 @@ class XtermInputAdapter {
       }
     }
 
-    final shiftedChar = parsed.shift
-        ? _applyShiftModifier(baseKey)
-        : baseKey;
+    final shiftedChar = parsed.shift ? _applyShiftModifier(baseKey) : baseKey;
 
     if (shiftedChar == null) {
       return false;
@@ -225,6 +285,23 @@ class XtermInputAdapter {
     }
 
     return shiftedPunctuation[baseKey] ?? baseKey;
+  }
+
+  static String? _tmuxKeyForOutput(String output) {
+    switch (output) {
+      case '\r':
+      case '\n':
+        return 'Enter';
+      case '\t':
+        return 'Tab';
+      case '\x1b':
+        return 'Escape';
+      case '\b':
+      case '\x7f':
+        return 'BSpace';
+      default:
+        return null;
+    }
   }
 
   static _ParsedTmuxKey? _parseTmuxKey(String tmuxKey) {
