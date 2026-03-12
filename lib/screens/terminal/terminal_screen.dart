@@ -120,6 +120,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int _controlRestartAttempt = 0;
   bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
+  bool _snapshotAppliedDuringResync = false;
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
 
@@ -1035,6 +1036,19 @@ $metadataCommand
       }
 
       _applyResyncUpdate(nextView);
+      _snapshotAppliedDuringResync = true;
+
+      // Snapshot is now the authoritative terminal state.  Discard the
+      // deferred buffer — it is an inseparable mix of pre-snapshot
+      // duplicates and post-snapshot data (no ordering barrier between
+      // the two SSH channels).  Keep _isResyncingPane true so that:
+      //   (a) new output during history backfill is deferred (prevents
+      //       scrolling snapshot lines into xterm scrollback which would
+      //       break history-prepend dedup), and
+      //   (b) reentrancy is blocked (a second resync cannot start while
+      //       history is still being fetched).
+      _deferredStreamOutput.clear();
+
       await _prependHistoryScrollback(
         sshClient: sshClient,
         paneId: activePane.id,
@@ -1048,7 +1062,18 @@ $metadataCommand
       }
     } finally {
       _isResyncingPane = false;
-      _flushDeferredStreamOutput();
+      if (_snapshotAppliedDuringResync) {
+        // Snapshot was applied.  Flush output that arrived during history
+        // backfill — it is genuinely post-snapshot and the terminal is
+        // now in a consistent state (history prepended, cursor set).
+        _snapshotAppliedDuringResync = false;
+        _flushDeferredStreamOutput();
+      } else {
+        // Snapshot was never applied (error before _applyResyncUpdate).
+        // The terminal holds the previous state — flush deferred output
+        // so it is not silently lost.
+        _flushDeferredStreamOutput();
+      }
     }
   }
 
