@@ -35,11 +35,13 @@ class PersistentShell {
   /// Output buffer (accumulated as byte sequence to prevent UTF-8 multibyte boundary splits)
   final _rawBuffer = <int>[];
 
-  /// Maximum buffer size (8 MB). If exceeded, the pending command is failed
+  /// Maximum buffer size (16 MB). If exceeded, the pending command is failed
   /// and the shell is restarted to prevent unbounded memory growth from hung
-  /// commands that never produce an end marker. 8 MB comfortably covers
-  /// 10,000 scrollback lines at full PTY width with trailing spaces preserved.
-  static const int _maxBufferSize = 8 * 1024 * 1024;
+  /// commands that never produce an end marker. The biggest expected payload
+  /// is scrollback history (capture-pane -p -N): at 10k lines × 270 cols
+  /// that's ~2.6 MB without escapes. 16 MB provides ample headroom for wider
+  /// panes, higher scrollback settings, and Unicode-heavy content.
+  static const int _maxBufferSize = 16 * 1024 * 1024;
 
   /// Completer for the currently executing command
   Completer<String>? _pendingCommand;
