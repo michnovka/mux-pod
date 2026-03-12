@@ -152,5 +152,43 @@ void main() {
         );
       },
     );
+
+    test('unescapes mixed raw Unicode and octal escapes without overflow', () {
+      final outputs = <({String paneId, String data})>[];
+      final client = TmuxControlClient(
+        SshClient(),
+        onPaneOutput: (paneId, data) {
+          outputs.add((paneId: paneId, data: data));
+        },
+      );
+
+      // Raw multibyte Unicode (éééé) mixed with octal escape (\012 = newline)
+      client.debugAddBytes(
+        Uint8List.fromList(utf8.encode('%output %1 éééé\\012\n')),
+      );
+
+      expect(outputs, hasLength(1));
+      expect(outputs.single.paneId, '%1');
+      expect(outputs.single.data, 'éééé\n');
+    });
+
+    test('unescapes CJK characters mixed with octal escapes', () {
+      final outputs = <({String paneId, String data})>[];
+      final client = TmuxControlClient(
+        SshClient(),
+        onPaneOutput: (paneId, data) {
+          outputs.add((paneId: paneId, data: data));
+        },
+      );
+
+      // Raw CJK (漢漢) mixed with octal escape (\012 = newline)
+      client.debugAddBytes(
+        Uint8List.fromList(utf8.encode('%output %1 漢漢\\012\n')),
+      );
+
+      expect(outputs, hasLength(1));
+      expect(outputs.single.paneId, '%1');
+      expect(outputs.single.data, '漢漢\n');
+    });
   });
 }

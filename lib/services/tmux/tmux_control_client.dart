@@ -362,10 +362,11 @@ class TmuxControlClient {
     if (!escaped.contains(r'\')) return escaped;
 
     final length = escaped.length;
-    // Pre-allocate output buffer. Octal escapes (\nnn = 4 chars) compress
-    // to 1 byte and ASCII is 1:1. tmux octal-escapes all non-ASCII bytes,
-    // so output is always ≤ input length. We add a small margin for safety.
-    var bytes = Uint8List(length + 4);
+    // Pre-allocate output buffer. Each code unit can produce up to 3 UTF-8
+    // bytes (BMP range), so length * 3 is a safe upper bound. Octal escapes
+    // compress (4 chars → 1 byte), so the actual output is usually much
+    // smaller. The buffer is short-lived and GC'd after utf8.decode.
+    var bytes = Uint8List(length * 3);
     var writePos = 0;
 
     for (var index = 0; index < length; index++) {
