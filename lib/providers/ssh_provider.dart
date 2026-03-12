@@ -335,6 +335,14 @@ class SshNotifier extends Notifier<SshState> {
         connectionName: connection.name,
         host: connection.host,
       );
+    } on SshHostKeyError {
+      state = state.copyWith(
+        connectionState: SshConnectionState.error,
+        error: 'Host key verification failed',
+      );
+      _client?.dispose();
+      _client = null;
+      rethrow;
     } on SshConnectionError catch (e) {
       state = state.copyWith(
         connectionState: SshConnectionState.error,
@@ -513,6 +521,7 @@ class SshNotifier extends Notifier<SshState> {
     }
 
     if (!result &&
+        state.isReconnecting &&
         state.isNetworkAvailable &&
         _canRetry(state.reconnectAttempt)) {
       unawaited(_requestReconnect(immediate: false, resetAttempt: false));
@@ -587,6 +596,26 @@ class SshNotifier extends Notifier<SshState> {
       onReconnectSuccess?.call();
 
       return true;
+    } on SshHostKeyError {
+      // Host key verification failed — do NOT retry; user must reconnect
+      // interactively to trust the new key.
+      await nextClient?.dispose();
+      if (generation != _reconnectGeneration) {
+        return false;
+      }
+
+      _cancelReconnectFlow(completePending: true);
+      state = state.copyWith(
+        connectionState: SshConnectionState.error,
+        error: 'Host key verification failed. '
+            'Connect manually from Servers to trust the new key.',
+        isReconnecting: false,
+        reconnectAttempt: 0,
+        reconnectDelayMs: null,
+        nextRetryAt: null,
+      );
+
+      return false;
     } catch (e) {
       await nextClient?.dispose();
       if (generation != _reconnectGeneration) {

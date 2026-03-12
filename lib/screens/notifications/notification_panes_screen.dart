@@ -103,6 +103,12 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
               const SliverFillRemaining(
                 child: Center(child: CircularProgressIndicator()),
               )
+            else if (alertState.alertPanes.isEmpty &&
+                alertState.error != null)
+              SliverFillRemaining(
+                hasScrollBody: false,
+                child: _buildErrorState(alertState.error!, isDark),
+              )
             else if (alertState.alertPanes.isEmpty)
               SliverFillRemaining(
                 hasScrollBody: false,
@@ -178,6 +184,42 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
         ),
         const SizedBox(width: 8),
       ],
+    );
+  }
+
+  Widget _buildErrorState(String error, bool isDark) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.error_outline,
+              size: 64,
+              color: DesignColors.error,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Failed to fetch alerts',
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: isDark ? DesignColors.textSecondary : DesignColors.textSecondaryLight,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              error,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 13,
+                color: isDark ? DesignColors.textMuted : DesignColors.textMutedLight,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
