@@ -1084,12 +1084,24 @@ $metadataCommand
       return;
     }
 
-    final historyLines = normalized
+    var historyLines = normalized
         .split('\n')
         .map((line) => _buildHistoryBufferLine(line, _terminal.viewWidth))
-        .toList(growable: false);
+        .toList();
     if (historyLines.isEmpty) {
       return;
+    }
+
+    // Drop the last history line if it duplicates the first visible line.
+    // tmux can place the same line in both scrollback (-1) and the visible
+    // area (0) after a full-screen redraw.
+    if (_terminal.mainBuffer.lines.length > 0) {
+      final firstVisible = _terminal.mainBuffer.lines[0].getText().trimRight();
+      final lastHistory = historyLines.last.getText().trimRight();
+      if (lastHistory.isNotEmpty && lastHistory == firstVisible) {
+        historyLines.removeLast();
+        if (historyLines.isEmpty) return;
+      }
     }
 
     _terminal.mainBuffer.lines.insertAll(0, historyLines);
