@@ -250,4 +250,34 @@ void main() {
       ]);
     },
   );
+
+  test(
+    'active session mutations update state inline when prefs are preloaded',
+    () async {
+      SharedPreferences.setMockInitialValues({'active_sessions': '[]'});
+      final prefs = await SharedPreferences.getInstance();
+
+      final container = ProviderContainer(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      );
+      addTearDown(container.dispose);
+
+      // Trigger build so the completer is already completed.
+      container.read(activeSessionsProvider);
+
+      // Fire-and-forget, just like widget code does.
+      container.read(activeSessionsProvider.notifier).addOrUpdateSession(
+        connectionId: 'conn-1',
+        connectionName: 'Inline test',
+        host: 'inline.example.com',
+        sessionName: 'inline-session',
+        windowCount: 1,
+      );
+
+      // State must be updated synchronously — no microtask hop.
+      final state = container.read(activeSessionsProvider);
+      expect(state.sessions, hasLength(1));
+      expect(state.sessions.single.key, 'conn-1:inline-session');
+    },
+  );
 }

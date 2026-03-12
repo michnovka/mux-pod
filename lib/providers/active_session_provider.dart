@@ -205,7 +205,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     }
   }
 
-  Future<void> _waitForInitialLoad() => _initialLoadCompleter.future;
+  bool get _hasLoadedInitialState => _initialLoadCompleter.isCompleted;
 
   /// Save session information to storage
   Future<void> _saveToStorage() async {
@@ -229,7 +229,9 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     int? lastWindowIndex,
     String? lastPaneId,
   }) async {
-    await _waitForInitialLoad();
+    if (!_hasLoadedInitialState) {
+      await _initialLoadCompleter.future;
+    }
     final key = '$connectionId:$sessionName';
     final existingIndex = state.sessions.indexWhere((s) => s.key == key);
 
@@ -259,7 +261,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     }
 
     state = state.copyWith(sessions: sessions);
-    _saveToStorage();
+    await _saveToStorage();
   }
 
   /// Update the last opened pane information for a session
@@ -269,7 +271,9 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     required int windowIndex,
     required String paneId,
   }) async {
-    await _waitForInitialLoad();
+    if (!_hasLoadedInitialState) {
+      await _initialLoadCompleter.future;
+    }
     final key = '$connectionId:$sessionName';
     final existingIndex = state.sessions.indexWhere((s) => s.key == key);
     if (existingIndex < 0) return;
@@ -282,12 +286,14 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     );
 
     state = state.copyWith(sessions: sessions);
-    _saveToStorage();
+    await _saveToStorage();
   }
 
   /// Update the last accessed time when a session is opened
   Future<void> touchSession(String connectionId, String sessionName) async {
-    await _waitForInitialLoad();
+    if (!_hasLoadedInitialState) {
+      await _initialLoadCompleter.future;
+    }
     final key = '$connectionId:$sessionName';
     final existingIndex = state.sessions.indexWhere((s) => s.key == key);
     if (existingIndex < 0) return;
@@ -298,7 +304,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     );
 
     state = state.copyWith(sessions: sessions);
-    _saveToStorage();
+    await _saveToStorage();
   }
 
   /// Update the session list for a connection (from tmux session list)
@@ -309,7 +315,9 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     required String host,
     required List<TmuxSession> tmuxSessions,
   }) async {
-    await _waitForInitialLoad();
+    if (!_hasLoadedInitialState) {
+      await _initialLoadCompleter.future;
+    }
     // Save existing session information to a map
     final existingMap = <String, ActiveSession>{};
     for (final s in state.sessions.where(
@@ -340,7 +348,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     }).toList();
 
     state = state.copyWith(sessions: [...otherSessions, ...newSessions]);
-    _saveToStorage();
+    await _saveToStorage();
   }
 
   /// Set the current session
@@ -348,19 +356,25 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     String connectionId,
     String sessionName,
   ) async {
-    await _waitForInitialLoad();
+    if (!_hasLoadedInitialState) {
+      await _initialLoadCompleter.future;
+    }
     state = state.copyWith(currentSessionKey: '$connectionId:$sessionName');
   }
 
   /// Clear the current session
   Future<void> clearCurrentSession() async {
-    await _waitForInitialLoad();
+    if (!_hasLoadedInitialState) {
+      await _initialLoadCompleter.future;
+    }
     state = state.copyWith(clearCurrentSession: true);
   }
 
   /// Explicitly close (delete) a session
   Future<void> closeSession(String connectionId, String sessionName) async {
-    await _waitForInitialLoad();
+    if (!_hasLoadedInitialState) {
+      await _initialLoadCompleter.future;
+    }
     final sessions = state.sessions
         .where(
           (s) =>
@@ -369,7 +383,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
         )
         .toList();
     state = state.copyWith(sessions: sessions);
-    _saveToStorage();
+    await _saveToStorage();
   }
 
   /// Remove a session (alias for closeSession)
@@ -379,19 +393,23 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
 
   /// Remove all sessions for a connection
   Future<void> removeSessionsForConnection(String connectionId) async {
-    await _waitForInitialLoad();
+    if (!_hasLoadedInitialState) {
+      await _initialLoadCompleter.future;
+    }
     final sessions = state.sessions
         .where((s) => s.connectionId != connectionId)
         .toList();
     state = state.copyWith(sessions: sessions);
-    _saveToStorage();
+    await _saveToStorage();
   }
 
   /// Clear all sessions
   Future<void> clear() async {
-    await _waitForInitialLoad();
+    if (!_hasLoadedInitialState) {
+      await _initialLoadCompleter.future;
+    }
     state = const ActiveSessionsState();
-    _saveToStorage();
+    await _saveToStorage();
   }
 }
 
