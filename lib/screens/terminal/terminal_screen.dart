@@ -748,7 +748,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     final shouldAutoScroll =
         _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
-    _terminal.write(data);
+    _safeTerminalWrite(data);
     if (shouldAutoScroll || !_hasInitialScrolled) {
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
@@ -803,9 +803,34 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final bufferedOutput = _deferredStreamOutput.takeAll();
     final shouldAutoScroll =
         _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
-    _terminal.write(bufferedOutput);
+    _safeTerminalWrite(bufferedOutput);
     if (shouldAutoScroll) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
+    }
+  }
+
+  /// Whether a buffer-corruption recovery resync is already scheduled.
+  bool _pendingBufferRecovery = false;
+
+  /// Write data to the terminal, recovering from xterm circular buffer
+  /// corruption.  xterm 4.0.0's scrollUp/scrollDown move BufferLines via
+  /// operator[]= without clearing old slots, leaving detached items that
+  /// cause an assertion failure (or NullError in release mode) on the next
+  /// insert/shift.  When this happens, schedule a resync to rebuild the
+  /// terminal from a fresh snapshot.
+  void _safeTerminalWrite(String data) {
+    try {
+      _terminal.write(data);
+    } catch (_) {
+      if (!_pendingBufferRecovery && !_isResyncingPane && !_isDisposed) {
+        _pendingBufferRecovery = true;
+        Future.microtask(() {
+          _pendingBufferRecovery = false;
+          if (!_isDisposed && mounted) {
+            _resyncActivePane();
+          }
+        });
+      }
     }
   }
 
