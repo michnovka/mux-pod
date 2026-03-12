@@ -35,10 +35,11 @@ class PersistentShell {
   /// Output buffer (accumulated as byte sequence to prevent UTF-8 multibyte boundary splits)
   final _rawBuffer = <int>[];
 
-  /// Maximum buffer size (1 MB). If exceeded, the pending command is failed
-  /// and the buffer is cleared to prevent unbounded memory growth from hung
-  /// commands that never produce an end marker.
-  static const int _maxBufferSize = 1024 * 1024;
+  /// Maximum buffer size (8 MB). If exceeded, the pending command is failed
+  /// and the shell is restarted to prevent unbounded memory growth from hung
+  /// commands that never produce an end marker. 8 MB comfortably covers
+  /// 10,000 scrollback lines at full PTY width with trailing spaces preserved.
+  static const int _maxBufferSize = 8 * 1024 * 1024;
 
   /// Completer for the currently executing command
   Completer<String>? _pendingCommand;
@@ -131,6 +132,10 @@ class PersistentShell {
     } on TimeoutException {
       _pendingCommand = null;
       _rawBuffer.clear();
+      // The timed-out command may still be running on the remote side,
+      // consuming stdin. Restart the shell so subsequent exec() calls
+      // get a clean session.
+      unawaited(restart());
       throw PersistentShellError('Command execution timed out');
     }
   }
@@ -150,6 +155,9 @@ class PersistentShell {
     if (_rawBuffer.length > _maxBufferSize) {
       _pendingCommand = null;
       _rawBuffer.clear();
+      // Restart the shell so subsequent commands get a clean session —
+      // the hung command may still be running and consuming stdin.
+      unawaited(restart());
       pending.completeError(
         PersistentShellError('Buffer overflow (>${_maxBufferSize ~/ 1024} KB)'),
       );
