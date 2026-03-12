@@ -1,114 +1,76 @@
-# MuxPod
+# CLAUDE.md
 
-A Flutter app for browsing and controlling tmux sessions, windows, and panes on remote servers via SSH from Android smartphones.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Key Features
+## Project Overview
 
-- Direct SSH connection (only requires sshd on the server side)
-- tmux session/window/pane navigation
-- ANSI color-enabled terminal display
-- Special key input (ESC/CTRL/ALT, etc.)
-- Notification rules (pattern-match based notifications)
-- SSH key management (flutter_secure_storage support)
-- Foldable device support
-
-## Tech Stack
-
-- Flutter 3.24+ / Dart 3.x
-- flutter_riverpod (state management)
-- dartssh2 (SSH connection)
-- xterm (terminal display)
-- flutter_secure_storage (secure storage)
-- shared_preferences (settings persistence)
+MuxPod is a Flutter app for browsing and controlling tmux sessions on remote servers via SSH from Android phones. It connects over SSH (dartssh2), uses tmux control mode (`tmux -C`) for real-time pane streaming, and renders terminal output with the xterm package.
 
 ## Development Commands
 
 ```bash
-flutter run             # Development run
-flutter run -d android  # Android device/emulator
-flutter analyze         # Static analysis
-flutter test            # Run tests
-flutter build apk       # Build APK
+make run            # Debug run (injects GIT_REF via --dart-define)
+make build-apk      # Release APK build
+make analyze        # Static analysis (flutter analyze)
+make test           # Run all tests (flutter test)
+
+# Run a single test file
+flutter test test/services/tmux/tmux_parser_test.dart
+
+# Run on a specific device
+flutter run -d android --dart-define=GIT_REF=$(git rev-parse --abbrev-ref HEAD)@$(git rev-parse --short HEAD)
 ```
+
+## Architecture
+
+### State Management (flutter_riverpod)
+
+All state flows through Riverpod providers in `lib/providers/`. Key providers:
+
+- **`sshProvider`** (`SshNotifier`) — manages SSH connection lifecycle, auto-reconnect with exponential backoff, network-aware pause/resume
+- **`tmuxProvider`** (`TmuxNotifier`) — tracks tmux session tree and active session/window/pane selection
+- **`connectionProvider`** — persists server connection configs (shared_preferences)
+- **`settingsProvider`** — app settings (theme, font, etc.)
+- **`activeSessionProvider`** — coordinates the terminal screen session lifecycle
+
+SharedPreferences is bootstrapped in `main.dart` and injected via `sharedPreferencesProvider.overrideWithValue()`.
+
+### SSH Layer (`lib/services/ssh/`)
+
+`SshClient` wraps dartssh2 and maintains three separate shell channels:
+1. **Control shell** (`_controlShell: PersistentShell`) — serialized tmux polling/control commands via `execPersistent()`
+2. **Input shell** (`_inputShell: PersistentShell`) — dedicated channel for terminal input to avoid contention with polling
+3. **Streaming shell** — long-lived shell for tmux control mode (`tmux -C attach-session`)
+
+`PersistentShell` uses marker-delimited exec to avoid channel open/close overhead (1 RTT per command). Tmux binary path is auto-detected at connect time via `command -v tmux` with fallback to known paths.
+
+### tmux Integration (`lib/services/tmux/`)
+
+- **`TmuxControlClient`** — parses tmux control mode protocol (`%output`, `%begin`/`%end`, `%extended-output`, notifications). This is the primary data transport for terminal streaming.
+- **`TmuxCommands`** — builds shell-escaped tmux commands
+- **`TmuxParser`** — parses `list-sessions`/`list-windows`/`list-panes` output into `TmuxSession`/`TmuxWindow`/`TmuxPane` model objects
+
+### Terminal Rendering (`lib/services/terminal/`)
+
+- **`TerminalSnapshot`** / **`BoundedTextBuffer`** — buffered terminal content management
+- **`TerminalOutputNormalizer`** — normalizes tmux control-mode output for xterm display
+- **`XtermInputAdapter`** — translates mobile input (special keys bar, gestures) into terminal escape sequences
+- **`PaneTerminalView`** — the core widget connecting xterm `Terminal` to tmux pane output
+
+### Screen Navigation
+
+5-tab bottom navigation: Dashboard, Servers (connections), Alerts (notification panes), Keys, Settings. Terminal screen is pushed on top when a pane is selected.
+
+## Key Patterns
+
+- **Immutable state with `copyWith()`** — all provider states use immutable classes with copyWith patterns. No freezed/code-gen.
+- **tmux commands use shell escaping** — always go through `TmuxCommands` for building tmux commands; never construct raw tmux command strings.
+- **Dual persistent shells** — control vs input shells are separated to prevent polling from blocking user input.
+- **Reconnection** — `SshNotifier` handles unlimited auto-reconnect with exponential backoff (1s–60s), network-aware pause, and generation counters to prevent stale reconnect attempts.
 
 ## Documentation
 
-- @/docs/tmux-mobile-design-v2.md - Detailed design document
-- @/docs/coding-conventions.md - Coding conventions
-- @/docs/ui-guidelines.md - UI/UX guidelines
-- @/docs/screens/ - Screen designs
-- @/docs/logo/logo.svg - Logo
-
-## Directory Structure
-
-```
-muxpod/
-├── lib/
-│   ├── main.dart           # Entry point
-│   ├── providers/          # Riverpod providers
-│   ├── screens/            # Screens
-│   │   ├── connections/    # Connection management
-│   │   ├── terminal/       # Terminal
-│   │   ├── keys/           # SSH key management
-│   │   ├── notifications/  # Notification rules
-│   │   └── settings/       # Settings
-│   ├── services/           # Business logic
-│   │   ├── ssh/            # SSH connection
-│   │   ├── tmux/           # tmux operations
-│   │   ├── terminal/       # Terminal control
-│   │   ├── keychain/       # Key management
-│   │   └── notification/   # Notification engine
-│   ├── theme/              # Theme & design
-│   └── widgets/            # Shared widgets
-├── android/                # Android native configuration
-├── ios/                    # iOS native configuration
-└── test/                   # Tests
-```
-
-## Key Types
-
-```dart
-class Connection {
-  final String id;
-  final String name;
-  final String host;
-  final int port;
-  final String username;
-  final AuthMethod authMethod;
-}
-
-class TmuxSession {
-  final String name;
-  final List<TmuxWindow> windows;
-}
-
-class TmuxWindow {
-  final int index;
-  final String name;
-  final List<TmuxPane> panes;
-}
-
-class TmuxPane {
-  final int index;
-  final String id;
-  final bool active;
-}
-```
-
-## Security
-
-- SSH keys: flutter_secure_storage (encrypted)
-- Passwords: flutter_secure_storage (encrypted)
-- Biometric authentication support (local_auth)
-
-## Active Technologies
-- Dart 3.10+ / Flutter 3.24+ + dartssh2 (SSH), xterm (terminal display), flutter_riverpod (state management)
-- flutter_secure_storage (SSH keys/passwords), shared_preferences (connection settings)
-- cryptography, pointycastle (SSH key generation)
-- flutter_local_notifications, url_launcher (settings/notifications)
-- Dart 3.x / Flutter 3.24+ + flutter_riverpod (state management), xterm (terminal display), dartssh2 (SSH connection) (001-terminal-width-resize)
-
-## Recent Changes
-- 001-ssh-terminal-integration: SSH connection, tmux attach, and key input implementation
-- 003-ssh-key-management: Ed25519/RSA key generation, import, and management features
-- 001-settings-notifications: Settings screen, notification rule CRUD, and theme switching
+- `docs/tmux-mobile-design-v2.md` — design document (architecture, data models, screen flow)
+- `docs/ui-guidelines.md` — color palette, spacing, typography, screen layout
+- `docs/coding-conventions.md` — naming, state management patterns, widget structure
+- `docs/terminal-performance-redesign-plan.md` — architectural decision record for the terminal pipeline redesign (implemented)
