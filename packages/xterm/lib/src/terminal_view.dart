@@ -49,6 +49,8 @@ class TerminalView extends StatefulWidget {
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
+    this.scrollOnInput = true,
+    this.scrollPhysics,
   });
 
   /// The underlying terminal that this widget renders.
@@ -142,6 +144,15 @@ class TerminalView extends StatefulWidget {
   /// emulators. True by default.
   final bool simulateScroll;
 
+  /// If true, the terminal will automatically scroll to the bottom when the
+  /// user provides input. Set to false to handle scroll positioning externally.
+  /// True by default.
+  final bool scrollOnInput;
+
+  /// Custom scroll physics for the terminal's scrollable. If not provided,
+  /// default scroll physics will be used.
+  final ScrollPhysics? scrollPhysics;
+
   @override
   State<TerminalView> createState() => TerminalViewState();
 }
@@ -221,6 +232,7 @@ class TerminalViewState extends State<TerminalView> {
     Widget child = Scrollable(
       key: _scrollableKey,
       controller: _scrollController,
+      physics: widget.scrollPhysics,
       viewportBuilder: (context, offset) {
         return _TerminalView(
           key: _viewportKey,
@@ -259,12 +271,12 @@ class TerminalViewState extends State<TerminalView> {
         deleteDetection: widget.deleteDetection,
         onInsert: _onInsert,
         onDelete: () {
-          _scrollToBottom();
+          if (widget.scrollOnInput) _scrollToBottom();
           widget.terminal.keyInput(TerminalKey.backspace);
         },
         onComposing: _onComposing,
         onAction: (action) {
-          _scrollToBottom();
+          if (widget.scrollOnInput) _scrollToBottom();
           if (action == TextInputAction.done) {
             widget.terminal.keyInput(TerminalKey.enter);
           }
@@ -383,7 +395,7 @@ class TerminalViewState extends State<TerminalView> {
       widget.terminal.textInput(text);
     }
 
-    _scrollToBottom();
+    if (widget.scrollOnInput) _scrollToBottom();
   }
 
   void _onComposing(String? text) {
@@ -423,7 +435,7 @@ class TerminalViewState extends State<TerminalView> {
       shift: HardwareKeyboard.instance.isShiftPressed,
     );
 
-    if (handled) {
+    if (handled && widget.scrollOnInput) {
       _scrollToBottom();
     }
 
@@ -431,7 +443,7 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _onKeyboardShow() {
-    if (_focusNode.hasFocus) {
+    if (_focusNode.hasFocus && widget.scrollOnInput) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _scrollToBottom();
       });

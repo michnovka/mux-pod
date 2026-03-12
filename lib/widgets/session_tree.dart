@@ -215,6 +215,9 @@ class WindowNode {
   final bool active;
   final List<PaneNode> panes;
 
+  /// Whether this is the current (active) window in its session.
+  bool get isCurrent => active;
+
   WindowNode({
     required this.index,
     required this.name,
