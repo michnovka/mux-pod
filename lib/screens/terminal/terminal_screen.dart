@@ -944,6 +944,31 @@ $metadataCommand
       final scrollbackLines = ref.read(settingsProvider).scrollbackLines;
       final snapshotCommand = _buildPaneSnapshotCommand(activePane.id);
 
+      // Ordering fence: send a no-op through the control mode channel
+      // (same stream as %output).  Since tmux is single-threaded, by the
+      // time we receive the response all %output that tmux had generated
+      // before processing this command has been delivered to the deferred
+      // buffer.  Clearing after the fence ensures only post-fence output
+      // remains.  Because we wait for the fence before sending the
+      // snapshot command, the snapshot is captured after the fence
+      // (Ts > Tf), so every pre-snapshot %output has been drained.
+      final controlClient = _controlClient;
+      if (controlClient != null && controlClient.isStarted) {
+        try {
+          await controlClient.sendCommand(
+            'display-message -p ""',
+            timeout: const Duration(seconds: 1),
+          );
+        } catch (_) {
+          // Best-effort — proceed without the fence on failure.
+        }
+      }
+      _deferredStreamOutput.clear();
+
+      if (!mounted || _isDisposed) {
+        return;
+      }
+
       final startTime = DateTime.now();
       final combinedOutput = await sshClient.execPersistent(
         snapshotCommand,
