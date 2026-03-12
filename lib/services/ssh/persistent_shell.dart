@@ -46,6 +46,13 @@ class PersistentShell {
   /// Completer for the currently executing command
   Completer<String>? _pendingCommand;
 
+  /// Cached position of the start marker once found, or -1 if not yet found.
+  int _startMarkerIndex = -1;
+
+  /// Offset into _rawBuffer from which to resume scanning for the start marker.
+  /// Avoids rescanning already-processed bytes on each data chunk.
+  int _scanOffset = 0;
+
   /// Whether the shell has been started
   bool get isStarted => _session != null;
 
@@ -118,6 +125,8 @@ class PersistentShell {
 
     _pendingCommand = Completer<String>();
     _rawBuffer.clear();
+    _startMarkerIndex = -1;
+    _scanOffset = 0;
 
     // Output markers using printf (containing \x01 byte)
     // Using printf instead of echo: shell echo-back displays literal '\x01' (4 chars),
@@ -134,6 +143,8 @@ class PersistentShell {
     } on TimeoutException {
       _pendingCommand = null;
       _rawBuffer.clear();
+      _startMarkerIndex = -1;
+      _scanOffset = 0;
       // The timed-out command may still be running on the remote side,
       // consuming stdin. Restart the shell so subsequent exec() calls
       // get a clean session.
@@ -157,6 +168,8 @@ class PersistentShell {
     if (_rawBuffer.length > _maxBufferSize) {
       _pendingCommand = null;
       _rawBuffer.clear();
+      _startMarkerIndex = -1;
+      _scanOffset = 0;
       // Restart the shell so subsequent commands get a clean session —
       // the hung command may still be running and consuming stdin.
       unawaited(restart());
@@ -166,39 +179,60 @@ class PersistentShell {
       return;
     }
 
-    final startIndex = _indexOfBytes(_rawBuffer, _startMarkerBytes);
-    if (startIndex == -1) {
-      return;
+    // Incremental scanning: only search new bytes for markers.
+    if (_startMarkerIndex == -1) {
+      // Back up by marker length - 1 to catch markers that span chunks.
+      final searchFrom = (_scanOffset - _startMarkerBytes.length + 1)
+          .clamp(0, _rawBuffer.length);
+      _startMarkerIndex = _indexOfBytes(
+        _rawBuffer,
+        _startMarkerBytes,
+        start: searchFrom,
+      );
+      if (_startMarkerIndex == -1) {
+        _scanOffset = _rawBuffer.length;
+        return;
+      }
     }
 
-    final endSearchStart = startIndex + _startMarkerBytes.length;
+    final endSearchStart = _startMarkerIndex + _startMarkerBytes.length;
+    // Resume end-marker search from where we left off last time.
+    final endScanFrom = (_scanOffset > endSearchStart)
+        ? (_scanOffset - _endMarkerBytes.length + 1)
+            .clamp(endSearchStart, _rawBuffer.length)
+        : endSearchStart;
     final endIndex = _indexOfBytes(
       _rawBuffer,
       _endMarkerBytes,
-      start: endSearchStart,
+      start: endScanFrom,
     );
 
-    if (endIndex != -1 && endIndex > startIndex) {
-      final resultBytes = _rawBuffer.sublist(endSearchStart, endIndex);
-      var result = utf8.decode(resultBytes, allowMalformed: true);
-
-      // Normalize because PTY output conversion may use \r\n or \r
-      // Fact: on macOS PTY, newlines=0, CRs=19 (\n is converted to \r)
-      result = result.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
-
-      // Remove leading and trailing newlines
-      if (result.startsWith('\n')) {
-        result = result.substring(1);
-      }
-      if (result.endsWith('\n')) {
-        result = result.substring(0, result.length - 1);
-      }
-
-      // Set Completer to null before completing (prevents re-entry)
-      _pendingCommand = null;
-      _rawBuffer.clear();
-      pending.complete(result);
+    if (endIndex == -1) {
+      _scanOffset = _rawBuffer.length;
+      return;
     }
+
+    final resultBytes = _rawBuffer.sublist(endSearchStart, endIndex);
+    var result = utf8.decode(resultBytes, allowMalformed: true);
+
+    // Normalize because PTY output conversion may use \r\n or \r
+    // Fact: on macOS PTY, newlines=0, CRs=19 (\n is converted to \r)
+    result = result.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+
+    // Remove leading and trailing newlines
+    if (result.startsWith('\n')) {
+      result = result.substring(1);
+    }
+    if (result.endsWith('\n')) {
+      result = result.substring(0, result.length - 1);
+    }
+
+    // Set Completer to null before completing (prevents re-entry)
+    _pendingCommand = null;
+    _rawBuffer.clear();
+    _startMarkerIndex = -1;
+    _scanOffset = 0;
+    pending.complete(result);
   }
 
   static int _indexOfBytes(
@@ -267,6 +301,8 @@ class PersistentShell {
     _session = null;
 
     _rawBuffer.clear();
+    _startMarkerIndex = -1;
+    _scanOffset = 0;
   }
 }
 
