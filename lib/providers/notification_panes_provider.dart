@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -209,27 +210,21 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
     }
   }
 
-  Future<void> _runWithConcurrencyLimit<T>(
-    List<Future<T> Function()> tasks,
+  Future<void> _runWithConcurrencyLimit(
+    List<Future<void> Function()> tasks,
     int maxConcurrent,
-    Future<void> Function(T result) onResult,
   ) async {
     if (tasks.isEmpty) {
       return;
     }
 
     final workerCount = math.max(1, math.min(maxConcurrent, tasks.length));
-    var nextIndex = 0;
+    final pending = Queue<Future<void> Function()>.from(tasks);
 
     Future<void> worker() async {
-      while (true) {
-        final taskIndex = nextIndex++;
-        if (taskIndex >= tasks.length) {
-          return;
-        }
-
-        final result = await tasks[taskIndex]();
-        await onResult(result);
+      while (pending.isNotEmpty) {
+        final task = pending.removeFirst();
+        await task();
       }
     }
 
@@ -339,10 +334,9 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
       };
     }).toList();
 
-    await _runWithConcurrencyLimit<void>(
+    await _runWithConcurrencyLimit(
       tasks,
       config.maxConcurrentConnections,
-      (_) async {},
     );
 
     final allAlertPanes = <AlertPane>[
