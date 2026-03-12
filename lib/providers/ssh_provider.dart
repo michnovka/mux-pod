@@ -7,6 +7,7 @@ import '../services/background/foreground_task_service.dart';
 import '../services/network/network_monitor.dart';
 import '../services/ssh/ssh_client.dart';
 import 'connection_provider.dart';
+import 'known_hosts_provider.dart';
 
 typedef SshClientFactory = SshClient Function();
 
@@ -334,6 +335,14 @@ class SshNotifier extends Notifier<SshState> {
         connectionName: connection.name,
         host: connection.host,
       );
+    } on SshHostKeyError {
+      state = state.copyWith(
+        connectionState: SshConnectionState.error,
+        error: 'Host key verification failed',
+      );
+      _client?.dispose();
+      _client = null;
+      rethrow;
     } on SshConnectionError catch (e) {
       state = state.copyWith(
         connectionState: SshConnectionState.error,
@@ -512,6 +521,7 @@ class SshNotifier extends Notifier<SshState> {
     }
 
     if (!result &&
+        state.isReconnecting &&
         state.isNetworkAvailable &&
         _canRetry(state.reconnectAttempt)) {
       unawaited(_requestReconnect(immediate: false, resetAttempt: false));
@@ -546,11 +556,20 @@ class SshNotifier extends Notifier<SshState> {
       await previousClient?.dispose();
       nextClient = _createClient();
 
+      // Build non-interactive verifier for reconnection (no UI context)
+      final knownHostsNotifier = ref.read(knownHostsProvider.notifier);
+      final reconnectOptions = _lastOptions!.copyWith(
+        onVerifyHostKey: knownHostsNotifier.buildNonInteractiveVerifier(
+          _lastConnection!.host,
+          _lastConnection!.port,
+        ),
+      );
+
       await nextClient.connect(
         host: _lastConnection!.host,
         port: _lastConnection!.port,
         username: _lastConnection!.username,
-        options: _lastOptions!,
+        options: reconnectOptions,
       );
 
       if (generation != _reconnectGeneration) {
@@ -577,6 +596,26 @@ class SshNotifier extends Notifier<SshState> {
       onReconnectSuccess?.call();
 
       return true;
+    } on SshHostKeyError {
+      // Host key verification failed — do NOT retry; user must reconnect
+      // interactively to trust the new key.
+      await nextClient?.dispose();
+      if (generation != _reconnectGeneration) {
+        return false;
+      }
+
+      _cancelReconnectFlow(completePending: true);
+      state = state.copyWith(
+        connectionState: SshConnectionState.error,
+        error: 'Host key verification failed. '
+            'Connect manually from Servers to trust the new key.',
+        isReconnecting: false,
+        reconnectAttempt: 0,
+        reconnectDelayMs: null,
+        nextRetryAt: null,
+      );
+
+      return false;
     } catch (e) {
       await nextClient?.dispose();
       if (generation != _reconnectGeneration) {

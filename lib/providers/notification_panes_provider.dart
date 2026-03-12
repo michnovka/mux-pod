@@ -9,6 +9,7 @@ import '../services/ssh/ssh_client.dart';
 import '../services/tmux/tmux_commands.dart';
 import '../services/tmux/tmux_parser.dart';
 import 'connection_provider.dart';
+import 'known_hosts_provider.dart';
 
 typedef AlertPanesSshClientFactory = SshClient Function();
 
@@ -136,6 +137,12 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
         .clamp(1, 3600)
         .toInt();
 
+    final knownHostsNotifier = ref.read(knownHostsProvider.notifier);
+    final verifier = knownHostsNotifier.buildNonInteractiveVerifier(
+      connection.host,
+      connection.port,
+    );
+
     if (connection.authMethod == 'key' && connection.keyId != null) {
       final credentials = await Future.wait<String?>([
         storage.getPrivateKey(connection.keyId!),
@@ -146,6 +153,7 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
         passphrase: credentials[1],
         tmuxPath: connection.tmuxPath,
         timeout: connectTimeoutSeconds,
+        onVerifyHostKey: verifier,
       );
     }
 
@@ -154,6 +162,7 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
       password: password,
       tmuxPath: connection.tmuxPath,
       timeout: connectTimeoutSeconds,
+      onVerifyHostKey: verifier,
     );
   }
 

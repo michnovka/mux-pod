@@ -103,12 +103,48 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
               const SliverFillRemaining(
                 child: Center(child: CircularProgressIndicator()),
               )
+            else if (alertState.alertPanes.isEmpty &&
+                alertState.error != null)
+              SliverFillRemaining(
+                hasScrollBody: false,
+                child: _buildErrorState(alertState.error!, isDark),
+              )
             else if (alertState.alertPanes.isEmpty)
               SliverFillRemaining(
                 hasScrollBody: false,
                 child: _buildEmptyState(isDark),
               )
-            else
+            else ...[
+              // Show partial error banner when some connections failed
+              if (alertState.error != null)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                    child: Material(
+                      color: DesignColors.error.withAlpha(25),
+                      borderRadius: BorderRadius.circular(8),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Row(
+                          children: [
+                            Icon(Icons.warning_amber_rounded,
+                                size: 18, color: DesignColors.error),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Some connections failed to refresh',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: DesignColors.error,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               SliverPadding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 sliver: SliverList(
@@ -128,6 +164,7 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
                   ),
                 ),
               ),
+            ],
             const SliverToBoxAdapter(
               child: SizedBox(height: 80),
             ),
@@ -178,6 +215,42 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
         ),
         const SizedBox(width: 8),
       ],
+    );
+  }
+
+  Widget _buildErrorState(String error, bool isDark) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.error_outline,
+              size: 64,
+              color: DesignColors.error,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Failed to fetch alerts',
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+                color: isDark ? DesignColors.textSecondary : DesignColors.textSecondaryLight,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              error,
+              textAlign: TextAlign.center,
+              style: GoogleFonts.spaceGrotesk(
+                fontSize: 13,
+                color: isDark ? DesignColors.textMuted : DesignColors.textMutedLight,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

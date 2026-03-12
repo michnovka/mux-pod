@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../providers/connection_provider.dart';
 import '../../providers/key_provider.dart';
+import '../../providers/known_hosts_provider.dart';
 import '../../services/keychain/secure_storage.dart';
 import '../../services/ssh/ssh_client.dart';
 import '../../theme/design_colors.dart';
@@ -765,6 +766,17 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
 
     setState(() => _isTesting = true);
 
+    // Build verifier before any async gaps to avoid BuildContext lint
+    final knownHostsNotifier = ref.read(knownHostsProvider.notifier);
+    final testHost = _hostController.text.trim();
+    final testPort = int.tryParse(_portController.text) ?? 22;
+    final hostKeyVerifier = buildInteractiveVerifier(
+      context: context,
+      host: testHost,
+      port: testPort,
+      notifier: knownHostsNotifier,
+    );
+
     final sshClient = SshClient();
     String? errorMessage;
     bool tmuxInstalled = false;
@@ -792,23 +804,27 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
         }
       }
 
-      // SSH connection test
+      // SSH connection test — reuse testHost/testPort captured above
+      // so the verifier's trust decision matches the actual connect target.
       final customTmuxPath = _tmuxPathController.text.trim();
       await sshClient.connect(
-        host: _hostController.text.trim(),
-        port: int.tryParse(_portController.text) ?? 22,
+        host: testHost,
+        port: testPort,
         username: _usernameController.text.trim(),
         options: SshConnectOptions(
           password: password,
           privateKey: privateKey,
           passphrase: passphrase,
           tmuxPath: customTmuxPath.isNotEmpty ? customTmuxPath : null,
+          onVerifyHostKey: hostKeyVerifier,
         ),
       );
 
       // Check if tmux is installed
       // The absolute path has already been detected via PersistentShell (interactive shell) inside connect()
       tmuxInstalled = sshClient.tmuxPath != null;
+    } on SshHostKeyError catch (e) {
+      errorMessage = e.message;
     } on SshAuthenticationError catch (e) {
       errorMessage = 'Authentication failed: ${e.message}';
     } on SshConnectionError catch (e) {

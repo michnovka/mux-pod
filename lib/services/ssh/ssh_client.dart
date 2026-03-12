@@ -31,6 +31,22 @@ class SshAuthenticationError implements Exception {
       'SshAuthenticationError: $message${cause != null ? ' ($cause)' : ''}';
 }
 
+/// SSH host key verification failed or rejected by user
+class SshHostKeyError implements Exception {
+  final String message;
+
+  SshHostKeyError(this.message);
+
+  @override
+  String toString() => 'SshHostKeyError: $message';
+}
+
+/// Callback type for SSH host key verification (matches dartssh2 signature).
+typedef HostKeyVerifyCallback = FutureOr<bool> Function(
+  String type,
+  Uint8List fingerprint,
+);
+
 /// SSH connection options
 class SshConnectOptions {
   /// Password for password authentication
@@ -48,13 +64,36 @@ class SshConnectOptions {
   /// Connection timeout (seconds)
   final int timeout;
 
+  /// Host key verification callback (TOFU).
+  /// If null, all host keys are accepted (insecure).
+  final HostKeyVerifyCallback? onVerifyHostKey;
+
   const SshConnectOptions({
     this.password,
     this.privateKey,
     this.passphrase,
     this.tmuxPath,
     this.timeout = 30,
+    this.onVerifyHostKey,
   });
+
+  SshConnectOptions copyWith({
+    String? password,
+    String? privateKey,
+    String? passphrase,
+    String? tmuxPath,
+    int? timeout,
+    HostKeyVerifyCallback? onVerifyHostKey,
+  }) {
+    return SshConnectOptions(
+      password: password ?? this.password,
+      privateKey: privateKey ?? this.privateKey,
+      passphrase: passphrase ?? this.passphrase,
+      tmuxPath: tmuxPath ?? this.tmuxPath,
+      timeout: timeout ?? this.timeout,
+      onVerifyHostKey: onVerifyHostKey ?? this.onVerifyHostKey,
+    );
+  }
 }
 
 /// Shell options
@@ -220,6 +259,7 @@ class SshClient {
           username: username,
           identities: _parsePrivateKey(options.privateKey!, options.passphrase),
           onAuthenticated: _onAuthenticated,
+          onVerifyHostKey: options.onVerifyHostKey,
         );
       } else if (options.password != null) {
         // Password authentication
@@ -228,6 +268,7 @@ class SshClient {
           username: username,
           onPasswordRequest: () => options.password!,
           onAuthenticated: _onAuthenticated,
+          onVerifyHostKey: options.onVerifyHostKey,
         );
       } else {
         throw SshAuthenticationError('No authentication method provided');
@@ -268,6 +309,15 @@ class SshClient {
       _lastError = 'Connection failed: ${e.message}';
       await _cleanup();
       throw SshConnectionError(_lastError!, e);
+    } on SSHHostkeyError {
+      _state = SshConnectionState.error;
+      _lastError = 'Host key verification failed';
+      await _cleanup();
+      throw SshHostKeyError(_lastError!);
+    } on SshHostKeyError {
+      _state = SshConnectionState.error;
+      await _cleanup();
+      rethrow;
     } on SSHAuthFailError catch (e) {
       _state = SshConnectionState.error;
       _lastError = 'Authentication failed: ${e.message}';
