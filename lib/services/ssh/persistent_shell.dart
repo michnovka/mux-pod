@@ -35,6 +35,11 @@ class PersistentShell {
   /// Output buffer (accumulated as byte sequence to prevent UTF-8 multibyte boundary splits)
   final _rawBuffer = <int>[];
 
+  /// Maximum buffer size (1 MB). If exceeded, the pending command is failed
+  /// and the buffer is cleared to prevent unbounded memory growth from hung
+  /// commands that never produce an end marker.
+  static const int _maxBufferSize = 1024 * 1024;
+
   /// Completer for the currently executing command
   Completer<String>? _pendingCommand;
 
@@ -125,6 +130,7 @@ class PersistentShell {
       return await _pendingCommand!.future.timeout(effectiveTimeout);
     } on TimeoutException {
       _pendingCommand = null;
+      _rawBuffer.clear();
       throw PersistentShellError('Command execution timed out');
     }
   }
@@ -138,6 +144,17 @@ class PersistentShell {
     }
 
     _rawBuffer.addAll(data);
+
+    // Guard against unbounded growth from hung commands that produce output
+    // but never emit an end marker.
+    if (_rawBuffer.length > _maxBufferSize) {
+      _pendingCommand = null;
+      _rawBuffer.clear();
+      pending.completeError(
+        PersistentShellError('Buffer overflow (>${_maxBufferSize ~/ 1024} KB)'),
+      );
+      return;
+    }
 
     final startIndex = _indexOfBytes(_rawBuffer, _startMarkerBytes);
     if (startIndex == -1) {
