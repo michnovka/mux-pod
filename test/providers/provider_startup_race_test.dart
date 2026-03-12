@@ -250,4 +250,70 @@ void main() {
       ]);
     },
   );
+
+  test(
+    'active session mutations update state inline when prefs are preloaded',
+    () async {
+      SharedPreferences.setMockInitialValues({'active_sessions': '[]'});
+      final prefs = await SharedPreferences.getInstance();
+
+      final container = ProviderContainer(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      );
+      addTearDown(container.dispose);
+
+      // Trigger build so the completer is already completed.
+      container.read(activeSessionsProvider);
+
+      // Fire-and-forget, just like widget code does.
+      container.read(activeSessionsProvider.notifier).addOrUpdateSession(
+        connectionId: 'conn-1',
+        connectionName: 'Inline test',
+        host: 'inline.example.com',
+        sessionName: 'inline-session',
+        windowCount: 1,
+      );
+
+      // State must be updated synchronously — no microtask hop.
+      final state = container.read(activeSessionsProvider);
+      expect(state.sessions, hasLength(1));
+      expect(state.sessions.single.key, 'conn-1:inline-session');
+    },
+  );
+
+  test(
+    'awaited active session mutation persists to storage before returning',
+    () async {
+      SharedPreferences.setMockInitialValues({'active_sessions': '[]'});
+      final prefs = await SharedPreferences.getInstance();
+
+      final container = ProviderContainer(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      );
+      addTearDown(container.dispose);
+
+      // Trigger build so the completer is already completed.
+      container.read(activeSessionsProvider);
+
+      // Await the mutation — storage should be written by the time it returns.
+      await container
+          .read(activeSessionsProvider.notifier)
+          .addOrUpdateSession(
+            connectionId: 'conn-1',
+            connectionName: 'Persist test',
+            host: 'persist.example.com',
+            sessionName: 'persist-session',
+            windowCount: 1,
+          );
+
+      final raw = prefs.getString('active_sessions');
+      expect(raw, isNotNull);
+      final stored = jsonDecode(raw!) as List<dynamic>;
+      expect(stored, hasLength(1));
+      expect(
+        (stored[0] as Map<String, dynamic>)['sessionName'],
+        'persist-session',
+      );
+    },
+  );
 }
