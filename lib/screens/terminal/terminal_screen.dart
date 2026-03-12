@@ -99,6 +99,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   // Connection state (managed locally)
   bool _isConnecting = false;
+  bool _isSwitchingPane = false;
   String? _connectionError;
   SshState _sshState = const SshState();
 
@@ -1378,7 +1379,7 @@ $metadataCommand
             ],
           ),
           // Loading overlay
-          if (_isConnecting || sshState.isConnecting)
+          if (_isConnecting || _isSwitchingPane || sshState.isConnecting)
             Container(
               color: isDark ? Colors.black54 : Colors.white70,
               child: const Center(child: CircularProgressIndicator()),
@@ -1558,6 +1559,8 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null) return;
 
+    setState(() => _isSwitchingPane = true);
+
     final previousPaneId = ref.read(tmuxProvider).activePaneId;
     await _refreshSessionTree();
     // Update active session in tmux_provider
@@ -1574,6 +1577,7 @@ $metadataCommand
       _applyTerminalFrame(emptyView);
       _viewNotifier.value = emptyView;
       _hasInitialScrolled = false;
+      if (mounted) setState(() => _isSwitchingPane = false);
       return;
     }
 
@@ -1592,7 +1596,9 @@ $metadataCommand
         TmuxCommands.sendKeys(nextPane.id, '\x1b[I', literal: true),
       );
     } catch (_) {
-      return;
+      // continue to clear flag
+    } finally {
+      if (mounted) setState(() => _isSwitchingPane = false);
     }
   }
 
@@ -1600,6 +1606,8 @@ $metadataCommand
   Future<void> _selectWindow(String sessionName, int windowIndex) async {
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected) return;
+
+    setState(() => _isSwitchingPane = true);
 
     // Also switch session if it differs
     final currentSession = ref.read(tmuxProvider).activeSessionName;
@@ -1613,6 +1621,7 @@ $metadataCommand
       );
       await _refreshSessionTree(syncActive: true);
     } catch (_) {
+      if (mounted) setState(() => _isSwitchingPane = false);
       return;
     }
     if (!mounted || _isDisposed) return;
@@ -1630,6 +1639,7 @@ $metadataCommand
       _applyTerminalFrame(emptyView);
       _viewNotifier.value = emptyView;
       _hasInitialScrolled = false;
+      if (mounted) setState(() => _isSwitchingPane = false);
       return;
     }
 
@@ -1640,7 +1650,9 @@ $metadataCommand
         TmuxCommands.sendKeys(activePane.id, '\x1b[I', literal: true),
       );
     } catch (_) {
-      return;
+      // continue to clear flag
+    } finally {
+      if (mounted) setState(() => _isSwitchingPane = false);
     }
   }
 
@@ -1648,6 +1660,8 @@ $metadataCommand
   Future<void> _selectPane(String paneId) async {
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected) return;
+
+    setState(() => _isSwitchingPane = true);
 
     final oldPaneId = ref.read(tmuxProvider).activePaneId;
 
@@ -1667,6 +1681,7 @@ $metadataCommand
         TmuxCommands.sendKeys(paneId, '\x1b[I', literal: true),
       );
     } catch (_) {
+      if (mounted) setState(() => _isSwitchingPane = false);
       return;
     }
     if (!mounted || _isDisposed) return;
@@ -1703,6 +1718,7 @@ $metadataCommand
             );
       }
     }
+    if (mounted) setState(() => _isSwitchingPane = false);
   }
 
   /// Error overlay
