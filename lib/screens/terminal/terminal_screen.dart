@@ -7,13 +7,14 @@ import 'package:xterm/xterm.dart';
 
 import '../../providers/active_session_provider.dart';
 import '../../providers/connection_provider.dart';
+import '../../providers/known_hosts_provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/ssh_provider.dart';
 import '../../providers/tmux_provider.dart';
 import '../../services/keychain/secure_storage.dart';
 import '../../services/network/network_monitor.dart';
 import '../../services/ssh/input_queue.dart';
-import '../../services/ssh/ssh_client.dart' show SshClient, SshConnectOptions;
+import '../../services/ssh/ssh_client.dart' show SshClient, SshConnectOptions, SshHostKeyError;
 import '../../services/terminal/bounded_text_buffer.dart';
 import '../../services/terminal/terminal_output_normalizer.dart';
 import '../../services/terminal/terminal_snapshot.dart';
@@ -400,9 +401,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
 
       // 3. SSH connection (no shell startup - exec only)
+      final knownHostsNotifier = ref.read(knownHostsProvider.notifier);
+      final verifiedOptions = options.copyWith(
+        onVerifyHostKey: buildInteractiveVerifier(
+          context: context,
+          host: connection.host,
+          port: connection.port,
+          notifier: knownHostsNotifier,
+        ),
+      );
       final SshNotifier sshNotifier = ref.read(sshProvider.notifier);
       _sshNotifier ??= sshNotifier;
-      await sshNotifier.connectWithoutShell(connection, options);
+      await sshNotifier.connectWithoutShell(connection, verifiedOptions);
       if (!mounted || _isDisposed) {
         return;
       }
@@ -504,6 +514,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       if (!mounted) return;
       setState(() {
         _isConnecting = false;
+      });
+    } on SshHostKeyError catch (e) {
+      _stopLatencyPolling(resetValue: true);
+      if (!mounted) return;
+      setState(() {
+        _isConnecting = false;
+        _connectionError = e.message;
       });
     } catch (e) {
       _stopLatencyPolling(resetValue: true);

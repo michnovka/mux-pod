@@ -7,6 +7,7 @@ import '../services/background/foreground_task_service.dart';
 import '../services/network/network_monitor.dart';
 import '../services/ssh/ssh_client.dart';
 import 'connection_provider.dart';
+import 'known_hosts_provider.dart';
 
 typedef SshClientFactory = SshClient Function();
 
@@ -546,11 +547,20 @@ class SshNotifier extends Notifier<SshState> {
       await previousClient?.dispose();
       nextClient = _createClient();
 
+      // Build non-interactive verifier for reconnection (no UI context)
+      final knownHostsNotifier = ref.read(knownHostsProvider.notifier);
+      final reconnectOptions = _lastOptions!.copyWith(
+        onVerifyHostKey: knownHostsNotifier.buildNonInteractiveVerifier(
+          _lastConnection!.host,
+          _lastConnection!.port,
+        ),
+      );
+
       await nextClient.connect(
         host: _lastConnection!.host,
         port: _lastConnection!.port,
         username: _lastConnection!.username,
-        options: _lastOptions!,
+        options: reconnectOptions,
       );
 
       if (generation != _reconnectGeneration) {

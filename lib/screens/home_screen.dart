@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../providers/active_session_provider.dart';
 import '../providers/connection_provider.dart';
+import '../providers/known_hosts_provider.dart';
 import '../services/keychain/secure_storage.dart';
 import '../services/ssh/ssh_client.dart';
 import '../services/tmux/tmux_commands.dart';
@@ -382,6 +383,7 @@ class _TerminalTabState extends ConsumerState<_TerminalTab> {
       final connectionsState = ref.read(connectionsProvider);
       final connections = connectionsState.connections;
       final storage = SecureStorageService();
+      final knownHostsNotifier = ref.read(knownHostsProvider.notifier);
 
       for (final connection in connections) {
         try {
@@ -396,13 +398,21 @@ class _TerminalTabState extends ConsumerState<_TerminalTab> {
             options = SshConnectOptions(password: password, tmuxPath: connection.tmuxPath);
           }
 
+          // Add non-interactive host key verification
+          final verifiedOptions = options.copyWith(
+            onVerifyHostKey: knownHostsNotifier.buildNonInteractiveVerifier(
+              connection.host,
+              connection.port,
+            ),
+          );
+
           // Connect via SSH and retrieve the list of sessions
           final sshClient = SshClient();
           await sshClient.connect(
             host: connection.host,
             port: connection.port,
             username: connection.username,
-            options: options,
+            options: verifiedOptions,
           );
 
           final result = await sshClient.execWithExitCode(TmuxCommands.listSessions());
