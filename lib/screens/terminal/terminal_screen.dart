@@ -92,7 +92,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   final _secureStorage = SecureStorageService();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   final _paneTerminalViewKey = GlobalKey<PaneTerminalViewState>();
-  final _terminalScrollController = ScrollController();
+  final _terminalScrollController = _StableScrollController();
   late Terminal _terminal;
   final _terminalController = TerminalController();
   int _terminalScrollbackLines = AppSettings().scrollbackLines;
@@ -1262,6 +1262,18 @@ $metadataCommand
     // This keeps high-frequency terminal output out of the parent build path.
     final sshState = _sshState;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final keyboardInset = MediaQuery.of(context).viewInsets.bottom;
+    final keyboardVisible = keyboardInset > 0;
+
+    // Enable scroll-to-bottom suppression while the keyboard is visible and
+    // the terminal scroll is near the top.  This prevents xterm's internal
+    // stick-to-bottom from pushing short content off-screen.
+    // viewportShrinkBudget is the total height the viewport lost (keyboard +
+    // SpecialKeysBar).  If maxScrollExtent is within this budget the content
+    // would have fit without the keyboard, so we suppress.
+    _terminalScrollController.suppressScrollToMax = keyboardVisible;
+    _terminalScrollController.viewportShrinkBudget =
+        keyboardVisible ? keyboardInset + 120 : 0;
 
     return Scaffold(
       key: _scaffoldKey,
@@ -1341,14 +1353,16 @@ $metadataCommand
                   ),
                 ),
               ),
-              SpecialKeysBar(
-                onLiteralKeyPressed: _sendLiteralKey,
-                onSpecialKeyPressed: _sendSpecialKey,
-                onCtrlToggle: _toggleCtrlModifier,
-                onAltToggle: _toggleAltModifier,
-                ctrlPressed: _ctrlModifierPressed,
-                altPressed: _altModifierPressed,
-              ),
+              // SpecialKeysBar: only shown when the on-screen keyboard is visible
+              if (keyboardVisible)
+                SpecialKeysBar(
+                  onLiteralKeyPressed: _sendLiteralKey,
+                  onSpecialKeyPressed: _sendSpecialKey,
+                  onCtrlToggle: _toggleCtrlModifier,
+                  onAltToggle: _toggleAltModifier,
+                  ctrlPressed: _ctrlModifierPressed,
+                  altPressed: _altModifierPressed,
+                ),
             ],
           ),
           // Loading overlay
@@ -1551,6 +1565,7 @@ $metadataCommand
       return;
     }
 
+    _hasInitialScrolled = false;
     try {
       if (previousPaneId != null && previousPaneId != nextPane.id) {
         await sshClient.execPersistentInput(
@@ -1606,6 +1621,7 @@ $metadataCommand
       return;
     }
 
+    _hasInitialScrolled = false;
     try {
       await _restartTerminalStream(refreshTree: false);
       await sshClient.execPersistentInput(
@@ -1658,6 +1674,7 @@ $metadataCommand
         mainContent: '',
         alternateScreen: false,
       );
+      _hasInitialScrolled = false;
       await _restartTerminalStream(refreshTree: false);
 
       // Save session info (for restoration)
@@ -2948,5 +2965,97 @@ class _PaneLayoutVisualizer extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Custom ScrollController / ScrollPosition that prevents xterm's internal
+// stick-to-bottom from pushing short terminal content off-screen when the
+// keyboard opens.
+//
+// The xterm package scrolls to maxScrollExtent in three places:
+//   1. RenderTerminal.performLayout via _offset.correctBy (stick-to-bottom)
+//   2. _onKeyboardShow → _scrollToBottom → position.jumpTo(maxScrollExtent)
+//   3. _onInsert / onDelete / onAction → _scrollToBottom
+//
+// Suppression is only active when ALL of the following are true:
+//   • [suppressScrollToMax] is true (keyboard visible)
+//   • The scroll position is near the top (pixels ≤ threshold)
+//   • The content would have fit without the keyboard
+//     (maxScrollExtent ≤ viewportShrinkBudget)
+//
+// This allows genuinely long content to scroll to bottom normally while
+// keeping short terminal content anchored at the top.
+// ---------------------------------------------------------------------------
+
+class _StableScrollController extends ScrollController {
+  /// When true, scroll-to-bottom calls may be suppressed (see conditions
+  /// above).
+  bool suppressScrollToMax = false;
+
+  /// Total height lost by the viewport when the keyboard opened (keyboard
+  /// inset + SpecialKeysBar estimate).  Used to decide whether content would
+  /// have fit without the keyboard.
+  double viewportShrinkBudget = 0;
+
+  @override
+  ScrollPosition createScrollPosition(
+    ScrollPhysics physics,
+    ScrollContext context,
+    ScrollPosition? oldPosition,
+  ) {
+    return _StableScrollPosition(
+      physics: physics,
+      context: context,
+      oldPosition: oldPosition,
+      initialPixels: initialScrollOffset,
+      controller: this,
+    );
+  }
+}
+
+class _StableScrollPosition extends ScrollPositionWithSingleContext {
+  _StableScrollPosition({
+    required super.physics,
+    required super.context,
+    super.oldPosition,
+    super.initialPixels,
+    required this.controller,
+  });
+
+  final _StableScrollController controller;
+
+  /// Threshold in pixels — positions within this range from the top are
+  /// considered "at the top".
+  static const double _nearTopThreshold = 2.0;
+
+  bool get _shouldSuppress {
+    if (!controller.suppressScrollToMax || pixels > _nearTopThreshold) {
+      return false;
+    }
+    // Only suppress if the content would have fit in the full viewport
+    // (before the keyboard appeared).  For genuinely long content
+    // maxScrollExtent far exceeds the viewport shrink budget.
+    return maxScrollExtent <= controller.viewportShrinkBudget;
+  }
+
+  @override
+  void jumpTo(double value) {
+    // Suppress xterm's _scrollToBottom which calls jumpTo(maxScrollExtent)
+    if (_shouldSuppress && value >= maxScrollExtent - 1 && value > pixels) {
+      return;
+    }
+    super.jumpTo(value);
+  }
+
+  @override
+  void correctBy(double correction) {
+    // Suppress xterm's RenderTerminal._stickToBottom correctBy in
+    // performLayout. The correction is always positive when sticking to
+    // a newly-larger maxScrollExtent after a viewport shrink.
+    if (_shouldSuppress && correction > 0) {
+      return;
+    }
+    super.correctBy(correction);
   }
 }
