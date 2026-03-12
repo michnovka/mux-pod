@@ -120,7 +120,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int _controlRestartAttempt = 0;
   bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
-  bool _snapshotAppliedDuringResync = false;
+
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
 
@@ -944,31 +944,6 @@ $metadataCommand
       final scrollbackLines = ref.read(settingsProvider).scrollbackLines;
       final snapshotCommand = _buildPaneSnapshotCommand(activePane.id);
 
-      // Ordering fence: send a no-op through the control mode channel
-      // (same stream as %output).  Since tmux is single-threaded, by the
-      // time we receive the response all %output that tmux had generated
-      // before processing this command has been delivered to the deferred
-      // buffer.  Clearing after the fence ensures only post-fence output
-      // remains.  Because we wait for the fence before sending the
-      // snapshot command, the snapshot is captured after the fence
-      // (Ts > Tf), so every pre-snapshot %output has been drained.
-      final controlClient = _controlClient;
-      if (controlClient != null && controlClient.isStarted) {
-        try {
-          await controlClient.sendCommand(
-            'display-message -p ""',
-            timeout: const Duration(seconds: 1),
-          );
-        } catch (_) {
-          // Best-effort — proceed without the fence on failure.
-        }
-      }
-      _deferredStreamOutput.clear();
-
-      if (!mounted || _isDisposed) {
-        return;
-      }
-
       final startTime = DateTime.now();
       final combinedOutput = await sshClient.execPersistent(
         snapshotCommand,
@@ -1061,18 +1036,37 @@ $metadataCommand
       }
 
       _applyResyncUpdate(nextView);
-      _snapshotAppliedDuringResync = true;
 
-      // Snapshot is now the authoritative terminal state.  Discard the
-      // deferred buffer — it is an inseparable mix of pre-snapshot
-      // duplicates and post-snapshot data (no ordering barrier between
-      // the two SSH channels).  Keep _isResyncingPane true so that:
+      // Post-snapshot ordering fence: send a no-op through the control
+      // mode channel (same stream as %output).  We awaited the snapshot
+      // response before sending this, so tmux processes the fence at
+      // Tf > Ts (snapshot time).  By the time the fence response arrives,
+      // all %output generated before Tf — which includes everything
+      // before the snapshot — has been delivered to the deferred buffer.
+      // Clearing after a successful fence drops those duplicates.
+      //
+      // If the fence fails (timeout / session closed), skip the clear:
+      // the deferred buffer may contain duplicates, but flushing
+      // duplicates is less harmful than silently losing genuinely new
+      // output.  Keep _isResyncingPane true so that:
       //   (a) new output during history backfill is deferred (prevents
       //       scrolling snapshot lines into xterm scrollback which would
       //       break history-prepend dedup), and
       //   (b) reentrancy is blocked (a second resync cannot start while
       //       history is still being fetched).
-      _deferredStreamOutput.clear();
+      final controlClient = _controlClient;
+      if (controlClient != null && controlClient.isStarted) {
+        try {
+          await controlClient.sendCommand(
+            'display-message -p ""',
+            timeout: const Duration(seconds: 1),
+          );
+          // Fence succeeded — all pre-Tf output delivered; safe to clear.
+          _deferredStreamOutput.clear();
+        } catch (_) {
+          // Fence failed — skip clear to avoid losing post-snapshot output.
+        }
+      }
 
       await _prependHistoryScrollback(
         sshClient: sshClient,
@@ -1087,18 +1081,15 @@ $metadataCommand
       }
     } finally {
       _isResyncingPane = false;
-      if (_snapshotAppliedDuringResync) {
-        // Snapshot was applied.  Flush output that arrived during history
-        // backfill — it is genuinely post-snapshot and the terminal is
-        // now in a consistent state (history prepended, cursor set).
-        _snapshotAppliedDuringResync = false;
-        _flushDeferredStreamOutput();
-      } else {
-        // Snapshot was never applied (error before _applyResyncUpdate).
-        // The terminal holds the previous state — flush deferred output
-        // so it is not silently lost.
-        _flushDeferredStreamOutput();
-      }
+      // Flush any remaining deferred output.  Three scenarios:
+      //  1. Snapshot applied + fence succeeded: buffer was cleared after
+      //     the fence, so only genuinely post-snapshot output remains.
+      //  2. Snapshot applied + fence failed: buffer may contain a mix of
+      //     pre-/post-snapshot output — duplicates are preferable to loss.
+      //  3. Snapshot never applied (error path): all output since resync
+      //     start is still in the buffer and must be flushed to avoid
+      //     silent data loss.
+      _flushDeferredStreamOutput();
     }
   }
 
