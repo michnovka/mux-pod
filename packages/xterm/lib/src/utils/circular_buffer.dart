@@ -35,9 +35,27 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
   }
 
   /// Adds the specified [child] to the list at the specified [index].
+  ///
+  /// If [child] is already in this buffer at a different cyclic slot, the old
+  /// slot is nulled out first.  Without this, `operator[]=` on a range (e.g.
+  /// scrollUp/scrollDown in Buffer) leaves the same item in two slots;
+  /// a subsequent `_adoptChild` or `_moveChild` then detaches the item via
+  /// the stale slot, corrupting the live slot.
+  /// See: https://github.com/TerminalStudio/xterm.dart/issues/222
   @pragma('vm:prefer-inline')
   void _adoptChild(int index, T child) {
     final cyclicIndex = _getCyclicIndex(index);
+
+    if (identical(child._owner, this) && child._absoluteIndex != null) {
+      final oldIndex = child._absoluteIndex! - _absoluteStartIndex;
+      if (oldIndex >= 0 && oldIndex < _length) {
+        final oldCyclicIndex = _getCyclicIndex(oldIndex);
+        if (oldCyclicIndex != cyclicIndex) {
+          _array[oldCyclicIndex] = null;
+        }
+      }
+    }
+
     _array[cyclicIndex]?._detach();
     _array[cyclicIndex] = child.._attach(this, index);
   }
