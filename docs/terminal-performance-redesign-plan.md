@@ -1,5 +1,9 @@
 # Terminal Performance Redesign Plan
 
+> **Status: Implemented.** This plan was completed across issues #14–#18. The codebase now uses
+> xterm for rendering, tmux control mode for streaming, and separate persistent shells for
+> control/input. This document is retained as an architectural decision record.
+
 Source material:
 - Issue: `#14` - `perf: redesign the tmux terminal pipeline to eliminate lag and hot-path inefficiencies`
 - Review: `https://github.com/michnovka/mux-pod/issues/14#issuecomment-4042622568`

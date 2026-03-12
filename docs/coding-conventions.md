@@ -1,90 +1,107 @@
-# MuxPod コーディング規約
+# MuxPod Coding Conventions
 
-## 命名規則
+## Naming
 
-| 対象 | 規則 | 例 |
-|------|------|-----|
-| コンポーネント | PascalCase | `TerminalView.tsx` |
-| hooks | camelCase + `use` prefix | `useTerminal.ts` |
-| stores | camelCase + `Store` suffix | `connectionStore.ts` |
-| services | camelCase | `client.ts` |
-| 型定義 | PascalCase | `TmuxSession` |
-| 定数 | SCREAMING_SNAKE_CASE | `DEFAULT_PORT` |
+| Target | Convention | Example |
+|--------|-----------|---------|
+| Classes / Widgets | PascalCase | `TerminalScreen`, `SshClient` |
+| Files | snake_case | `ssh_client.dart`, `tmux_parser.dart` |
+| Providers | camelCase + `Provider` suffix | `sshProvider`, `tmuxProvider` |
+| Services | PascalCase class | `SecureStorageService` |
+| Type definitions | PascalCase | `TmuxSession`, `SshState` |
+| Constants | camelCase or SCREAMING_SNAKE for top-level | `defaultPort` |
+| Private members | leading underscore | `_client`, `_handleData` |
 
-## 状態管理
+## State Management
 
-### Zustand Store
-- グローバル状態は `src/stores/` に配置
-- 永続化が必要なもの: `persist` middleware + AsyncStorage
-- センシティブデータ: `expo-secure-store`
+### Riverpod Providers
 
-```typescript
-// 例: src/stores/connectionStore.ts
-export const useConnectionStore = create<ConnectionStore>()(
-  persist(
-    (set, get) => ({ ... }),
-    {
-      name: 'muxpod-connections',
-      storage: createJSONStorage(() => AsyncStorage),
-      partialize: (state) => ({ connections: state.connections }),
-    }
-  )
-);
+- All providers live in `lib/providers/`
+- Use `Notifier` + `NotifierProvider` for stateful providers
+- State classes are immutable with `copyWith()` methods (no freezed/code-gen)
+- Use `ref.watch()` in build methods, `ref.read()` in callbacks
+- SharedPreferences is bootstrapped in `main.dart` and injected via `sharedPreferencesProvider.overrideWithValue()`
+
+```dart
+// Example: lib/providers/ssh_provider.dart
+class SshNotifier extends Notifier<SshState> {
+  @override
+  SshState build() {
+    ref.onDispose(() { /* cleanup */ });
+    return const SshState();
+  }
+}
+
+final sshProvider = NotifierProvider<SshNotifier, SshState>(() {
+  return SshNotifier();
+});
 ```
 
-## SSH/tmux操作
+## SSH / tmux Operations
 
-### SSHクライアント
-- `src/services/ssh/client.ts` の `SSHClient` クラスを使用
-- 接続管理は `connectionStore` と連携
+### SSH Client
 
-### tmuxコマンド
-- `src/services/tmux/commands.ts` の `TmuxCommands` クラスを使用
-- シェルエスケープは必ず `escape()` メソッドを使用（インジェクション防止）
+- Use `SshClient` from `lib/services/ssh/ssh_client.dart`
+- Connection management is coordinated through `sshProvider`
+- Three shell channels are maintained: control shell, input shell, and streaming shell
 
-```typescript
-// 正しい例
-await tmux.sendKeys(sessionName, windowIndex, paneIndex, keys);
+### tmux Commands
 
-// 悪い例（直接コマンド構築は禁止）
-await ssh.exec(`tmux send-keys -t ${sessionName} ${keys}`);
+- Use `TmuxCommands` from `lib/services/tmux/tmux_commands.dart` for building commands
+- Shell escaping must always go through the escape methods (injection prevention)
+- tmux binary path is auto-detected at connect time and resolved automatically
+
+```dart
+// Correct: use TmuxCommands to build escaped commands
+final cmd = TmuxCommands.sendKeys(sessionName, windowIndex, paneId, keys);
+await sshClient.execPersistentInput(cmd);
+
+// Wrong: never construct raw tmux command strings
+await sshClient.exec('tmux send-keys -t $sessionName $keys');
 ```
 
-## ターミナル表示
+## Terminal Display
 
-- ANSIエスケープシーケンス処理: `src/services/ansi/parser.ts`
-- 文字幅計算（日本語対応）: `src/services/terminal/charWidth.ts`
-- ポーリング間隔: 100ms（`useTerminal` hook内）
+- Terminal rendering: `xterm` package with `Terminal` widget
+- Terminal output transport: tmux control mode via `TmuxControlClient`
+- Input adapter: `XtermInputAdapter` translates mobile input to escape sequences
+- Font calculation: `FontCalculator` in `lib/services/terminal/font_calculator.dart`
 
-## TypeScript
+## Widget Structure
 
-### 型定義
-- 共通型は `src/types/` に配置
-- コンポーネント固有のPropsは同ファイル内で定義
+### File Organization
 
-### 厳格モード
-- `strict: true` を維持
-- `any` の使用は原則禁止（やむを得ない場合は `// eslint-disable-next-line` でコメント）
-
-## コンポーネント設計
-
-### ファイル構成
-```typescript
+```dart
 // 1. imports
-import { ... } from 'react';
-import { ... } from '@/components/ui';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-// 2. types
-interface Props { ... }
+// 2. widget class
+class MyScreen extends ConsumerStatefulWidget {
+  const MyScreen({super.key});
 
-// 3. component
-export function MyComponent({ ... }: Props) {
-  // hooks
-  // handlers
-  // render
+  @override
+  ConsumerState<MyScreen> createState() => _MyScreenState();
+}
+
+class _MyScreenState extends ConsumerState<MyScreen> {
+  // private state
+  // lifecycle methods
+  // build method
+  // helper methods (prefixed with _build for UI, _ for logic)
 }
 ```
 
-### Hooks
-- カスタムhooksは `src/hooks/` に配置
-- 1つのhookは1つの責務に集中
+### Screen Layout Pattern
+
+- Screens use `ConsumerStatefulWidget` or `ConsumerWidget`
+- App bar titles use `GoogleFonts.spaceGrotesk` with weight 700
+- Monospace text uses `GoogleFonts.jetBrainsMono`
+- Theme-aware colors check `Theme.of(context).brightness` and select from `DesignColors`
+
+## Testing
+
+- Tests mirror the `lib/` structure under `test/`
+- Provider tests use `ProviderContainer` with overrides
+- SSH tests mock `SshClient` via `sshClientFactoryProvider` override
+- Widget tests use `pumpWidget` with `ProviderScope`

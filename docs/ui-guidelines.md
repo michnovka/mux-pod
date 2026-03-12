@@ -1,82 +1,129 @@
-# MuxPod UI/UXガイドライン
+# MuxPod UI/UX Guidelines
 
-## カラーパレット
+## Color Palette
 
-Material Design 3 ダークテーマベース。
+Material Design 3 with dark theme as default. Light theme also supported.
 
-| 用途 | カラー | 説明 |
-|------|--------|------|
-| 背景 | `#1E1E1E` | メイン背景 |
-| サーフェス | `#2D3133` | カード、コンテナ |
-| プライマリ | `#00C0D1` | アクセント、ボタン、アクティブ状態 |
-| テキスト | `#FFFFFF` | 主要テキスト |
-| テキスト(サブ) | `#9E9E9E` | 補助テキスト |
-| エラー | `#CF6679` | エラー状態 |
-| 成功 | `#4CAF50` | 接続済み等 |
+### Dark Theme
 
-## デザイントークン
+| Usage | Color | Description |
+|-------|-------|-------------|
+| Background | `#0E0E11` | Main background |
+| Canvas | `#101116` | App bar, elevated surfaces |
+| Surface | `#1E1F27` | Cards, containers |
+| Input | `#0B0F13` | Text input fields |
+| Border | `#2A2B36` | Card/container borders |
+| Primary | `#00C0D1` | Accent, buttons, active state |
+| Text (primary) | `#FFFFFF` | Main text |
+| Text (secondary) | `#9CA3AF` | Supporting text |
+| Text (muted) | `#6B7280` | Disabled/hint text |
+| Error | `#EF4444` | Error state |
+| Success | `#22C55E` | Connected, etc. |
+| Warning | `#F59E0B` | Warning state |
 
-### 角丸
-- カード/コンテナ: `40px` (MD3スタイル)
-- ボタン: `20px`
-- インプット: `12px`
-- インジケーター(ピル): `10px`
+### Light Theme
 
-### スペーシング
+| Usage | Color | Description |
+|-------|-------|-------------|
+| Background | `#F9FAFB` | Main background |
+| Canvas | `#F3F4F6` | App bar, elevated surfaces |
+| Surface | `#FFFFFF` | Cards, containers |
+| Input | `#F9FAFB` | Text input fields |
+| Border | `#E5E7EB` | Card/container borders |
+| Text (primary) | `#111827` | Main text |
+| Text (secondary) | `#4B5563` | Supporting text |
+| Text (muted) | `#9CA3AF` | Disabled/hint text |
+
+All colors are defined in `lib/theme/design_colors.dart`. Themes are configured in `lib/theme/app_theme.dart`.
+
+## Design Tokens
+
+### Border Radius
+
+- Cards / containers: `12px`
+- Buttons: `12px`
+- Text inputs: `12px`
+- Dialog: `16px`
+- Bottom sheet: `20px` (top corners)
+- Dashboard center button: circle
+- Segmented buttons: `8px`
+
+### Spacing
+
 - xs: `4px`
 - sm: `8px`
 - md: `16px`
 - lg: `24px`
 - xl: `32px`
 
-## 画面構成
+## Typography
 
-### ボトムナビゲーション
+- **UI text**: Space Grotesk (`google_fonts`)
+- **Monospace text**: JetBrains Mono (`google_fonts`)
+- **Terminal (English)**: HackGenConsole (bundled asset) or UDEVGothicNF (bundled asset)
+- **Terminal (Japanese)**: HackGenConsole, UDEVGothicNF (both include Japanese glyphs)
 
-| アイコン | ラベル | 画面 |
-|----------|--------|------|
-| サーバー | Net | 接続一覧 |
-| ターミナル | Term | ターミナル表示 |
-| 鍵 | Keys | SSH鍵管理 |
-| 歯車 | Settings | 設定 |
+App bar titles: Space Grotesk, 24px, weight 700, letter-spacing -0.5.
 
-### 接続一覧 (Net)
-- 接続カードは展開可能
-- セッション一覧をツリー表示
-- Attached/Detached ステータスバッジ
-- "+ New Session" ボタン
+## Screen Layout
 
-### ターミナル (Term)
-- 上部: セッション/ウィンドウ/ペイン タブ
-- 中央: ターミナル出力
-- 下部: 特殊キーバー (ESC/TAB/CTRL/ALT)
-- 最下部: 入力欄 + cmdボタン
+### Bottom Navigation (5-tab)
 
-### 通知ルール設定
-- アクティブなルール一覧
-- ルール追加フォーム
-- 条件タイプ: TEXT/REGEX/IDLE/ANY
-- パターンテスト機能
+| Index | Icon | Label | Screen |
+|-------|------|-------|--------|
+| 0 | `dns` | Servers | Connection list |
+| 1 | `key` | Keys | SSH key management |
+| 2 | `terminal` | (center button) | Dashboard — recent sessions |
+| 3 | `notifications_outlined` | Notify | Alert monitoring (tmux window flags) |
+| 4 | `settings` | Settings | App settings |
 
-## フォント
+Dashboard (index 2) is the default tab and has a large protruding circular button in the center of the navigation bar.
 
-| 用途 | フォント |
-|------|----------|
-| ターミナル(英語) | JetBrainsMono, FiraCode |
-| ターミナル(日本語) | HackGen, PlemolJP |
-| UI | システムフォント |
+### Dashboard
 
-## 折りたたみデバイス対応
+- Recent sessions sorted by last access
+- One-tap reconnect to last window/pane
+- Session cards show connection name, host, window count, and last pane info
 
-- 左パネル: セッションツリー
-- 右パネル: ターミナル表示
-- 縦向き時: 通常のシングルカラム
+### Servers
 
-## アイコン
+- Expandable server cards with tmux session tree
+- Attached/Detached status badges
+- "+" FAB to add new connection
 
-- Material Icons または Lucide Icons を使用
-- 接続状態: 緑丸(接続中)、グレー丸(切断)、赤丸(エラー)
+### Terminal
 
-## ロゴ
+Full-screen terminal pushed on top of tab navigation:
+- Top: Session > Window > Pane breadcrumb navigation
+- Center: xterm-based terminal view with pinch zoom
+- Bottom: Special keys bar (ESC, TAB, CTRL, ALT, SHIFT, arrows, etc.)
+- Gesture: hold + swipe for arrow keys
 
-`docs/logo/logo.svg` を参照。
+### Alerts (Notify)
+
+- Monitors tmux window flags across all connections
+- Bell (red), Activity (orange), Silence (gray) indicators
+- Tap to jump directly to flagged window
+
+### Keys
+
+- Generate Ed25519 or RSA keys on-device
+- Import existing keys
+- One-tap copy public key
+
+### Settings
+
+- Terminal font family, size, and minimum font size
+- Theme selection (dark/light)
+- Keep screen on, haptic feedback toggles
+- Connection defaults
+
+## Foldable Device Support
+
+- Landscape / foldable: left panel for session tree, right panel for terminal
+- Portrait: standard single-column layout
+
+## Icons
+
+- Material Icons throughout
+- Connection status: green dot (connected), gray dot (disconnected), red dot (error)
