@@ -144,7 +144,7 @@ class _WindowTileState extends State<_WindowTile> {
   @override
   void initState() {
     super.initState();
-    _isExpanded = widget.window.active;
+    _isExpanded = widget.window.isCurrent;
   }
 
   @override
@@ -154,12 +154,12 @@ class _WindowTileState extends State<_WindowTile> {
       child: ExpansionTile(
         leading: Icon(
           Icons.tab,
-          color: widget.window.active
+          color: widget.window.isCurrent
               ? Theme.of(context).colorScheme.secondary
               : null,
         ),
         title: Text('${widget.window.index}: ${widget.window.name}'),
-        initiallyExpanded: widget.window.active,
+        initiallyExpanded: widget.window.isCurrent,
         onExpansionChanged: (expanded) {
           setState(() => _isExpanded = expanded);
         },

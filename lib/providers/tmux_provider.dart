@@ -114,7 +114,7 @@ class TmuxNotifier extends Notifier<TmuxState> {
   void setActiveSession(String sessionName) {
     // Automatically select the first active window and pane within the session
     final session = state.sessions.where((s) => s.name == sessionName).firstOrNull;
-    final activeWindow = session?.windows.where((w) => w.active).firstOrNull ?? session?.windows.firstOrNull;
+    final activeWindow = session?.windows.where((w) => w.isCurrent).firstOrNull ?? session?.windows.firstOrNull;
     final activePane = activeWindow?.panes.where((p) => p.active).firstOrNull ?? activeWindow?.panes.firstOrNull;
 
     state = state.copyWith(
