@@ -41,17 +41,20 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
   /// scrollUp/scrollDown in Buffer) leaves the same item in two slots;
   /// a subsequent `_adoptChild` or `_moveChild` then detaches the item via
   /// the stale slot, corrupting the live slot.
+  ///
+  /// The old slot is found by identity scan of the backing array rather than
+  /// by computing from [_absoluteStartIndex], because [trimStart] advances
+  /// [_startIndex] without updating [_absoluteStartIndex], making the
+  /// computed logical index stale.
   /// See: https://github.com/TerminalStudio/xterm.dart/issues/222
-  @pragma('vm:prefer-inline')
   void _adoptChild(int index, T child) {
     final cyclicIndex = _getCyclicIndex(index);
 
-    if (identical(child._owner, this) && child._absoluteIndex != null) {
-      final oldIndex = child._absoluteIndex! - _absoluteStartIndex;
-      if (oldIndex >= 0 && oldIndex < _length) {
-        final oldCyclicIndex = _getCyclicIndex(oldIndex);
-        if (oldCyclicIndex != cyclicIndex) {
-          _array[oldCyclicIndex] = null;
+    if (identical(child._owner, this)) {
+      for (var i = 0; i < _array.length; i++) {
+        if (i != cyclicIndex && identical(_array[i], child)) {
+          _array[i] = null;
+          break;
         }
       }
     }
