@@ -804,10 +804,9 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
         }
       }
 
-      // SSH connection test
+      // SSH connection test — reuse testHost/testPort captured above
+      // so the verifier's trust decision matches the actual connect target.
       final customTmuxPath = _tmuxPathController.text.trim();
-      final testHost = _hostController.text.trim();
-      final testPort = int.tryParse(_portController.text) ?? 22;
       await sshClient.connect(
         host: testHost,
         port: testPort,

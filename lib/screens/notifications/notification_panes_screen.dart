@@ -114,7 +114,37 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
                 hasScrollBody: false,
                 child: _buildEmptyState(isDark),
               )
-            else
+            else ...[
+              // Show partial error banner when some connections failed
+              if (alertState.error != null)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                    child: Material(
+                      color: DesignColors.error.withAlpha(25),
+                      borderRadius: BorderRadius.circular(8),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Row(
+                          children: [
+                            Icon(Icons.warning_amber_rounded,
+                                size: 18, color: DesignColors.error),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Some connections failed to refresh',
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: DesignColors.error,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
               SliverPadding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 sliver: SliverList(
@@ -134,6 +164,7 @@ class _NotificationPanesScreenState extends ConsumerState<NotificationPanesScree
                   ),
                 ),
               ),
+            ],
             const SliverToBoxAdapter(
               child: SizedBox(height: 80),
             ),
