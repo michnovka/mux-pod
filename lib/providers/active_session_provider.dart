@@ -147,8 +147,6 @@ class ActiveSessionsState {
 class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
   static const _storageKey = 'active_sessions';
   final Completer<void> _initialLoadCompleter = Completer<void>();
-  final List<void Function()> _deferredMutations = [];
-  bool _isFlushingDeferredMutations = false;
   SharedPreferences? _sharedPreferences;
 
   @override
@@ -204,37 +202,10 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
       if (!_initialLoadCompleter.isCompleted) {
         _initialLoadCompleter.complete();
       }
-      _flushDeferredMutations();
     }
   }
 
-  bool get _hasLoadedInitialState => _initialLoadCompleter.isCompleted;
-
-  void _runOrDeferMutation(void Function() mutation) {
-    if (_hasLoadedInitialState || _isFlushingDeferredMutations) {
-      mutation();
-      return;
-    }
-
-    _deferredMutations.add(mutation);
-  }
-
-  void _flushDeferredMutations() {
-    if (_isFlushingDeferredMutations || _deferredMutations.isEmpty) {
-      return;
-    }
-
-    _isFlushingDeferredMutations = true;
-    try {
-      final pending = List<void Function()>.from(_deferredMutations);
-      _deferredMutations.clear();
-      for (final mutation in pending) {
-        mutation();
-      }
-    } finally {
-      _isFlushingDeferredMutations = false;
-    }
-  }
+  Future<void> _waitForInitialLoad() => _initialLoadCompleter.future;
 
   /// Save session information to storage
   Future<void> _saveToStorage() async {
@@ -248,7 +219,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
   }
 
   /// Add or update a session
-  void addOrUpdateSession({
+  Future<void> addOrUpdateSession({
     required String connectionId,
     required String connectionName,
     required String host,
@@ -257,176 +228,170 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     bool isAttached = true,
     int? lastWindowIndex,
     String? lastPaneId,
-  }) {
-    _runOrDeferMutation(() {
-      final key = '$connectionId:$sessionName';
-      final existingIndex = state.sessions.indexWhere((s) => s.key == key);
+  }) async {
+    await _waitForInitialLoad();
+    final key = '$connectionId:$sessionName';
+    final existingIndex = state.sessions.indexWhere((s) => s.key == key);
 
-      final existingSession = existingIndex >= 0
-          ? state.sessions[existingIndex]
-          : null;
-      final now = DateTime.now();
+    final existingSession = existingIndex >= 0
+        ? state.sessions[existingIndex]
+        : null;
+    final now = DateTime.now();
 
-      final session = ActiveSession(
-        connectionId: connectionId,
-        connectionName: connectionName,
-        host: host,
-        sessionName: sessionName,
-        windowCount: windowCount,
-        connectedAt: existingSession?.connectedAt ?? now,
-        isAttached: isAttached,
-        lastWindowIndex: lastWindowIndex ?? existingSession?.lastWindowIndex,
-        lastPaneId: lastPaneId ?? existingSession?.lastPaneId,
-        lastAccessedAt: isAttached ? now : existingSession?.lastAccessedAt,
-      );
+    final session = ActiveSession(
+      connectionId: connectionId,
+      connectionName: connectionName,
+      host: host,
+      sessionName: sessionName,
+      windowCount: windowCount,
+      connectedAt: existingSession?.connectedAt ?? now,
+      isAttached: isAttached,
+      lastWindowIndex: lastWindowIndex ?? existingSession?.lastWindowIndex,
+      lastPaneId: lastPaneId ?? existingSession?.lastPaneId,
+      lastAccessedAt: isAttached ? now : existingSession?.lastAccessedAt,
+    );
 
-      final sessions = [...state.sessions];
-      if (existingIndex >= 0) {
-        sessions[existingIndex] = session;
-      } else {
-        sessions.add(session);
-      }
+    final sessions = [...state.sessions];
+    if (existingIndex >= 0) {
+      sessions[existingIndex] = session;
+    } else {
+      sessions.add(session);
+    }
 
-      state = state.copyWith(sessions: sessions);
-      _saveToStorage();
-    });
+    state = state.copyWith(sessions: sessions);
+    _saveToStorage();
   }
 
   /// Update the last opened pane information for a session
-  void updateLastPane({
+  Future<void> updateLastPane({
     required String connectionId,
     required String sessionName,
     required int windowIndex,
     required String paneId,
-  }) {
-    _runOrDeferMutation(() {
-      final key = '$connectionId:$sessionName';
-      final existingIndex = state.sessions.indexWhere((s) => s.key == key);
-      if (existingIndex < 0) return;
+  }) async {
+    await _waitForInitialLoad();
+    final key = '$connectionId:$sessionName';
+    final existingIndex = state.sessions.indexWhere((s) => s.key == key);
+    if (existingIndex < 0) return;
 
-      final sessions = [...state.sessions];
-      sessions[existingIndex] = sessions[existingIndex].copyWith(
-        lastWindowIndex: windowIndex,
-        lastPaneId: paneId,
-        lastAccessedAt: DateTime.now(),
-      );
+    final sessions = [...state.sessions];
+    sessions[existingIndex] = sessions[existingIndex].copyWith(
+      lastWindowIndex: windowIndex,
+      lastPaneId: paneId,
+      lastAccessedAt: DateTime.now(),
+    );
 
-      state = state.copyWith(sessions: sessions);
-      _saveToStorage();
-    });
+    state = state.copyWith(sessions: sessions);
+    _saveToStorage();
   }
 
   /// Update the last accessed time when a session is opened
-  void touchSession(String connectionId, String sessionName) {
-    _runOrDeferMutation(() {
-      final key = '$connectionId:$sessionName';
-      final existingIndex = state.sessions.indexWhere((s) => s.key == key);
-      if (existingIndex < 0) return;
+  Future<void> touchSession(String connectionId, String sessionName) async {
+    await _waitForInitialLoad();
+    final key = '$connectionId:$sessionName';
+    final existingIndex = state.sessions.indexWhere((s) => s.key == key);
+    if (existingIndex < 0) return;
 
-      final sessions = [...state.sessions];
-      sessions[existingIndex] = sessions[existingIndex].copyWith(
-        lastAccessedAt: DateTime.now(),
-      );
+    final sessions = [...state.sessions];
+    sessions[existingIndex] = sessions[existingIndex].copyWith(
+      lastAccessedAt: DateTime.now(),
+    );
 
-      state = state.copyWith(sessions: sessions);
-      _saveToStorage();
-    });
+    state = state.copyWith(sessions: sessions);
+    _saveToStorage();
   }
 
   /// Update the session list for a connection (from tmux session list)
   /// Preserves lastWindowIndex/lastPaneId/lastAccessedAt of existing sessions
-  void updateSessionsForConnection({
+  Future<void> updateSessionsForConnection({
     required String connectionId,
     required String connectionName,
     required String host,
     required List<TmuxSession> tmuxSessions,
-  }) {
-    _runOrDeferMutation(() {
-      // Save existing session information to a map
-      final existingMap = <String, ActiveSession>{};
-      for (final s in state.sessions.where(
-        (s) => s.connectionId == connectionId,
-      )) {
-        existingMap[s.sessionName] = s;
-      }
+  }) async {
+    await _waitForInitialLoad();
+    // Save existing session information to a map
+    final existingMap = <String, ActiveSession>{};
+    for (final s in state.sessions.where(
+      (s) => s.connectionId == connectionId,
+    )) {
+      existingMap[s.sessionName] = s;
+    }
 
-      // Preserve sessions from other connections
-      final otherSessions = state.sessions
-          .where((s) => s.connectionId != connectionId)
-          .toList();
+    // Preserve sessions from other connections
+    final otherSessions = state.sessions
+        .where((s) => s.connectionId != connectionId)
+        .toList();
 
-      final newSessions = tmuxSessions.map((ts) {
-        final existing = existingMap[ts.name];
-        return ActiveSession(
-          connectionId: connectionId,
-          connectionName: connectionName,
-          host: host,
-          sessionName: ts.name,
-          windowCount: ts.windowCount,
-          connectedAt: existing?.connectedAt ?? DateTime.now(),
-          isAttached: ts.attached,
-          lastWindowIndex: existing?.lastWindowIndex,
-          lastPaneId: existing?.lastPaneId,
-          lastAccessedAt: existing?.lastAccessedAt,
-        );
-      }).toList();
+    final newSessions = tmuxSessions.map((ts) {
+      final existing = existingMap[ts.name];
+      return ActiveSession(
+        connectionId: connectionId,
+        connectionName: connectionName,
+        host: host,
+        sessionName: ts.name,
+        windowCount: ts.windowCount,
+        connectedAt: existing?.connectedAt ?? DateTime.now(),
+        isAttached: ts.attached,
+        lastWindowIndex: existing?.lastWindowIndex,
+        lastPaneId: existing?.lastPaneId,
+        lastAccessedAt: existing?.lastAccessedAt,
+      );
+    }).toList();
 
-      state = state.copyWith(sessions: [...otherSessions, ...newSessions]);
-      _saveToStorage();
-    });
+    state = state.copyWith(sessions: [...otherSessions, ...newSessions]);
+    _saveToStorage();
   }
 
   /// Set the current session
-  void setCurrentSession(String connectionId, String sessionName) {
-    _runOrDeferMutation(() {
-      state = state.copyWith(currentSessionKey: '$connectionId:$sessionName');
-    });
+  Future<void> setCurrentSession(
+    String connectionId,
+    String sessionName,
+  ) async {
+    await _waitForInitialLoad();
+    state = state.copyWith(currentSessionKey: '$connectionId:$sessionName');
   }
 
   /// Clear the current session
-  void clearCurrentSession() {
-    _runOrDeferMutation(() {
-      state = state.copyWith(clearCurrentSession: true);
-    });
+  Future<void> clearCurrentSession() async {
+    await _waitForInitialLoad();
+    state = state.copyWith(clearCurrentSession: true);
   }
 
   /// Explicitly close (delete) a session
-  void closeSession(String connectionId, String sessionName) {
-    _runOrDeferMutation(() {
-      final sessions = state.sessions
-          .where(
-            (s) =>
-                !(s.connectionId == connectionId &&
-                    s.sessionName == sessionName),
-          )
-          .toList();
-      state = state.copyWith(sessions: sessions);
-      _saveToStorage();
-    });
+  Future<void> closeSession(String connectionId, String sessionName) async {
+    await _waitForInitialLoad();
+    final sessions = state.sessions
+        .where(
+          (s) =>
+              !(s.connectionId == connectionId &&
+                  s.sessionName == sessionName),
+        )
+        .toList();
+    state = state.copyWith(sessions: sessions);
+    _saveToStorage();
   }
 
   /// Remove a session (alias for closeSession)
-  void removeSession(String connectionId, String sessionName) {
-    closeSession(connectionId, sessionName);
+  Future<void> removeSession(String connectionId, String sessionName) {
+    return closeSession(connectionId, sessionName);
   }
 
   /// Remove all sessions for a connection
-  void removeSessionsForConnection(String connectionId) {
-    _runOrDeferMutation(() {
-      final sessions = state.sessions
-          .where((s) => s.connectionId != connectionId)
-          .toList();
-      state = state.copyWith(sessions: sessions);
-      _saveToStorage();
-    });
+  Future<void> removeSessionsForConnection(String connectionId) async {
+    await _waitForInitialLoad();
+    final sessions = state.sessions
+        .where((s) => s.connectionId != connectionId)
+        .toList();
+    state = state.copyWith(sessions: sessions);
+    _saveToStorage();
   }
 
   /// Clear all sessions
-  void clear() {
-    _runOrDeferMutation(() {
-      state = const ActiveSessionsState();
-      _saveToStorage();
-    });
+  Future<void> clear() async {
+    await _waitForInitialLoad();
+    state = const ActiveSessionsState();
+    _saveToStorage();
   }
 }
 
