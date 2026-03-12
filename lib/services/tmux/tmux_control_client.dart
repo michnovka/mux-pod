@@ -170,20 +170,25 @@ class TmuxControlClient {
   }
 
   void _handleTextChunk(String chunk) {
-    _pendingLine += chunk;
+    // Process lines by scanning for newlines with an offset rather than
+    // repeatedly slicing _pendingLine (which allocates a new String for the
+    // remainder on every line).
+    final text = _pendingLine.isEmpty ? chunk : '$_pendingLine$chunk';
+    var start = 0;
 
     while (true) {
-      final newlineIndex = _pendingLine.indexOf('\n');
+      final newlineIndex = text.indexOf('\n', start);
       if (newlineIndex == -1) {
+        _pendingLine = start == 0 ? text : text.substring(start);
         return;
       }
 
-      var line = _pendingLine.substring(0, newlineIndex);
-      _pendingLine = _pendingLine.substring(newlineIndex + 1);
-      if (line.endsWith('\r')) {
-        line = line.substring(0, line.length - 1);
+      var end = newlineIndex;
+      if (end > start && text.codeUnitAt(end - 1) == 0x0D) {
+        end--;
       }
-      _handleLine(line);
+      _handleLine(text.substring(start, end));
+      start = newlineIndex + 1;
     }
   }
 
@@ -353,27 +358,69 @@ class TmuxControlClient {
   }
 
   static String _unescapeControlPayload(String escaped) {
-    final bytes = <int>[];
-    for (var index = 0; index < escaped.length; index++) {
-      final char = escaped[index];
-      if (char == r'\' &&
-          index + 3 < escaped.length &&
+    // Fast path: no backslash means nothing to unescape.
+    if (!escaped.contains(r'\')) return escaped;
+
+    final length = escaped.length;
+    // Pre-allocate output buffer. Each code unit can produce up to 3 UTF-8
+    // bytes (BMP range), so length * 3 is a safe upper bound. Octal escapes
+    // compress (4 chars → 1 byte), so the actual output is usually much
+    // smaller. The buffer is short-lived and GC'd after utf8.decode.
+    var bytes = Uint8List(length * 3);
+    var writePos = 0;
+
+    for (var index = 0; index < length; index++) {
+      final cu = escaped.codeUnitAt(index);
+
+      // Check for octal escape: backslash followed by exactly 3 octal digits.
+      if (cu == 0x5C && // '\'
+          index + 3 < length &&
           _isOctalDigit(escaped.codeUnitAt(index + 1)) &&
           _isOctalDigit(escaped.codeUnitAt(index + 2)) &&
           _isOctalDigit(escaped.codeUnitAt(index + 3))) {
-        final value = int.parse(
-          escaped.substring(index + 1, index + 4),
-          radix: 8,
-        );
-        bytes.add(value);
+        bytes[writePos++] = ((escaped.codeUnitAt(index + 1) - 0x30) << 6) |
+            ((escaped.codeUnitAt(index + 2) - 0x30) << 3) |
+            (escaped.codeUnitAt(index + 3) - 0x30);
         index += 3;
         continue;
       }
 
-      bytes.addAll(utf8.encode(char));
+      // ASCII: copy byte directly (common case for terminal output).
+      if (cu < 0x80) {
+        bytes[writePos++] = cu;
+      } else {
+        // Non-ASCII code unit — encode to UTF-8 manually.
+        // This is rare since tmux octal-escapes non-ASCII bytes.
+        if (cu < 0x800) {
+          bytes[writePos++] = 0xC0 | (cu >> 6);
+          bytes[writePos++] = 0x80 | (cu & 0x3F);
+        } else if (cu >= 0xD800 && cu <= 0xDBFF && index + 1 < length) {
+          // Surrogate pair
+          final lo = escaped.codeUnitAt(index + 1);
+          if (lo >= 0xDC00 && lo <= 0xDFFF) {
+            final codePoint = 0x10000 + ((cu - 0xD800) << 10) + (lo - 0xDC00);
+            bytes[writePos++] = 0xF0 | (codePoint >> 18);
+            bytes[writePos++] = 0x80 | ((codePoint >> 12) & 0x3F);
+            bytes[writePos++] = 0x80 | ((codePoint >> 6) & 0x3F);
+            bytes[writePos++] = 0x80 | (codePoint & 0x3F);
+            index++;
+          } else {
+            bytes[writePos++] = 0xE0 | (cu >> 12);
+            bytes[writePos++] = 0x80 | ((cu >> 6) & 0x3F);
+            bytes[writePos++] = 0x80 | (cu & 0x3F);
+          }
+        } else {
+          bytes[writePos++] = 0xE0 | (cu >> 12);
+          bytes[writePos++] = 0x80 | ((cu >> 6) & 0x3F);
+          bytes[writePos++] = 0x80 | (cu & 0x3F);
+        }
+      }
     }
 
-    return utf8.decode(bytes, allowMalformed: true);
+    return utf8.decode(
+      bytes.buffer.asUint8List(0, writePos),
+      allowMalformed: true,
+    );
   }
 
   static bool _isOctalDigit(int codeUnit) =>
