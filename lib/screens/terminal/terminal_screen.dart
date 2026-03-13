@@ -14,7 +14,8 @@ import '../../providers/tmux_provider.dart';
 import '../../services/keychain/secure_storage.dart';
 import '../../services/network/network_monitor.dart';
 import '../../services/ssh/input_queue.dart';
-import '../../services/ssh/ssh_client.dart' show SshClient, SshConnectOptions, SshHostKeyError;
+import '../../services/ssh/ssh_client.dart'
+    show SshClient, SshConnectOptions, SshHostKeyError;
 import '../../services/terminal/bounded_text_buffer.dart';
 import '../../services/terminal/terminal_output_normalizer.dart';
 import '../../services/terminal/terminal_snapshot.dart';
@@ -51,6 +52,41 @@ class _PendingKeyboardModifiers {
   const _PendingKeyboardModifiers({required this.ctrl, required this.alt});
 
   bool get isEmpty => !ctrl && !alt;
+}
+
+class _PaneRenderCacheEntry {
+  final Terminal terminal;
+  final TerminalSnapshotFrame frame;
+  final PaneTerminalViewportState viewportState;
+
+  const _PaneRenderCacheEntry({
+    required this.terminal,
+    required this.frame,
+    required this.viewportState,
+  });
+}
+
+class _TmuxTargetSelection {
+  final String? sessionName;
+  final int? windowIndex;
+  final int? paneIndex;
+  final String? paneId;
+
+  const _TmuxTargetSelection({
+    required this.sessionName,
+    required this.windowIndex,
+    required this.paneIndex,
+    required this.paneId,
+  });
+
+  factory _TmuxTargetSelection.fromState(TmuxState state) {
+    return _TmuxTargetSelection(
+      sessionName: state.activeSessionName,
+      windowIndex: state.activeWindowIndex,
+      paneIndex: state.activePaneIndex,
+      paneId: state.activePaneId,
+    );
+  }
 }
 
 /// Terminal screen (compliant with HTML design specification)
@@ -96,10 +132,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   late Terminal _terminal;
   final _terminalController = TerminalController();
   int _terminalScrollbackLines = AppSettings().scrollbackLines;
+  final Map<String, _PaneRenderCacheEntry> _paneRenderCache = {};
 
   // Connection state (managed locally)
   bool _isConnecting = false;
   bool _isSwitchingPane = false;
+  bool _showSwitchingOverlay = false;
   String? _connectionError;
   SshState _sshState = const SshState();
 
@@ -362,13 +400,153 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   void _reconfigureTerminal(AppSettings settings) {
     if (_terminalScrollbackLines == settings.scrollbackLines) {
       _terminal.onOutput = _handleTerminalOutput;
+      for (final entry in _paneRenderCache.values) {
+        entry.terminal.onOutput = _handleTerminalOutput;
+      }
       return;
     }
     _terminalScrollbackLines = settings.scrollbackLines;
+    _paneRenderCache.clear();
     _resetTerminalEmulator();
     if (mounted) {
       setState(() {});
     }
+  }
+
+  TerminalSnapshotFrame _cacheFrameForTerminal() {
+    final buffer = _terminal.buffer;
+    return _viewNotifier.value.copyWith(
+      paneWidth: _terminal.viewWidth,
+      paneHeight: _terminal.viewHeight,
+      alternateScreen: _terminal.isUsingAltBuffer,
+      cursorX: buffer.cursorX,
+      cursorY: buffer.cursorY,
+      insertMode: _terminal.insertMode,
+      cursorKeysMode: _terminal.cursorKeysMode,
+      appKeypadMode: _terminal.appKeypadMode,
+      autoWrapMode: _terminal.autoWrapMode,
+      cursorVisible: _terminal.cursorVisibleMode,
+      originMode: _terminal.originMode,
+      scrollRegionUpper: buffer.marginTop,
+      scrollRegionLower: buffer.marginBottom,
+    );
+  }
+
+  void _cachePaneRenderState({
+    String? paneId,
+    PaneTerminalViewportState? viewportState,
+  }) {
+    final resolvedPaneId = paneId ?? ref.read(tmuxProvider).activePaneId;
+    if (resolvedPaneId == null) {
+      return;
+    }
+
+    _paneRenderCache[resolvedPaneId] = _PaneRenderCacheEntry(
+      terminal: _terminal..onOutput = _handleTerminalOutput,
+      frame: _cacheFrameForTerminal(),
+      viewportState:
+          viewportState ??
+          _paneTerminalViewKey.currentState?.captureViewportState() ??
+          const PaneTerminalViewportState(),
+    );
+  }
+
+  bool _restorePaneRenderState(String? paneId) {
+    if (paneId == null) {
+      return false;
+    }
+
+    final cacheEntry = _paneRenderCache[paneId];
+    if (cacheEntry == null) {
+      return false;
+    }
+
+    _terminalController.clearSelection();
+    cacheEntry.terminal.onOutput = _handleTerminalOutput;
+    _terminal = cacheEntry.terminal;
+    _pendingViewData = cacheEntry.frame;
+    _viewNotifier.value = cacheEntry.frame;
+    _hasInitialScrolled = true;
+    _paneTerminalViewKey.currentState?.restoreViewportState(
+      cacheEntry.viewportState,
+    );
+    return true;
+  }
+
+  void _showPlaceholderPane(TmuxPane? pane) {
+    _terminalController.clearSelection();
+    _resetTerminalEmulator();
+    final emptyView = _viewNotifier.value.copyWith(
+      content: '',
+      mainContent: '',
+      alternateScreen: false,
+      paneWidth: pane?.width ?? _viewNotifier.value.paneWidth,
+      paneHeight: pane?.height ?? _viewNotifier.value.paneHeight,
+      cursorX: 0,
+      cursorY: 0,
+      scrollRegionUpper: null,
+      scrollRegionLower: null,
+    );
+    _pendingViewData = emptyView;
+    _viewNotifier.value = emptyView;
+    _hasInitialScrolled = false;
+  }
+
+  bool _showActivePaneFromCacheOrPlaceholder() {
+    final tmuxState = ref.read(tmuxProvider);
+    final activePane = tmuxState.activePane;
+    final restored = _restorePaneRenderState(activePane?.id);
+    if (!restored) {
+      _showPlaceholderPane(activePane);
+    }
+
+    if (activePane != null) {
+      ref.read(terminalDisplayProvider.notifier).updatePane(activePane);
+    }
+
+    return restored;
+  }
+
+  void _restoreLocalSelection(_TmuxTargetSelection selection) {
+    ref
+        .read(tmuxProvider.notifier)
+        .setActive(
+          sessionName: selection.sessionName,
+          windowIndex: selection.windowIndex,
+          paneIndex: selection.paneIndex,
+          paneId: selection.paneId,
+        );
+    _showActivePaneFromCacheOrPlaceholder();
+  }
+
+  void _persistActivePaneSelection(String paneId) {
+    final tmuxState = ref.read(tmuxProvider);
+    final sessionName = tmuxState.activeSessionName;
+    final windowIndex = tmuxState.activeWindowIndex;
+    if (sessionName == null || windowIndex == null) {
+      return;
+    }
+
+    ref
+        .read(activeSessionsProvider.notifier)
+        .updateLastPane(
+          connectionId: widget.connectionId,
+          sessionName: sessionName,
+          windowIndex: windowIndex,
+          paneId: paneId,
+        );
+  }
+
+  void _prunePaneRenderCache() {
+    final validPaneIds = <String>{};
+    for (final session in ref.read(tmuxProvider).sessions) {
+      for (final window in session.windows) {
+        for (final pane in window.panes) {
+          validPaneIds.add(pane.id);
+        }
+      }
+    }
+    _paneRenderCache.removeWhere((paneId, _) => !validPaneIds.contains(paneId));
   }
 
   /// Connect via SSH and set up tmux session
@@ -550,6 +728,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       final output = await sshClient.execPersistent(cmd);
       if (!mounted || _isDisposed) return;
       ref.read(tmuxProvider.notifier).parseAndUpdateFullTree(output);
+      _prunePaneRenderCache();
       if (syncActive) {
         _syncActiveTmuxStateFromTree();
       }
@@ -1206,6 +1385,15 @@ $metadataCommand
         !_hasInitialScrolled;
     _applyTerminalFrame(_pendingViewData);
     _viewNotifier.value = _pendingViewData;
+    final activePaneId = ref.read(tmuxProvider).activePaneId;
+    if (activePaneId != null) {
+      _cachePaneRenderState(
+        paneId: activePaneId,
+        viewportState:
+            _paneTerminalViewKey.currentState?.captureViewportState() ??
+            const PaneTerminalViewportState(),
+      );
+    }
     if (_terminalMode == TerminalMode.normal && shouldAutoScroll) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
     }
@@ -1340,8 +1528,9 @@ $metadataCommand
     // SpecialKeysBar).  If maxScrollExtent is within this budget the content
     // would have fit without the keyboard, so we suppress.
     _terminalScrollController.suppressScrollToMax = keyboardVisible;
-    _terminalScrollController.viewportShrinkBudget =
-        keyboardVisible ? keyboardInset + 120 : 0;
+    _terminalScrollController.viewportShrinkBudget = keyboardVisible
+        ? keyboardInset + 120
+        : 0;
 
     return Scaffold(
       key: _scaffoldKey,
@@ -1433,11 +1622,23 @@ $metadataCommand
                 ),
             ],
           ),
-          // Loading overlay
+          // Loading overlay. During cached pane restores we keep the terminal
+          // visible and only use a transparent barrier so input cannot race the
+          // in-flight remote pane/window/session switch.
           if (_isConnecting || _isSwitchingPane || sshState.isConnecting)
             Container(
-              color: isDark ? Colors.black54 : Colors.white70,
-              child: const Center(child: CircularProgressIndicator()),
+              color:
+                  (_isConnecting ||
+                      sshState.isConnecting ||
+                      _showSwitchingOverlay)
+                  ? (isDark ? Colors.black54 : Colors.white70)
+                  : Colors.transparent,
+              child:
+                  (_isConnecting ||
+                      sshState.isConnecting ||
+                      _showSwitchingOverlay)
+                  ? const Center(child: CircularProgressIndicator())
+                  : null,
             ),
           // Error overlay
           if (_connectionError != null || sshState.hasError)
@@ -1612,114 +1813,179 @@ $metadataCommand
   /// Select session
   Future<void> _selectSession(String sessionName) async {
     final sshClient = ref.read(sshProvider.notifier).client;
-    if (sshClient == null) return;
+    if (sshClient == null || _isSwitchingPane) return;
 
-    setState(() => _isSwitchingPane = true);
-
-    final previousPaneId = ref.read(tmuxProvider).activePaneId;
-    await _refreshSessionTree();
-    // Update active session in tmux_provider
-    ref.read(tmuxProvider.notifier).setActiveSession(sessionName);
-
-    final nextPane = ref.read(tmuxProvider).activePane;
-    if (nextPane == null) {
-      await _stopControlClient(resetRestartState: true);
-      final emptyView = _viewNotifier.value.copyWith(
-        content: '',
-        mainContent: '',
-        alternateScreen: false,
-      );
-      _applyTerminalFrame(emptyView);
-      _viewNotifier.value = emptyView;
-      _hasInitialScrolled = false;
-      if (mounted) setState(() => _isSwitchingPane = false);
+    final previousSelection = _TmuxTargetSelection.fromState(
+      ref.read(tmuxProvider),
+    );
+    if (previousSelection.sessionName == sessionName) {
       return;
     }
 
-    _hasInitialScrolled = false;
+    _cachePaneRenderState(paneId: previousSelection.paneId);
+    ref.read(tmuxProvider.notifier).setActiveSession(sessionName);
+
+    final nextPane = ref.read(tmuxProvider).activePane;
+    final restoredFromCache = _showActivePaneFromCacheOrPlaceholder();
+    setState(() {
+      _isSwitchingPane = true;
+      _showSwitchingOverlay = !restoredFromCache;
+    });
+
+    if (nextPane == null) {
+      await _stopControlClient(resetRestartState: true);
+      if (mounted) {
+        setState(() {
+          _isSwitchingPane = false;
+          _showSwitchingOverlay = false;
+        });
+      }
+      return;
+    }
+
+    var switchConfirmed = false;
     try {
-      if (previousPaneId != null && previousPaneId != nextPane.id) {
+      if (previousSelection.paneId != null &&
+          previousSelection.paneId != nextPane.id) {
         await sshClient.execPersistentInput(
-          TmuxCommands.sendKeys(previousPaneId, '\x1b[O', literal: true),
+          TmuxCommands.sendKeys(
+            previousSelection.paneId!,
+            '\x1b[O',
+            literal: true,
+          ),
         );
       }
       await _restartTerminalStream(
         restartControlClient: true,
         refreshTree: false,
       );
+      switchConfirmed = true;
       await sshClient.execPersistentInput(
         TmuxCommands.sendKeys(nextPane.id, '\x1b[I', literal: true),
       );
     } catch (_) {
-      // continue to clear flag
+      if (!switchConfirmed) {
+        _restoreLocalSelection(previousSelection);
+      }
     } finally {
-      if (mounted) setState(() => _isSwitchingPane = false);
+      if (switchConfirmed) {
+        _persistActivePaneSelection(nextPane.id);
+      }
+      if (mounted) {
+        setState(() {
+          _isSwitchingPane = false;
+          _showSwitchingOverlay = false;
+        });
+      }
     }
   }
 
   /// Select window
   Future<void> _selectWindow(String sessionName, int windowIndex) async {
     final sshClient = ref.read(sshProvider.notifier).client;
-    if (sshClient == null || !sshClient.isConnected) return;
+    if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
-    setState(() => _isSwitchingPane = true);
+    final previousSelection = _TmuxTargetSelection.fromState(
+      ref.read(tmuxProvider),
+    );
+    if (previousSelection.sessionName == sessionName &&
+        previousSelection.windowIndex == windowIndex) {
+      return;
+    }
 
-    // Also switch session if it differs
-    final currentSession = ref.read(tmuxProvider).activeSessionName;
+    _cachePaneRenderState(paneId: previousSelection.paneId);
+    final currentSession = previousSelection.sessionName;
     if (currentSession != sessionName) {
       ref.read(tmuxProvider.notifier).setActiveSession(sessionName);
     }
-
-    try {
-      await sshClient.execPersistent(
-        TmuxCommands.selectWindow(sessionName, windowIndex),
-      );
-      await _refreshSessionTree(syncActive: true);
-    } catch (_) {
-      if (mounted) setState(() => _isSwitchingPane = false);
-      return;
-    }
-    if (!mounted || _isDisposed) return;
-
-    // Update active window in tmux_provider
     ref.read(tmuxProvider.notifier).setActiveWindow(windowIndex);
 
     final activePane = ref.read(tmuxProvider).activePane;
+    final restoredFromCache = _showActivePaneFromCacheOrPlaceholder();
+    setState(() {
+      _isSwitchingPane = true;
+      _showSwitchingOverlay = !restoredFromCache;
+    });
+
     if (activePane == null) {
-      final emptyView = _viewNotifier.value.copyWith(
-        content: '',
-        mainContent: '',
-        alternateScreen: false,
-      );
-      _applyTerminalFrame(emptyView);
-      _viewNotifier.value = emptyView;
-      _hasInitialScrolled = false;
-      if (mounted) setState(() => _isSwitchingPane = false);
+      if (mounted) {
+        setState(() {
+          _isSwitchingPane = false;
+          _showSwitchingOverlay = false;
+        });
+      }
       return;
     }
 
-    _hasInitialScrolled = false;
+    var remoteSelectionChanged = false;
     try {
-      await _restartTerminalStream(refreshTree: false);
+      if (previousSelection.paneId != null &&
+          previousSelection.paneId != activePane.id) {
+        await sshClient.execPersistentInput(
+          TmuxCommands.sendKeys(
+            previousSelection.paneId!,
+            '\x1b[O',
+            literal: true,
+          ),
+        );
+      }
+      await sshClient.execPersistent(
+        TmuxCommands.selectWindow(sessionName, windowIndex),
+      );
+      remoteSelectionChanged = true;
+      await _restartTerminalStream(
+        restartControlClient: currentSession != sessionName,
+        refreshTree: false,
+      );
       await sshClient.execPersistentInput(
         TmuxCommands.sendKeys(activePane.id, '\x1b[I', literal: true),
       );
     } catch (_) {
-      // continue to clear flag
+      if (!remoteSelectionChanged) {
+        _restoreLocalSelection(previousSelection);
+      }
     } finally {
-      if (mounted) setState(() => _isSwitchingPane = false);
+      if (remoteSelectionChanged) {
+        _persistActivePaneSelection(activePane.id);
+      }
+      if (mounted) {
+        setState(() {
+          _isSwitchingPane = false;
+          _showSwitchingOverlay = false;
+        });
+      }
     }
   }
 
   /// Select pane
   Future<void> _selectPane(String paneId) async {
     final sshClient = ref.read(sshProvider.notifier).client;
-    if (sshClient == null || !sshClient.isConnected) return;
+    if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
-    setState(() => _isSwitchingPane = true);
+    final previousSelection = _TmuxTargetSelection.fromState(
+      ref.read(tmuxProvider),
+    );
+    final oldPaneId = previousSelection.paneId;
+    if (oldPaneId == paneId) {
+      return;
+    }
 
-    final oldPaneId = ref.read(tmuxProvider).activePaneId;
+    _cachePaneRenderState(paneId: oldPaneId);
+    ref.read(tmuxProvider.notifier).setActivePane(paneId);
 
+    final activePane = ref.read(tmuxProvider).activePane;
+    if (activePane == null) {
+      _restoreLocalSelection(previousSelection);
+      return;
+    }
+
+    final restoredFromCache = _showActivePaneFromCacheOrPlaceholder();
+    setState(() {
+      _isSwitchingPane = true;
+      _showSwitchingOverlay = !restoredFromCache;
+    });
+
+    var remoteSelectionChanged = false;
     try {
       // Send focus-out to the previous pane
       if (oldPaneId != null && oldPaneId != paneId) {
@@ -1729,51 +1995,28 @@ $metadataCommand
       }
 
       await sshClient.execPersistent(TmuxCommands.selectPane(paneId));
-      await _refreshSessionTree(syncActive: true);
+      remoteSelectionChanged = true;
+      await _restartTerminalStream(refreshTree: false);
 
       // Send focus-in to the new pane (so apps like Claude Code can detect focus)
       await sshClient.execPersistentInput(
         TmuxCommands.sendKeys(paneId, '\x1b[I', literal: true),
       );
     } catch (_) {
-      if (mounted) setState(() => _isSwitchingPane = false);
-      return;
-    }
-    if (!mounted || _isDisposed) return;
-
-    // Update active pane in tmux_provider
-    ref.read(tmuxProvider.notifier).setActivePane(paneId);
-
-    // Notify TerminalDisplayProvider of pane info (for font size calculation)
-    final activePane = ref.read(tmuxProvider).activePane;
-    final tmuxState = ref.read(tmuxProvider);
-    if (activePane != null) {
-      ref.read(terminalDisplayProvider.notifier).updatePane(activePane);
-      _viewNotifier.value = _viewNotifier.value.copyWith(
-        paneWidth: activePane.width,
-        paneHeight: activePane.height,
-        content: '',
-        mainContent: '',
-        alternateScreen: false,
-      );
-      _hasInitialScrolled = false;
-      await _restartTerminalStream(refreshTree: false);
-
-      // Save session info (for restoration)
-      final sessionName = tmuxState.activeSessionName;
-      final windowIndex = tmuxState.activeWindowIndex;
-      if (sessionName != null && windowIndex != null) {
-        ref
-            .read(activeSessionsProvider.notifier)
-            .updateLastPane(
-              connectionId: widget.connectionId,
-              sessionName: sessionName,
-              windowIndex: windowIndex,
-              paneId: paneId,
-            );
+      if (!remoteSelectionChanged) {
+        _restoreLocalSelection(previousSelection);
+      }
+    } finally {
+      if (remoteSelectionChanged) {
+        _persistActivePaneSelection(paneId);
+      }
+      if (mounted) {
+        setState(() {
+          _isSwitchingPane = false;
+          _showSwitchingOverlay = false;
+        });
       }
     }
-    if (mounted) setState(() => _isSwitchingPane = false);
   }
 
   /// Error overlay

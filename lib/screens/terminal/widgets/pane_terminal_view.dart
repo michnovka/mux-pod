@@ -15,6 +15,21 @@ import '../../../theme/design_colors.dart';
 /// Terminal interaction mode.
 enum PaneTerminalMode { normal, select }
 
+@immutable
+class PaneTerminalViewportState {
+  final bool followBottom;
+  final double verticalDistanceFromBottom;
+  final double horizontalOffset;
+  final double zoomScale;
+
+  const PaneTerminalViewportState({
+    this.followBottom = true,
+    this.verticalDistanceFromBottom = 0,
+    this.horizontalOffset = 0,
+    this.zoomScale = 1.0,
+  });
+}
+
 /// xterm-backed pane renderer that preserves the app's single-pane UX.
 class PaneTerminalView extends ConsumerStatefulWidget {
   final Terminal terminal;
@@ -134,6 +149,57 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     _snapToBottom();
   }
 
+  PaneTerminalViewportState captureViewportState() {
+    final verticalPosition = _verticalScrollController.hasClients
+        ? _verticalScrollController.position
+        : null;
+    final horizontalPosition = _horizontalScrollController.hasClients
+        ? _horizontalScrollController.position
+        : null;
+
+    return PaneTerminalViewportState(
+      followBottom: _followBottom,
+      verticalDistanceFromBottom: verticalPosition == null
+          ? 0
+          : (verticalPosition.maxScrollExtent - verticalPosition.pixels).clamp(
+              0.0,
+              double.infinity,
+            ),
+      horizontalOffset: horizontalPosition?.pixels ?? 0,
+      zoomScale: _currentScale,
+    );
+  }
+
+  void restoreViewportState(PaneTerminalViewportState state) {
+    final scaleChanged = (_currentScale - state.zoomScale).abs() > 0.001;
+    final followBottomChanged = _followBottom != state.followBottom;
+    _isUserScrollInProgress = false;
+    _baseScale = state.zoomScale;
+
+    if (scaleChanged || followBottomChanged) {
+      setState(() {
+        _followBottom = state.followBottom;
+        if (scaleChanged) {
+          _currentScale = state.zoomScale;
+        }
+      });
+    } else {
+      _followBottom = state.followBottom;
+    }
+
+    if (scaleChanged) {
+      widget.onZoomChanged?.call(state.zoomScale);
+    }
+
+    if (state.followBottom) {
+      scrollToBottom();
+      _restoreHorizontalOffset(state.horizontalOffset, remainingAttempts: 4);
+      return;
+    }
+
+    _restoreViewportOffsets(state, remainingAttempts: 4);
+  }
+
   void _snapToBottom([int remainingAttempts = 3]) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_verticalScrollController.hasClients) {
@@ -154,6 +220,83 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         _snapToBottom(remainingAttempts - 1);
       }
     });
+  }
+
+  void _restoreViewportOffsets(
+    PaneTerminalViewportState state, {
+    required int remainingAttempts,
+  }) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+
+      var needsRetry = false;
+
+      if (_verticalScrollController.hasClients) {
+        final position = _verticalScrollController.position;
+        final target =
+            (position.maxScrollExtent - state.verticalDistanceFromBottom).clamp(
+              position.minScrollExtent,
+              position.maxScrollExtent,
+            );
+        if ((position.pixels - target).abs() > 0.5) {
+          position.jumpTo(target);
+        }
+        needsRetry = needsRetry || (position.pixels - target).abs() > 0.5;
+      } else {
+        needsRetry = true;
+      }
+
+      needsRetry =
+          _restoreHorizontalOffset(
+            state.horizontalOffset,
+            remainingAttempts: remainingAttempts,
+          ) ||
+          needsRetry;
+
+      if (remainingAttempts > 0 && needsRetry) {
+        _restoreViewportOffsets(
+          state,
+          remainingAttempts: remainingAttempts - 1,
+        );
+      }
+    });
+  }
+
+  bool _restoreHorizontalOffset(
+    double offset, {
+    required int remainingAttempts,
+  }) {
+    var needsRetry = false;
+    if (_horizontalScrollController.hasClients) {
+      final position = _horizontalScrollController.position;
+      final target = offset.clamp(
+        position.minScrollExtent,
+        position.maxScrollExtent,
+      );
+      if ((position.pixels - target).abs() > 0.5) {
+        position.jumpTo(target);
+      }
+      needsRetry = (position.pixels - target).abs() > 0.5;
+    } else if (offset > 0.5) {
+      needsRetry = true;
+    }
+
+    if (!needsRetry || remainingAttempts <= 0) {
+      return needsRetry;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _restoreHorizontalOffset(
+        offset,
+        remainingAttempts: remainingAttempts - 1,
+      );
+    });
+    return true;
   }
 
   bool get isNearBottom {
@@ -332,10 +475,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
 
     final first = _pointerCurrentPositions[pointers[0]]!;
     final second = _pointerCurrentPositions[pointers[1]]!;
-    return Offset(
-      (first.dx + second.dx) / 2,
-      (first.dy + second.dy) / 2,
-    );
+    return Offset((first.dx + second.dx) / 2, (first.dy + second.dy) / 2);
   }
 
   double _currentTwoFingerDistance() {
