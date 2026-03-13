@@ -75,21 +75,13 @@ class PaneHistoryView extends ConsumerWidget {
           fontFamily: settings.fontFamily,
         );
 
-        Widget scrollableHistory = Scrollbar(
-          controller: verticalScrollController,
-          thumbVisibility: true,
-          trackVisibility: true,
-          interactive: true,
-          child: SelectionArea(
-            child: SingleChildScrollView(
-              controller: verticalScrollController,
-              physics: const ClampingScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(4, 4, 10, 8),
-              child: RichText(
-                text: historySpan,
-                softWrap: false,
-                textScaler: TextScaler.noScaling,
-              ),
+        Widget historyBody = SelectionArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(4, 4, 10, 8),
+            child: RichText(
+              text: historySpan,
+              softWrap: false,
+              textScaler: TextScaler.noScaling,
             ),
           ),
         );
@@ -100,7 +92,7 @@ class PaneHistoryView extends ConsumerWidget {
                 ? terminalWidth
                 : constraints.maxWidth,
           ),
-          child: scrollableHistory,
+          child: historyBody,
         );
 
         if (needsHorizontalScroll) {

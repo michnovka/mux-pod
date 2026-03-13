@@ -72,7 +72,7 @@ void main() {
   }
 
   group('PaneHistoryView', () {
-    testWidgets('renders ansi history content with a scrollbar', (
+    testWidgets('renders ansi history content inside the unified surface', (
       tester,
     ) async {
       final verticalController = ScrollController();
@@ -95,8 +95,6 @@ void main() {
           retainedLineLimit: 1000,
         ),
       );
-
-      expect(find.byType(Scrollbar), findsOneWidget);
 
       final richText = tester.widget<RichText>(find.byType(RichText).last);
       final redSpan = _findSpanByText(richText.text, 'red');

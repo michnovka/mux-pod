@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -157,10 +158,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   static const int _maxDeferredStreamOutputChars = 256 * 1024;
   static const int _literalInputChunkLength = 1024;
   static const Duration _connectionLookupTimeout = Duration(seconds: 3);
+  static const Duration _historyCacheRefreshDebounce = Duration(
+    milliseconds: 90,
+  );
   static const Duration _initialControlRestartDelay = Duration(
     milliseconds: 250,
   );
   static const Duration _maxControlRestartDelay = Duration(seconds: 4);
+  static const double _historyBottomThresholdPx = 24;
+  static const double _historyRevealOffsetPx = 96;
   static const String _snapshotMainMarker = '\x01__MUXPOD_MAIN__\x01';
   static const String _snapshotAltMarker = '\x01__MUXPOD_ALT__\x01';
   static const String _snapshotMetadataMarker = '\x01__MUXPOD_META__\x01';
@@ -199,6 +205,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Timer? _controlSyncTimer;
   Timer? _controlRestartTimer;
   Timer? _latencyTimer;
+  Timer? _historyCacheRefreshTimer;
   int _controlRestartAttempt = 0;
   bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
@@ -239,6 +246,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   void initState() {
     super.initState();
     _terminal = _createTerminalEmulator();
+    _historyVerticalScrollController.addListener(_handleHistorySurfaceScroll);
     WidgetsBinding.instance.addObserver(this);
 
     // Set up listeners on the next frame (because ref is needed)
@@ -516,6 +524,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _pendingViewData = cacheEntry.frame;
     _viewNotifier.value = cacheEntry.frame;
     _hasInitialScrolled = true;
+    _isHistoryLoading = false;
     _paneTerminalViewKey.currentState?.restoreViewportState(
       cacheEntry.viewportState,
     );
@@ -539,6 +548,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _pendingViewData = emptyView;
     _viewNotifier.value = emptyView;
     _hasInitialScrolled = false;
+    _isHistoryLoading = false;
   }
 
   bool _showActivePaneFromCacheOrPlaceholder() {
@@ -551,6 +561,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     if (activePane != null) {
       ref.read(terminalDisplayProvider.notifier).updatePane(activePane);
+      _seedHistoryCacheForActivePane(rebuild: false);
+      _ensureFullHistoryLoadedForActivePane();
+      _keepHistorySurfacePinnedToLiveTail();
     }
 
     return restored;
@@ -650,50 +663,320 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   int _historyLineCount(String content) => _historyLines(content).length;
 
+  bool _isNearHistorySurfaceBottom(ScrollMetrics metrics) {
+    return (metrics.maxScrollExtent - metrics.pixels) <=
+        _historyBottomThresholdPx;
+  }
+
+  bool _historyEntriesEqual(
+    _PaneHistoryCacheEntry? left,
+    _PaneHistoryCacheEntry right,
+  ) {
+    if (left == null) {
+      return false;
+    }
+
+    return left.content == right.content &&
+        left.loadedLineCount == right.loadedLineCount &&
+        left.retainedLineLimit == right.retainedLineLimit &&
+        left.reachedHistoryStart == right.reachedHistoryStart &&
+        left.alternateScreen == right.alternateScreen &&
+        left.isSeedOnly == right.isSeedOnly;
+  }
+
+  String _captureVisibleTerminalText() {
+    final buffer = _terminal.buffer;
+    if (buffer.height <= 0 || buffer.viewWidth <= 0) {
+      return '';
+    }
+
+    final startLine = math.max(0, buffer.height - buffer.viewHeight);
+    final endLine = math.max(0, buffer.height - 1);
+
+    return _normalizeHistoryText(
+      buffer.getText(
+        BufferRangeLine(
+          CellOffset(0, startLine),
+          CellOffset(math.max(0, buffer.viewWidth - 1), endLine),
+        ),
+      ),
+    );
+  }
+
   String _captureLiveTailHistoryText() {
     return _normalizeHistoryText(_terminal.buffer.getText());
   }
 
-  String _captureSeedHistoryText() {
-    if (_viewNotifier.value.alternateScreen) {
-      return _captureLiveTailHistoryText();
+  int _historyOverlapLineCount(
+    List<String> olderLines,
+    List<String> liveLines,
+  ) {
+    if (olderLines.isEmpty || liveLines.isEmpty) {
+      return 0;
     }
 
-    final snapshotContent = _viewNotifier.value.mainContent.isNotEmpty
-        ? _viewNotifier.value.mainContent
-        : _viewNotifier.value.content;
-    if (snapshotContent.isNotEmpty) {
-      return _normalizeHistoryText(snapshotContent);
+    final maxOverlap = math.min(olderLines.length, liveLines.length);
+    for (var overlap = maxOverlap; overlap > 0; overlap -= 1) {
+      var matches = true;
+      for (var index = 0; index < overlap; index += 1) {
+        if (olderLines[olderLines.length - overlap + index].trimRight() !=
+            liveLines[index].trimRight()) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        return overlap;
+      }
     }
 
-    return _captureLiveTailHistoryText();
+    return 0;
   }
 
-  void _seedHistoryCacheForActivePane() {
+  String _historyContentAboveLiveTail(
+    String capturedText, {
+    String? liveTailText,
+  }) {
+    final historyLines = _historyLines(_normalizeHistoryText(capturedText));
+    if (historyLines.isEmpty) {
+      return '';
+    }
+
+    final liveLines = _historyLines(liveTailText ?? _captureVisibleTerminalText());
+    final overlap = _historyOverlapLineCount(historyLines, liveLines);
+    final olderLines = overlap <= 0
+        ? historyLines
+        : historyLines.sublist(0, historyLines.length - overlap);
+    return olderLines.join('\n');
+  }
+
+  List<String> _trimHistoryLinesToRetainedLimit(List<String> lines, int limit) {
+    if (limit <= 0 || lines.length <= limit) {
+      return lines;
+    }
+    return lines.sublist(lines.length - limit);
+  }
+
+  String _mergeHistoryWithRecentTail({
+    required String baseContent,
+    required String recentContent,
+    required int retainedLineLimit,
+  }) {
+    final baseLines = _historyLines(baseContent);
+    final recentLines = _historyLines(recentContent);
+    if (baseLines.isEmpty) {
+      return recentContent;
+    }
+    if (recentLines.isEmpty) {
+      return baseContent;
+    }
+
+    final overlap = _historyOverlapLineCount(baseLines, recentLines);
+    final mergedLines = <String>[
+      ...baseLines.take(baseLines.length - overlap),
+      ...recentLines,
+    ];
+    return _trimHistoryLinesToRetainedLimit(
+      mergedLines,
+      retainedLineLimit,
+    ).join('\n');
+  }
+
+  bool _seedHistoryCacheForActivePane({bool rebuild = true}) {
     final paneId = ref.read(tmuxProvider).activePaneId;
     if (paneId == null) {
+      return false;
+    }
+
+    final retainedLineLimit = ref.read(settingsProvider).scrollbackLines;
+    final alternateScreen = _viewNotifier.value.alternateScreen;
+    final existingEntry = _paneHistoryCache[paneId];
+
+    late final _PaneHistoryCacheEntry nextEntry;
+    if (alternateScreen) {
+      nextEntry =
+          existingEntry?.copyWith(
+            retainedLineLimit: retainedLineLimit,
+            alternateScreen: true,
+            isSeedOnly: true,
+          ) ??
+          _PaneHistoryCacheEntry(
+            paneId: paneId,
+            content: '',
+            loadedLineCount: 0,
+            retainedLineLimit: retainedLineLimit,
+            reachedHistoryStart: false,
+            alternateScreen: true,
+            isSeedOnly: true,
+          );
+    } else {
+      final recentHistoryContent = _historyContentAboveLiveTail(
+        _captureLiveTailHistoryText(),
+      );
+      if (existingEntry != null &&
+          !existingEntry.isSeedOnly &&
+          !existingEntry.alternateScreen) {
+        final mergedContent = _mergeHistoryWithRecentTail(
+          baseContent: existingEntry.content,
+          recentContent: recentHistoryContent,
+          retainedLineLimit: retainedLineLimit,
+        );
+        nextEntry = existingEntry.copyWith(
+          content: mergedContent,
+          loadedLineCount: _historyLineCount(mergedContent),
+          retainedLineLimit: retainedLineLimit,
+          alternateScreen: false,
+        );
+      } else {
+        nextEntry = _PaneHistoryCacheEntry(
+          paneId: paneId,
+          content: recentHistoryContent,
+          loadedLineCount: _historyLineCount(recentHistoryContent),
+          retainedLineLimit: retainedLineLimit,
+          reachedHistoryStart: false,
+          alternateScreen: false,
+          isSeedOnly: true,
+        );
+      }
+    }
+
+    if (_historyEntriesEqual(existingEntry, nextEntry)) {
+      return false;
+    }
+
+    _paneHistoryCache[paneId] = nextEntry;
+
+    if (mounted &&
+        rebuild &&
+        ref.read(tmuxProvider).activePaneId == paneId) {
+      setState(() {});
+    }
+
+    return true;
+  }
+
+  void _scheduleHistoryCacheRefresh() {
+    if (_terminalMode == TerminalMode.history || _isDisposed) {
       return;
     }
 
-    final seedContent = _captureSeedHistoryText();
-    final retainedLineLimit = ref.read(settingsProvider).scrollbackLines;
+    _historyCacheRefreshTimer?.cancel();
+    _historyCacheRefreshTimer = Timer(_historyCacheRefreshDebounce, () {
+      _historyCacheRefreshTimer = null;
+      if (!mounted || _isDisposed || _terminalMode == TerminalMode.history) {
+        return;
+      }
 
-    _paneHistoryCache[paneId] = _PaneHistoryCacheEntry(
-      paneId: paneId,
-      content: seedContent,
-      loadedLineCount: _historyLineCount(seedContent),
-      retainedLineLimit: retainedLineLimit,
-      reachedHistoryStart: false,
-      alternateScreen: _viewNotifier.value.alternateScreen,
-      isSeedOnly: true,
-    );
+      final changed = _seedHistoryCacheForActivePane();
+      if (changed) {
+        _keepHistorySurfacePinnedToLiveTail();
+      }
+    });
   }
 
-  Future<void> _enterHistoryMode() async {
+  void _keepHistorySurfacePinnedToLiveTail() {
     if (_terminalMode == TerminalMode.history) {
       return;
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_historyVerticalScrollController.hasClients) {
+        return;
+      }
 
+      final position = _historyVerticalScrollController.position;
+      if (_isNearHistorySurfaceBottom(position)) {
+        position.jumpTo(position.maxScrollExtent);
+      }
+    });
+  }
+
+  void _scrollHistorySurfaceToLiveTail({bool animate = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_historyVerticalScrollController.hasClients) {
+        return;
+      }
+
+      final position = _historyVerticalScrollController.position;
+      final target = position.maxScrollExtent;
+      if (animate) {
+        unawaited(
+          position.animateTo(
+            target,
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      } else {
+        position.jumpTo(target);
+      }
+      _paneTerminalViewKey.currentState?.scrollToBottom();
+    });
+  }
+
+  void _handleHistorySurfaceScroll() {
+    if (!mounted || !_historyVerticalScrollController.hasClients) {
+      return;
+    }
+
+    if (_viewNotifier.value.alternateScreen) {
+      if (_terminalMode == TerminalMode.history) {
+        setState(() {
+          _terminalMode = TerminalMode.normal;
+        });
+      }
+      return;
+    }
+
+    final browsingHistory = !_isNearHistorySurfaceBottom(
+      _historyVerticalScrollController.position,
+    );
+
+    if (browsingHistory) {
+      if (_terminalMode == TerminalMode.select) {
+        _terminalController.clearSelection();
+        _flushDeferredStreamOutput();
+      }
+      if (_terminalMode != TerminalMode.history) {
+        setState(() {
+          _terminalMode = TerminalMode.history;
+        });
+      }
+      return;
+    }
+
+    if (_terminalMode == TerminalMode.history) {
+      setState(() {
+        _terminalMode = TerminalMode.normal;
+      });
+      _seedHistoryCacheForActivePane();
+    }
+
+    if (_historyPendingLinesNotifier.value != 0) {
+      _historyPendingLinesNotifier.value = 0;
+    }
+  }
+
+  void _ensureFullHistoryLoadedForActivePane() {
+    final activePane = ref.read(tmuxProvider).activePane;
+    if (activePane == null || _viewNotifier.value.alternateScreen) {
+      return;
+    }
+
+    final retainedLineLimit = ref.read(settingsProvider).scrollbackLines;
+    final existingEntry = _paneHistoryCache[activePane.id];
+    final alreadyLoaded =
+        existingEntry != null &&
+        !existingEntry.isSeedOnly &&
+        !existingEntry.alternateScreen &&
+        existingEntry.retainedLineLimit == retainedLineLimit;
+    if (alreadyLoaded) {
+      return;
+    }
+
+    unawaited(_loadFullHistorySnapshot(activePane.id));
+  }
+
+  Future<void> _enterHistoryMode() async {
     if (_terminalMode == TerminalMode.select) {
       setState(() {
         _terminalMode = TerminalMode.normal;
@@ -701,24 +984,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _flushDeferredStreamOutput();
     }
 
-    final activePane = ref.read(tmuxProvider).activePane;
-    if (activePane == null) {
+    if (ref.read(tmuxProvider).activePane == null) {
       return;
     }
 
     _terminalController.clearSelection();
     _historyPendingLinesNotifier.value = 0;
-    _seedHistoryCacheForActivePane();
-
-    if (mounted) {
-      setState(() {
-        _terminalMode = TerminalMode.history;
-        _isHistoryLoading = true;
-      });
+    final changed = _seedHistoryCacheForActivePane();
+    if (changed) {
+      _keepHistorySurfacePinnedToLiveTail();
     }
+    _ensureFullHistoryLoadedForActivePane();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _terminalMode != TerminalMode.history) {
+      if (!mounted || !_historyVerticalScrollController.hasClients) {
         return;
       }
       if (_historyHorizontalScrollController.hasClients) {
@@ -726,37 +1005,37 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           _historyHorizontalScrollController.position.minScrollExtent,
         );
       }
-      if (_historyVerticalScrollController.hasClients) {
-        _historyVerticalScrollController.jumpTo(
-          _historyVerticalScrollController.position.maxScrollExtent,
-        );
-      }
-    });
 
-    await _loadFullHistorySnapshot(activePane.id);
+      final position = _historyVerticalScrollController.position;
+      final target = math.max(
+        position.minScrollExtent,
+        position.maxScrollExtent - _historyRevealOffsetPx,
+      );
+      if ((position.pixels - target).abs() <= 0.5) {
+        return;
+      }
+      unawaited(
+        position.animateTo(
+          target,
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+        ),
+      );
+    });
   }
 
   void _exitHistoryMode({bool jumpToLive = false}) {
-    if (_terminalMode != TerminalMode.history) {
+    if (_terminalMode != TerminalMode.history && !jumpToLive) {
       return;
     }
 
-    if (mounted) {
-      setState(() {
-        _terminalMode = TerminalMode.normal;
-        _isHistoryLoading = false;
-      });
-    }
     _historyPendingLinesNotifier.value = 0;
-
-    if (jumpToLive) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) {
-          return;
-        }
-        _paneTerminalViewKey.currentState?.scrollToBottom();
-      });
+    if (_historyHorizontalScrollController.hasClients) {
+      _historyHorizontalScrollController.jumpTo(
+        _historyHorizontalScrollController.position.minScrollExtent,
+      );
     }
+    _scrollHistorySurfaceToLiveTail(animate: jumpToLive);
   }
 
   void _recordHistoryPendingLinesFromTerminalAdvance({
@@ -770,9 +1049,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   Future<void> _loadFullHistorySnapshot(String paneId) async {
+    final activePaneId = ref.read(tmuxProvider).activePaneId;
+    if (_isHistoryLoading && activePaneId == paneId) {
+      return;
+    }
+
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected) {
-      if (mounted && _terminalMode == TerminalMode.history) {
+      if (mounted && activePaneId == paneId) {
         setState(() {
           _isHistoryLoading = false;
         });
@@ -781,8 +1065,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final existingEntry = _paneHistoryCache[paneId];
-    if (existingEntry?.alternateScreen == true) {
-      if (mounted && _terminalMode == TerminalMode.history) {
+    if (existingEntry?.alternateScreen == true || _viewNotifier.value.alternateScreen) {
+      if (mounted && activePaneId == paneId) {
         setState(() {
           _isHistoryLoading = false;
         });
@@ -792,12 +1076,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     final maxHistoryLines = ref.read(settingsProvider).scrollbackLines;
     if (maxHistoryLines <= 0) {
-      if (mounted && _terminalMode == TerminalMode.history) {
+      if (mounted && activePaneId == paneId) {
         setState(() {
           _isHistoryLoading = false;
         });
       }
       return;
+    }
+
+    if (mounted && activePaneId == paneId) {
+      setState(() {
+        _isHistoryLoading = true;
+      });
     }
 
     try {
@@ -811,8 +1101,20 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         timeout: const Duration(seconds: 4),
       );
 
-      final normalized = _normalizeHistoryText(historyOutput);
-      final loadedLineCount = _historyLineCount(normalized);
+      final visibleLiveTail = _captureVisibleTerminalText();
+      final fullHistoryContent = _historyContentAboveLiveTail(
+        historyOutput,
+        liveTailText: visibleLiveTail,
+      );
+      final mergedContent = _mergeHistoryWithRecentTail(
+        baseContent: fullHistoryContent,
+        recentContent: _historyContentAboveLiveTail(
+          _captureLiveTailHistoryText(),
+          liveTailText: visibleLiveTail,
+        ),
+        retainedLineLimit: maxHistoryLines,
+      );
+
       final oldPixels = _historyVerticalScrollController.hasClients
           ? _historyVerticalScrollController.position.pixels
           : 0.0;
@@ -823,33 +1125,30 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       final keepPinnedToBottom =
           !_historyVerticalScrollController.hasClients ||
           (_historyVerticalScrollController.position.hasContentDimensions &&
-                  (_historyVerticalScrollController.position.maxScrollExtent -
-                          _historyVerticalScrollController.position.pixels) <=
-                      32);
+              _isNearHistorySurfaceBottom(
+                _historyVerticalScrollController.position,
+              ));
 
-      final nextEntry = _PaneHistoryCacheEntry(
+      final capturedLineCount = _historyLineCount(fullHistoryContent);
+      _paneHistoryCache[paneId] = _PaneHistoryCacheEntry(
         paneId: paneId,
-        content: normalized,
-        loadedLineCount: loadedLineCount,
+        content: mergedContent,
+        loadedLineCount: _historyLineCount(mergedContent),
         retainedLineLimit: maxHistoryLines,
-        reachedHistoryStart: loadedLineCount < maxHistoryLines,
+        reachedHistoryStart: capturedLineCount < maxHistoryLines,
         alternateScreen: false,
         isSeedOnly: false,
       );
-      _paneHistoryCache[paneId] = nextEntry;
 
-      if (mounted &&
-          _terminalMode == TerminalMode.history &&
-          ref.read(tmuxProvider).activePaneId == paneId) {
+      if (mounted && ref.read(tmuxProvider).activePaneId == paneId) {
         setState(() {
           _isHistoryLoading = false;
         });
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted ||
-              _terminalMode != TerminalMode.history ||
-              !_historyVerticalScrollController.hasClients) {
+          if (!mounted || !_historyVerticalScrollController.hasClients) {
             return;
           }
+
           final position = _historyVerticalScrollController.position;
           if (keepPinnedToBottom) {
             position.jumpTo(position.maxScrollExtent);
@@ -865,10 +1164,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         });
       }
     } catch (_) {
-      // Keep the seed content visible on history fetch failures.
-      if (mounted &&
-          _terminalMode == TerminalMode.history &&
-          ref.read(tmuxProvider).activePaneId == paneId) {
+      if (mounted && ref.read(tmuxProvider).activePaneId == paneId) {
         setState(() {
           _isHistoryLoading = false;
         });
@@ -878,16 +1174,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   String _historyModeTitle(_PaneHistoryCacheEntry? entry) {
     if (entry?.alternateScreen == true) {
-      return 'Alternate screen snapshot';
+      return 'Alternate screen active';
     }
     if (_isHistoryLoading) {
       return 'Loading retained history...';
     }
     if (entry == null) {
-      return 'History mode';
+      return 'History';
     }
     if (entry.isSeedOnly) {
-      return 'Recent tail only';
+      return 'Recent history only';
     }
     if (entry.reachedHistoryStart) {
       return 'Start of retained history';
@@ -897,27 +1193,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   String _historyModeDetail(_PaneHistoryCacheEntry? entry) {
     if (entry?.alternateScreen == true) {
-      return 'Visible snapshot only. Alternate-screen apps do not expose retained scrollback here.';
+      return 'Alternate-screen apps keep their own viewport. Jump to live to interact with them.';
     }
     if (entry == null) {
-      return 'Browse retained tmux output while live updates continue in the background.';
+      return 'Scroll up through retained tmux output while the live terminal stays pinned below.';
     }
     if (_isHistoryLoading) {
-      return 'Showing the recent tail while tmux fetches up to ${entry.retainedLineLimit} retained lines.';
+      return 'Showing recent local history while tmux fetches up to ${entry.retainedLineLimit} retained lines.';
     }
     if (entry.isSeedOnly) {
-      return 'Retained history is unavailable right now, so only the recent visible tail is shown.';
+      return 'Showing recent local scrollback only.';
     }
     if (entry.reachedHistoryStart) {
       return '${entry.loadedLineCount} retained lines loaded.';
     }
-    return 'Showing ${entry.loadedLineCount} of up to ${entry.retainedLineLimit} retained lines.';
+    return 'Showing the newest ${entry.loadedLineCount} of up to ${entry.retainedLineLimit} retained lines.';
   }
 
   void _leaveHistoryModeBeforeSwitch() {
     if (_terminalMode == TerminalMode.history) {
       _exitHistoryMode();
     }
+    _isHistoryLoading = false;
+    _historyPendingLinesNotifier.value = 0;
   }
 
   void _prunePaneRenderCache() {
@@ -1319,8 +1617,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _recordHistoryPendingLinesFromTerminalAdvance(
         beforeAbsoluteCursorY: cursorBeforeWrite,
       );
+      _paneTerminalViewKey.currentState?.scrollToBottom();
       return;
     }
+    _scheduleHistoryCacheRefresh();
     if (shouldAutoScroll || !_hasInitialScrolled) {
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
@@ -1381,8 +1681,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _recordHistoryPendingLinesFromTerminalAdvance(
         beforeAbsoluteCursorY: cursorBeforeWrite,
       );
+      _paneTerminalViewKey.currentState?.scrollToBottom();
       return;
     }
+    _scheduleHistoryCacheRefresh();
     if (shouldAutoScroll) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
     }
@@ -1690,6 +1992,8 @@ $metadataCommand
     }
     if (_terminalMode == TerminalMode.normal && shouldAutoScroll) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
+    } else if (_terminalMode == TerminalMode.history) {
+      _paneTerminalViewKey.currentState?.scrollToBottom();
     }
 
     // Scroll to bottom on first content received
@@ -1697,6 +2001,14 @@ $metadataCommand
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
     }
+
+    if (_terminalMode != TerminalMode.history) {
+      final changed = _seedHistoryCacheForActivePane();
+      if (changed) {
+        _keepHistorySurfacePinnedToLiveTail();
+      }
+    }
+    _ensureFullHistoryLoadedForActivePane();
   }
 
   void _applyTerminalFrame(TerminalSnapshotFrame viewData) {
@@ -1794,6 +2106,8 @@ $metadataCommand
     _networkSubscription = null;
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
+    _historyCacheRefreshTimer?.cancel();
+    _historyCacheRefreshTimer = null;
     _stopLatencyPolling();
     unawaited(_stopControlClient(resetRestartState: true));
     // Dispose ValueNotifier
@@ -1802,6 +2116,7 @@ $metadataCommand
     _historyPendingLinesNotifier.dispose();
     // Dispose scroll controller
     _terminalScrollController.dispose();
+    _historyVerticalScrollController.removeListener(_handleHistorySurfaceScroll);
     _historyVerticalScrollController.dispose();
     _historyHorizontalScrollController.dispose();
     _terminalController.dispose();
@@ -1844,102 +2159,149 @@ $metadataCommand
                 },
               ),
               Expanded(
-                child: Container(
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                      color: switch (_terminalMode) {
-                        TerminalMode.select => DesignColors.warning,
-                        TerminalMode.history => DesignColors.primary,
-                        TerminalMode.normal => Colors.transparent,
-                      },
-                      width: 3,
-                    ),
-                  ),
-                  child: Stack(
-                    children: [
-                      RepaintBoundary(
-                        child: ValueListenableBuilder<TerminalSnapshotFrame>(
-                          valueListenable: _viewNotifier,
-                          builder: (context, viewData, _) {
-                            final backgroundColor = Theme.of(
-                              context,
-                            ).scaffoldBackgroundColor;
-                            final foregroundColor = Theme.of(
-                              context,
-                            ).colorScheme.onSurface.withValues(alpha: 0.9);
-
-                            if (_terminalMode == TerminalMode.history) {
+                child: ColoredBox(
+                  color: switch (_terminalMode) {
+                    TerminalMode.select => DesignColors.warning,
+                    TerminalMode.history => DesignColors.primary,
+                    TerminalMode.normal => Colors.transparent,
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.all(3),
+                    child: Stack(
+                      children: [
+                        RepaintBoundary(
+                          child: ValueListenableBuilder<TerminalSnapshotFrame>(
+                            valueListenable: _viewNotifier,
+                            builder: (context, viewData, _) {
+                              final backgroundColor = Theme.of(
+                                context,
+                              ).scaffoldBackgroundColor;
+                              final foregroundColor = Theme.of(
+                                context,
+                              ).colorScheme.onSurface.withValues(alpha: 0.9);
                               final historyEntry = _activeHistoryEntry;
-                              return PaneHistoryView(
-                                content: historyEntry?.content ?? '',
-                                paneWidth: viewData.paneWidth,
-                                backgroundColor: backgroundColor,
-                                foregroundColor: foregroundColor,
-                                zoomScale: _zoomScale,
-                                verticalScrollController:
-                                    _historyVerticalScrollController,
-                                horizontalScrollController:
-                                    _historyHorizontalScrollController,
-                                isLoading: _isHistoryLoading,
-                                alternateScreen:
-                                    historyEntry?.alternateScreen ?? false,
-                                isSeedOnly: historyEntry?.isSeedOnly ?? true,
-                                reachedHistoryStart:
-                                    historyEntry?.reachedHistoryStart ?? false,
-                                loadedLineCount:
-                                    historyEntry?.loadedLineCount ?? 0,
-                                retainedLineLimit:
-                                    historyEntry?.retainedLineLimit ??
-                                    ref.read(settingsProvider).scrollbackLines,
-                              );
-                            }
+                              final historyContent = historyEntry?.content ?? '';
+                              final canBrowseHistory = !viewData.alternateScreen;
+                              final showHistoryBlock =
+                                  canBrowseHistory &&
+                                  (historyContent.isNotEmpty || _isHistoryLoading);
 
-                            return PaneTerminalView(
-                              key: _paneTerminalViewKey,
-                              terminal: _terminal,
-                              terminalController: _terminalController,
-                              paneWidth: viewData.paneWidth,
-                              paneHeight: viewData.paneHeight,
-                              backgroundColor: backgroundColor,
-                              foregroundColor: foregroundColor,
-                              mode: _terminalMode == TerminalMode.select
-                                  ? PaneTerminalMode.select
-                                  : PaneTerminalMode.normal,
-                              zoomEnabled: true,
-                              showCursor: ref
-                                  .watch(settingsProvider)
-                                  .showTerminalCursor,
-                              onZoomChanged: (scale) {
-                                setState(() {
-                                  _zoomScale = scale;
-                                });
-                              },
-                              verticalScrollController:
-                                  _terminalScrollController,
-                              onTwoFingerSwipe: _handleTwoFingerSwipe,
-                              navigableDirections: _getNavigableDirections(),
-                              onRequestHistoryMode:
-                                  _terminalMode == TerminalMode.normal
-                                  ? _enterHistoryMode
-                                  : null,
-                            );
-                          },
+                              return LayoutBuilder(
+                                builder: (context, constraints) {
+                                  final liveHeight = constraints.maxHeight;
+
+                                  return Scrollbar(
+                                    controller: _historyVerticalScrollController,
+                                    thumbVisibility:
+                                        _terminalMode == TerminalMode.history &&
+                                        canBrowseHistory,
+                                    trackVisibility:
+                                        _terminalMode == TerminalMode.history &&
+                                        canBrowseHistory,
+                                    interactive: true,
+                                    child: SingleChildScrollView(
+                                      controller:
+                                          _historyVerticalScrollController,
+                                      physics: canBrowseHistory
+                                          ? const ClampingScrollPhysics()
+                                          : const NeverScrollableScrollPhysics(),
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.stretch,
+                                        children: [
+                                          if (showHistoryBlock)
+                                            PaneHistoryView(
+                                              content: historyContent,
+                                              paneWidth: viewData.paneWidth,
+                                              backgroundColor: backgroundColor,
+                                              foregroundColor: foregroundColor,
+                                              zoomScale: _zoomScale,
+                                              verticalScrollController:
+                                                  _historyVerticalScrollController,
+                                              horizontalScrollController:
+                                                  _historyHorizontalScrollController,
+                                              isLoading: _isHistoryLoading,
+                                              alternateScreen:
+                                                  historyEntry?.alternateScreen ??
+                                                  false,
+                                              isSeedOnly:
+                                                  historyEntry?.isSeedOnly ?? true,
+                                              reachedHistoryStart:
+                                                  historyEntry
+                                                      ?.reachedHistoryStart ??
+                                                  false,
+                                              loadedLineCount:
+                                                  historyEntry?.loadedLineCount ??
+                                                  0,
+                                              retainedLineLimit:
+                                                  historyEntry
+                                                      ?.retainedLineLimit ??
+                                                  ref
+                                                      .read(settingsProvider)
+                                                      .scrollbackLines,
+                                            ),
+                                          SizedBox(
+                                            height: liveHeight,
+                                            child: PaneTerminalView(
+                                              key: _paneTerminalViewKey,
+                                              terminal: _terminal,
+                                              terminalController:
+                                                  _terminalController,
+                                              paneWidth: viewData.paneWidth,
+                                              paneHeight: viewData.paneHeight,
+                                              backgroundColor: backgroundColor,
+                                              foregroundColor: foregroundColor,
+                                              mode:
+                                                  _terminalMode ==
+                                                      TerminalMode.select
+                                                  ? PaneTerminalMode.select
+                                                  : PaneTerminalMode.normal,
+                                              readOnly:
+                                                  _terminalMode ==
+                                                  TerminalMode.history,
+                                              verticalScrollEnabled:
+                                                  viewData.alternateScreen,
+                                              zoomEnabled: true,
+                                              showCursor: ref
+                                                  .watch(settingsProvider)
+                                                  .showTerminalCursor,
+                                              onZoomChanged: (scale) {
+                                                setState(() {
+                                                  _zoomScale = scale;
+                                                });
+                                              },
+                                              verticalScrollController:
+                                                  _terminalScrollController,
+                                              onTwoFingerSwipe:
+                                                  _handleTwoFingerSwipe,
+                                              navigableDirections:
+                                                  _getNavigableDirections(),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                },
+                              );
+                            },
+                          ),
                         ),
-                      ),
-                      // Pane indicator: directly watch tmuxProvider via Consumer
-                      Positioned(
-                        top: 8,
-                        right: 8,
-                        child: Consumer(
-                          builder: (context, ref, _) {
-                            final tmuxState = ref.watch(tmuxProvider);
-                            return _buildPaneIndicator(tmuxState);
-                          },
+                        // Pane indicator: directly watch tmuxProvider via Consumer
+                        Positioned(
+                          top: 8,
+                          right: 8,
+                          child: Consumer(
+                            builder: (context, ref, _) {
+                              final tmuxState = ref.watch(tmuxProvider);
+                              return _buildPaneIndicator(tmuxState);
+                            },
+                          ),
                         ),
-                      ),
-                      if (_terminalMode == TerminalMode.history)
-                        _buildHistoryModeOverlay(),
-                    ],
+                        if (_terminalMode == TerminalMode.history)
+                          _buildHistoryModeOverlay(),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -2256,6 +2618,18 @@ $metadataCommand
   }
 
   void _ensureTerminalViewportAtBottomForInput() {
+    if (_terminalMode == TerminalMode.history) {
+      if (mounted) {
+        setState(() {
+          _terminalMode = TerminalMode.normal;
+        });
+      } else {
+        _terminalMode = TerminalMode.normal;
+      }
+      _historyPendingLinesNotifier.value = 0;
+      _scrollHistorySurfaceToLiveTail();
+    }
+
     final paneView = _paneTerminalViewKey.currentState;
     if (paneView == null) {
       return;
@@ -3185,7 +3559,7 @@ $metadataCommand
                 ),
                 title: Text(
                   _terminalMode == TerminalMode.history
-                      ? 'History Mode'
+                      ? 'Browsing History'
                       : 'Browse History',
                   style: TextStyle(
                     color: _terminalMode == TerminalMode.history
@@ -3198,8 +3572,8 @@ $metadataCommand
                 ),
                 subtitle: Text(
                   _terminalMode == TerminalMode.history
-                      ? 'Frozen history view; live output continues in the background'
-                      : 'Drag past the top of the live tail or tap here to browse older output',
+                      ? 'Unified scroll view; live output continues in the slab below'
+                      : 'Scroll upward or tap here to reveal retained output above the live terminal',
                   style: TextStyle(color: mutedTextColor, fontSize: 12),
                 ),
                 onTap: () {
@@ -3235,7 +3609,7 @@ $metadataCommand
                 ),
                 subtitle: Text(
                   _terminalMode == TerminalMode.history
-                      ? 'Unavailable while browsing frozen history'
+                      ? 'Unavailable while browsing retained history'
                       : _terminalMode == TerminalMode.select
                       ? 'Selection is local and live terminal input is paused'
                       : 'Enable touch selection and local copying',

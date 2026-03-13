@@ -39,13 +39,14 @@ class PaneTerminalView extends ConsumerStatefulWidget {
   final Color backgroundColor;
   final Color foregroundColor;
   final PaneTerminalMode mode;
+  final bool readOnly;
+  final bool verticalScrollEnabled;
   final bool zoomEnabled;
   final bool showCursor;
   final void Function(double scale)? onZoomChanged;
   final ScrollController? verticalScrollController;
   final void Function(SwipeDirection direction)? onTwoFingerSwipe;
   final Map<SwipeDirection, bool>? navigableDirections;
-  final VoidCallback? onRequestHistoryMode;
 
   const PaneTerminalView({
     super.key,
@@ -56,13 +57,14 @@ class PaneTerminalView extends ConsumerStatefulWidget {
     required this.backgroundColor,
     required this.foregroundColor,
     this.mode = PaneTerminalMode.normal,
+    this.readOnly = false,
+    this.verticalScrollEnabled = true,
     this.zoomEnabled = true,
     this.showCursor = true,
     this.onZoomChanged,
     this.verticalScrollController,
     this.onTwoFingerSwipe,
     this.navigableDirections,
-    this.onRequestHistoryMode,
   });
 
   @override
@@ -71,7 +73,6 @@ class PaneTerminalView extends ConsumerStatefulWidget {
 
 class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   static const double _autoScrollThresholdPx = 32;
-  static const double _historyEntryThresholdPx = 48;
 
   final ScrollController _horizontalScrollController = ScrollController();
   ScrollController? _internalVerticalScrollController;
@@ -84,8 +85,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   double _baseScale = 1.0;
   bool _isUserScrollInProgress = false;
   bool _followBottom = true;
-  bool _historyRequestSent = false;
-  bool _historyEntryArmed = false;
 
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
   Offset _twoFingerPanStart = Offset.zero;
@@ -163,8 +162,9 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         : null;
 
     return PaneTerminalViewportState(
-      followBottom: _followBottom,
-      verticalDistanceFromBottom: verticalPosition == null
+      followBottom: widget.verticalScrollEnabled ? _followBottom : true,
+      verticalDistanceFromBottom:
+          !widget.verticalScrollEnabled || verticalPosition == null
           ? 0
           : (verticalPosition.maxScrollExtent - verticalPosition.pixels).clamp(
               0.0,
@@ -176,33 +176,45 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   }
 
   void restoreViewportState(PaneTerminalViewportState state) {
-    final scaleChanged = (_currentScale - state.zoomScale).abs() > 0.001;
-    final followBottomChanged = _followBottom != state.followBottom;
+    final effectiveState = widget.verticalScrollEnabled
+        ? state
+        : PaneTerminalViewportState(
+            followBottom: true,
+            verticalDistanceFromBottom: 0,
+            horizontalOffset: state.horizontalOffset,
+            zoomScale: state.zoomScale,
+          );
+    final scaleChanged = (_currentScale - effectiveState.zoomScale).abs() >
+        0.001;
+    final followBottomChanged = _followBottom != effectiveState.followBottom;
     _isUserScrollInProgress = false;
-    _baseScale = state.zoomScale;
+    _baseScale = effectiveState.zoomScale;
 
     if (scaleChanged || followBottomChanged) {
       setState(() {
-        _followBottom = state.followBottom;
+        _followBottom = effectiveState.followBottom;
         if (scaleChanged) {
-          _currentScale = state.zoomScale;
+          _currentScale = effectiveState.zoomScale;
         }
       });
     } else {
-      _followBottom = state.followBottom;
+      _followBottom = effectiveState.followBottom;
     }
 
     if (scaleChanged) {
-      widget.onZoomChanged?.call(state.zoomScale);
+      widget.onZoomChanged?.call(effectiveState.zoomScale);
     }
 
-    if (state.followBottom) {
+    if (effectiveState.followBottom) {
       scrollToBottom();
-      _restoreHorizontalOffset(state.horizontalOffset, remainingAttempts: 4);
+      _restoreHorizontalOffset(
+        effectiveState.horizontalOffset,
+        remainingAttempts: 4,
+      );
       return;
     }
 
-    _restoreViewportOffsets(state, remainingAttempts: 4);
+    _restoreViewportOffsets(effectiveState, remainingAttempts: 4);
   }
 
   void _snapToBottom([int remainingAttempts = 3]) {
@@ -307,6 +319,9 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   }
 
   bool get isNearBottom {
+    if (!widget.verticalScrollEnabled) {
+      return true;
+    }
     if (!_verticalScrollController.hasClients) {
       return true;
     }
@@ -322,17 +337,9 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     return (metrics.maxScrollExtent - metrics.pixels) <= _autoScrollThresholdPx;
   }
 
-  void _setHistoryEntryArmed(bool value) {
-    if (_historyEntryArmed == value || !mounted) {
-      return;
-    }
-    setState(() {
-      _historyEntryArmed = value;
-    });
-  }
-
   bool _handleScrollNotification(ScrollNotification notification) {
-    if (notification.metrics.axis != Axis.vertical) {
+    if (!widget.verticalScrollEnabled ||
+        notification.metrics.axis != Axis.vertical) {
       return false;
     }
 
@@ -340,31 +347,15 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         notification.dragDetails != null) {
       _isUserScrollInProgress = true;
       _followBottom = false;
-      _setHistoryEntryArmed(false);
       return false;
     }
 
     final isNearBottom = _isNearBottomForMetrics(notification.metrics);
-    final isNearTop =
-        notification.metrics.pixels <=
-        notification.metrics.minScrollExtent + _historyEntryThresholdPx;
-
     if (notification is ScrollEndNotification ||
         (notification is UserScrollNotification &&
             notification.direction == ScrollDirection.idle)) {
       _isUserScrollInProgress = false;
       _followBottom = isNearBottom;
-      final shouldEnterHistory =
-          _historyEntryArmed &&
-          !_historyRequestSent &&
-          widget.onRequestHistoryMode != null;
-      _setHistoryEntryArmed(false);
-      if (shouldEnterHistory) {
-        _historyRequestSent = true;
-        widget.onRequestHistoryMode?.call();
-      } else if (!isNearTop) {
-        _historyRequestSent = false;
-      }
       return false;
     }
 
@@ -372,80 +363,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       _followBottom = true;
     }
 
-    if (!isNearTop) {
-      _historyRequestSent = false;
-      _setHistoryEntryArmed(false);
-      return false;
-    }
-
-    if (_historyRequestSent || widget.onRequestHistoryMode == null) {
-      return false;
-    }
-
-    DragUpdateDetails? dragDetails;
-    if (notification is ScrollUpdateNotification) {
-      dragDetails = notification.dragDetails;
-    } else if (notification is OverscrollNotification) {
-      dragDetails = notification.dragDetails;
-    }
-
-    final primaryDelta = dragDetails?.primaryDelta ?? dragDetails?.delta.dy;
-    final shouldRequestHistory =
-        dragDetails != null && primaryDelta != null && primaryDelta > 0;
-
-    if (shouldRequestHistory) {
-      _setHistoryEntryArmed(true);
-    }
-
     return false;
-  }
-
-  Widget _buildHistoryEntryOverlay() {
-    final theme = Theme.of(context);
-    final chipColor = theme.brightness == Brightness.dark
-        ? Colors.black.withValues(alpha: 0.72)
-        : Colors.white.withValues(alpha: 0.92);
-
-    return Positioned(
-      top: 10,
-      left: 0,
-      right: 0,
-      child: IgnorePointer(
-        child: Center(
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: chipColor,
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(
-                color: DesignColors.primary.withValues(alpha: 0.24),
-              ),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.history,
-                    size: 14,
-                    color: DesignColors.primary,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Release to browse history',
-                    style: GoogleFonts.jetBrainsMono(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: theme.colorScheme.onSurface,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
   }
 
   Future<void> copySelection() async {
@@ -916,8 +834,13 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
               autoResize: false,
               autofocus: true,
               deleteDetection: true,
-              readOnly: widget.mode == PaneTerminalMode.select,
-              simulateScroll: widget.mode == PaneTerminalMode.normal,
+              readOnly: widget.readOnly || widget.mode == PaneTerminalMode.select,
+              simulateScroll:
+                  widget.mode == PaneTerminalMode.normal &&
+                  widget.verticalScrollEnabled,
+              scrollPhysics: widget.verticalScrollEnabled
+                  ? null
+                  : const NeverScrollableScrollPhysics(),
               theme: _buildTheme(),
               textStyle: TerminalStyle(
                 fontSize: fontSize,
@@ -954,9 +877,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
             child: Stack(
               children: [
                 terminalWidget,
-                if (_historyEntryArmed &&
-                    widget.mode == PaneTerminalMode.normal)
-                  _buildHistoryEntryOverlay(),
                 if (_isTwoFingerPanning || _twoFingerSwipeResult != null)
                   _buildTwoFingerSwipeOverlay(),
                 _buildSelectionActions(),
