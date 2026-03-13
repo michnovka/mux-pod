@@ -252,6 +252,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
           _restoreHorizontalOffset(
             state.horizontalOffset,
             remainingAttempts: remainingAttempts,
+            scheduleRetry: false,
           ) ||
           needsRetry;
 
@@ -267,6 +268,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   bool _restoreHorizontalOffset(
     double offset, {
     required int remainingAttempts,
+    bool scheduleRetry = true,
   }) {
     var needsRetry = false;
     if (_horizontalScrollController.hasClients) {
@@ -283,7 +285,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       needsRetry = true;
     }
 
-    if (!needsRetry || remainingAttempts <= 0) {
+    if (!needsRetry || remainingAttempts <= 0 || !scheduleRetry) {
       return needsRetry;
     }
 

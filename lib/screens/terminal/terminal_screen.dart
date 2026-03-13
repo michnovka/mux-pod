@@ -522,10 +522,28 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Future<void> _recoverFromFailedSwitch(
     _TmuxTargetSelection previousSelection, {
     bool restartControlClient = false,
+    bool restoreRemoteTarget = false,
   }) async {
     _restoreLocalSelection(previousSelection);
 
     try {
+      final sshClient = ref.read(sshProvider.notifier).client;
+      if (restoreRemoteTarget && sshClient != null && sshClient.isConnected) {
+        if (previousSelection.paneId != null) {
+          await sshClient.execPersistent(
+            TmuxCommands.selectPane(previousSelection.paneId!),
+          );
+        } else if (previousSelection.sessionName != null &&
+            previousSelection.windowIndex != null) {
+          await sshClient.execPersistent(
+            TmuxCommands.selectWindow(
+              previousSelection.sessionName!,
+              previousSelection.windowIndex!,
+            ),
+          );
+        }
+      }
+
       if (restartControlClient && previousSelection.sessionName != null) {
         await _restartTerminalStream(
           restartControlClient: true,
@@ -534,7 +552,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
 
       final paneId = previousSelection.paneId;
-      final sshClient = ref.read(sshProvider.notifier).client;
       if (paneId != null && sshClient != null && sshClient.isConnected) {
         await sshClient.execPersistentInput(
           TmuxCommands.sendKeys(paneId, '\x1b[I', literal: true),
@@ -1937,6 +1954,7 @@ $metadataCommand
     });
 
     if (activePane == null) {
+      await _recoverFromFailedSwitch(previousSelection);
       if (mounted) {
         setState(() {
           _isSwitchingPane = false;
@@ -1947,6 +1965,7 @@ $metadataCommand
     }
 
     var remoteSelectionChanged = false;
+    var switchConfirmed = false;
     try {
       if (previousSelection.paneId != null &&
           previousSelection.paneId != activePane.id) {
@@ -1966,15 +1985,24 @@ $metadataCommand
         restartControlClient: currentSession != sessionName,
         refreshTree: false,
       );
-      await sshClient.execPersistentInput(
-        TmuxCommands.sendKeys(activePane.id, '\x1b[I', literal: true),
-      );
+      switchConfirmed = true;
+      try {
+        await sshClient.execPersistentInput(
+          TmuxCommands.sendKeys(activePane.id, '\x1b[I', literal: true),
+        );
+      } catch (_) {
+        // The tmux target is already switched and the stream is live again.
+      }
     } catch (_) {
-      if (!remoteSelectionChanged) {
-        await _recoverFromFailedSwitch(previousSelection);
+      if (!switchConfirmed) {
+        await _recoverFromFailedSwitch(
+          previousSelection,
+          restartControlClient: currentSession != sessionName,
+          restoreRemoteTarget: remoteSelectionChanged,
+        );
       }
     } finally {
-      if (remoteSelectionChanged) {
+      if (switchConfirmed) {
         _persistActivePaneSelection(activePane.id);
       }
       if (mounted) {
@@ -2015,6 +2043,7 @@ $metadataCommand
     });
 
     var remoteSelectionChanged = false;
+    var switchConfirmed = false;
     try {
       // Send focus-out to the previous pane
       if (oldPaneId != null && oldPaneId != paneId) {
@@ -2026,17 +2055,25 @@ $metadataCommand
       await sshClient.execPersistent(TmuxCommands.selectPane(paneId));
       remoteSelectionChanged = true;
       await _restartTerminalStream(refreshTree: false);
+      switchConfirmed = true;
 
       // Send focus-in to the new pane (so apps like Claude Code can detect focus)
-      await sshClient.execPersistentInput(
-        TmuxCommands.sendKeys(paneId, '\x1b[I', literal: true),
-      );
+      try {
+        await sshClient.execPersistentInput(
+          TmuxCommands.sendKeys(paneId, '\x1b[I', literal: true),
+        );
+      } catch (_) {
+        // The tmux target is already switched and the stream is live again.
+      }
     } catch (_) {
-      if (!remoteSelectionChanged) {
-        await _recoverFromFailedSwitch(previousSelection);
+      if (!switchConfirmed) {
+        await _recoverFromFailedSwitch(
+          previousSelection,
+          restoreRemoteTarget: remoteSelectionChanged,
+        );
       }
     } finally {
-      if (remoteSelectionChanged) {
+      if (switchConfirmed) {
         _persistActivePaneSelection(paneId);
       }
       if (mounted) {
