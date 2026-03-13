@@ -42,7 +42,6 @@ void main() {
     required bool reachedHistoryStart,
     required int loadedLineCount,
     required int retainedLineLimit,
-    bool renderContent = true,
   }) {
     return ProviderScope(
       overrides: [settingsProvider.overrideWith(() => _TestSettingsNotifier())],
@@ -57,7 +56,6 @@ void main() {
               backgroundColor: Colors.black,
               foregroundColor: Colors.white,
               zoomScale: 1.0,
-              renderContent: renderContent,
               verticalScrollController: verticalScrollController,
               horizontalScrollController: horizontalScrollController,
               isLoading: isLoading,
@@ -126,39 +124,6 @@ void main() {
       );
 
       expect(find.byType(RichText), findsOneWidget);
-    });
-
-    testWidgets('reserves history height without building rich text in live mode', (
-      tester,
-    ) async {
-      final verticalController = ScrollController();
-      final horizontalController = ScrollController();
-
-      await tester.pumpWidget(
-        buildHarness(
-          content: List.generate(120, (index) => 'line $index').join('\n'),
-          paneWidth: 80,
-          verticalScrollController: verticalController,
-          horizontalScrollController: horizontalController,
-          isLoading: false,
-          alternateScreen: false,
-          isSeedOnly: false,
-          reachedHistoryStart: true,
-          loadedLineCount: 120,
-          retainedLineLimit: 1000,
-          renderContent: false,
-        ),
-      );
-
-      expect(find.byType(RichText), findsNothing);
-      final sizedBox = tester.widget<SizedBox>(
-        find.descendant(
-          of: find.byType(PaneHistoryView),
-          matching: find.byType(SizedBox),
-        ).first,
-      );
-      expect(sizedBox.height, isNotNull);
-      expect(sizedBox.height, greaterThan(0));
     });
   });
 }

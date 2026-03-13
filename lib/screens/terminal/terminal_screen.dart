@@ -168,6 +168,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   );
   static const Duration _maxControlRestartDelay = Duration(seconds: 4);
   static const double _historyBottomThresholdPx = 24;
+  static const double _historyEnterThresholdPx = 56;
   static const double _historyRevealOffsetPx = 96;
   static const String _snapshotMainMarker = '\x01__MUXPOD_MAIN__\x01';
   static const String _snapshotAltMarker = '\x01__MUXPOD_ALT__\x01';
@@ -1029,9 +1030,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    final browsingHistory = !_isNearHistorySurfaceBottom(
-      _historyVerticalScrollController.position,
-    );
+    final position = _historyVerticalScrollController.position;
+    final distanceFromBottom = position.maxScrollExtent - position.pixels;
+    final browsingHistory = _terminalMode == TerminalMode.history
+        ? distanceFromBottom > _historyBottomThresholdPx
+        : distanceFromBottom > _historyEnterThresholdPx;
 
     if (browsingHistory) {
       if (_terminalMode == TerminalMode.select) {
@@ -1039,13 +1042,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _flushDeferredStreamOutput();
       }
       if (_terminalMode != TerminalMode.history) {
-        _historyCacheRefreshTimer?.cancel();
-        _historyCacheRefreshTimer = null;
-        _seedHistoryCacheForActivePane(rebuild: false);
-        _ensureFullHistoryLoadedForActivePane();
-        setState(() {
-          _terminalMode = TerminalMode.history;
-        });
+        _activateHistoryMode(distanceFromBottom: distanceFromBottom);
       }
       return;
     }
@@ -1094,39 +1091,47 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    _activateHistoryMode(distanceFromBottom: _historyRevealOffsetPx);
+  }
+
+  void _activateHistoryMode({required double distanceFromBottom}) {
+    _historyCacheRefreshTimer?.cancel();
+    _historyCacheRefreshTimer = null;
     _terminalController.clearSelection();
     _historyPendingLinesNotifier.value = 0;
-    final changed = _seedHistoryCacheForActivePane();
-    if (changed) {
-      _keepHistorySurfacePinnedToLiveTail();
-    }
+    _seedHistoryCacheForActivePane(rebuild: false);
     _ensureFullHistoryLoadedForActivePane();
+
+    if (_historyHorizontalScrollController.hasClients) {
+      _historyHorizontalScrollController.jumpTo(
+        _historyHorizontalScrollController.position.minScrollExtent,
+      );
+    }
+
+    if (_terminalMode != TerminalMode.history) {
+      setState(() {
+        _terminalMode = TerminalMode.history;
+      });
+    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_historyVerticalScrollController.hasClients) {
         return;
       }
-      if (_historyHorizontalScrollController.hasClients) {
-        _historyHorizontalScrollController.jumpTo(
-          _historyHorizontalScrollController.position.minScrollExtent,
-        );
-      }
 
       final position = _historyVerticalScrollController.position;
-      final target = math.max(
+      final clampedDistance = distanceFromBottom.clamp(
+        _historyBottomThresholdPx,
+        _historyRevealOffsetPx,
+      );
+      final target = (position.maxScrollExtent - clampedDistance).clamp(
         position.minScrollExtent,
-        position.maxScrollExtent - _historyRevealOffsetPx,
+        position.maxScrollExtent,
       );
       if ((position.pixels - target).abs() <= 0.5) {
         return;
       }
-      unawaited(
-        position.animateTo(
-          target,
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOutCubic,
-        ),
-      );
+      position.jumpTo(target);
     });
   }
 
@@ -2292,9 +2297,14 @@ $metadataCommand
                               final historyEntry = _activeHistoryEntry;
                               final historyContent = historyEntry?.content ?? '';
                               final canBrowseHistory = !viewData.alternateScreen;
-                              final showHistoryBlock =
+                              final revealHistorySpace =
                                   canBrowseHistory &&
-                                  (historyContent.isNotEmpty || _isHistoryLoading);
+                                  (historyContent.isNotEmpty ||
+                                      _isHistoryLoading ||
+                                      _terminalMode == TerminalMode.history);
+                              final showHistoryBlock =
+                                  revealHistorySpace &&
+                                  _terminalMode == TerminalMode.history;
 
                               return LayoutBuilder(
                                 builder: (context, constraints) {
@@ -2326,9 +2336,6 @@ $metadataCommand
                                               backgroundColor: backgroundColor,
                                               foregroundColor: foregroundColor,
                                               zoomScale: _zoomScale,
-                                              renderContent:
-                                                  _terminalMode ==
-                                                  TerminalMode.history,
                                               verticalScrollController:
                                                   _historyVerticalScrollController,
                                               horizontalScrollController:
@@ -2352,6 +2359,12 @@ $metadataCommand
                                                   ref
                                                       .read(settingsProvider)
                                                       .scrollbackLines,
+                                            ),
+                                          if (revealHistorySpace &&
+                                              _terminalMode !=
+                                                  TerminalMode.history)
+                                            const SizedBox(
+                                              height: _historyRevealOffsetPx,
                                             ),
                                           SizedBox(
                                             height: liveHeight,
