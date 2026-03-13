@@ -160,8 +160,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   static const int _maxDeferredStreamOutputChars = 256 * 1024;
   static const int _literalInputChunkLength = 1024;
   static const Duration _connectionLookupTimeout = Duration(seconds: 3);
-  static const Duration _historyCacheRefreshDebounce = Duration(
-    milliseconds: 90,
+  static const Duration _historyCacheRefreshThrottle = Duration(
+    milliseconds: 500,
   );
   static const Duration _initialControlRestartDelay = Duration(
     milliseconds: 250,
@@ -630,7 +630,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (activePane != null) {
       ref.read(terminalDisplayProvider.notifier).updatePane(activePane);
       _seedHistoryCacheForActivePane(rebuild: false);
-      _ensureFullHistoryLoadedForActivePane();
       _keepHistorySurfacePinnedToLiveTail();
     }
 
@@ -928,8 +927,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    _historyCacheRefreshTimer?.cancel();
-    _historyCacheRefreshTimer = Timer(_historyCacheRefreshDebounce, () {
+    if (_historyCacheRefreshTimer != null) {
+      return;
+    }
+
+    _historyCacheRefreshTimer = Timer(_historyCacheRefreshThrottle, () {
       _historyCacheRefreshTimer = null;
       if (!mounted || _isDisposed || _terminalMode == TerminalMode.history) {
         return;
@@ -1037,6 +1039,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _flushDeferredStreamOutput();
       }
       if (_terminalMode != TerminalMode.history) {
+        _historyCacheRefreshTimer?.cancel();
+        _historyCacheRefreshTimer = null;
+        _seedHistoryCacheForActivePane(rebuild: false);
+        _ensureFullHistoryLoadedForActivePane();
         setState(() {
           _terminalMode = TerminalMode.history;
         });
@@ -2108,7 +2114,6 @@ $metadataCommand
         _keepHistorySurfacePinnedToLiveTail();
       }
     }
-    _ensureFullHistoryLoadedForActivePane();
   }
 
   void _applyTerminalFrame(TerminalSnapshotFrame viewData) {
@@ -2321,6 +2326,9 @@ $metadataCommand
                                               backgroundColor: backgroundColor,
                                               foregroundColor: foregroundColor,
                                               zoomScale: _zoomScale,
+                                              renderContent:
+                                                  _terminalMode ==
+                                                  TerminalMode.history,
                                               verticalScrollController:
                                                   _historyVerticalScrollController,
                                               horizontalScrollController:
