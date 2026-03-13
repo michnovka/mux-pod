@@ -35,6 +35,8 @@ import 'widgets/pane_terminal_view.dart';
 /// Terminal mode used by the mobile UI.
 enum TerminalMode { normal, select, history }
 
+enum _ConnectionIndicatorMode { latency, bandwidth }
+
 class _PaneSnapshotPayload {
   final String activeContent;
   final String mainContent;
@@ -196,6 +198,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     const TerminalSnapshotFrame(),
   );
   final _latencyNotifier = ValueNotifier<int>(0);
+  final _bandwidthNotifier = ValueNotifier<int>(0);
   final _deferredStreamOutput = BoundedTextBuffer(
     maxLength: _maxDeferredStreamOutputChars,
   );
@@ -205,12 +208,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Timer? _controlSyncTimer;
   Timer? _controlRestartTimer;
   Timer? _latencyTimer;
+  Timer? _bandwidthTimer;
   Timer? _historyCacheRefreshTimer;
   int _controlRestartAttempt = 0;
   bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
   bool _isHistoryLoading = false;
   double _lastKeyboardInset = 0;
+  _ConnectionIndicatorMode _connectionIndicatorMode =
+      _ConnectionIndicatorMode.latency;
+  int _lastBandwidthSampleTotalBytes = 0;
+  DateTime? _lastBandwidthSampleAt;
 
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
@@ -389,6 +397,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    _startBandwidthPolling();
     unawaited(_refreshLatency());
     _latencyTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       unawaited(_refreshLatency());
@@ -399,9 +408,67 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _latencyTimer?.cancel();
     _latencyTimer = null;
     _isLatencyProbeInFlight = false;
+    _stopBandwidthPolling(resetValue: resetValue);
     if (resetValue && !_isDisposed) {
       _latencyNotifier.value = 0;
     }
+  }
+
+  void _startBandwidthPolling() {
+    _stopBandwidthPolling();
+    if (_isDisposed || _isInBackground) {
+      return;
+    }
+
+    final sshClient = _sshNotifier?.client;
+    _lastBandwidthSampleTotalBytes = sshClient?.totalPayloadBytes ?? 0;
+    _lastBandwidthSampleAt = DateTime.now();
+
+    _bandwidthTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _refreshBandwidth();
+    });
+  }
+
+  void _stopBandwidthPolling({bool resetValue = false}) {
+    _bandwidthTimer?.cancel();
+    _bandwidthTimer = null;
+    _lastBandwidthSampleTotalBytes = 0;
+    _lastBandwidthSampleAt = null;
+    if (resetValue && !_isDisposed) {
+      _bandwidthNotifier.value = 0;
+    }
+  }
+
+  void _refreshBandwidth() {
+    if (_isDisposed || _isInBackground || !mounted) {
+      return;
+    }
+
+    final sshClient = _sshNotifier?.client;
+    if (sshClient == null || !sshClient.isConnected) {
+      return;
+    }
+
+    final now = DateTime.now();
+    final lastSampleAt = _lastBandwidthSampleAt;
+    if (lastSampleAt == null) {
+      _lastBandwidthSampleAt = now;
+      _lastBandwidthSampleTotalBytes = sshClient.totalPayloadBytes;
+      return;
+    }
+
+    final elapsedMs = now.difference(lastSampleAt).inMilliseconds;
+    if (elapsedMs <= 0) {
+      return;
+    }
+
+    final totalBytes = sshClient.totalPayloadBytes;
+    final deltaBytes = math.max(0, totalBytes - _lastBandwidthSampleTotalBytes);
+    final bitsPerSecond = (deltaBytes * 8 * 1000 / elapsedMs).round();
+
+    _lastBandwidthSampleAt = now;
+    _lastBandwidthSampleTotalBytes = totalBytes;
+    _bandwidthNotifier.value = bitsPerSecond;
   }
 
   Future<void> _refreshLatency() async {
@@ -2146,6 +2213,7 @@ $metadataCommand
     // Dispose ValueNotifier
     _viewNotifier.dispose();
     _latencyNotifier.dispose();
+    _bandwidthNotifier.dispose();
     _historyPendingLinesNotifier.dispose();
     // Dispose scroll controller
     _terminalScrollController.dispose();
@@ -3117,11 +3185,16 @@ $metadataCommand
                   ),
                 ),
               ),
-            // Latency / Reconnect indicator
-            ValueListenableBuilder<int>(
-              valueListenable: _latencyNotifier,
-              builder: (context, latency, _) =>
-                  _buildConnectionIndicator(latency),
+            // Latency / Bandwidth / Reconnect indicator
+            AnimatedBuilder(
+              animation: Listenable.merge([
+                _latencyNotifier,
+                _bandwidthNotifier,
+              ]),
+              builder: (context, _) => _buildConnectionIndicator(
+                latency: _latencyNotifier.value,
+                bandwidthBitsPerSecond: _bandwidthNotifier.value,
+              ),
             ),
             // Settings button
             IconButton(
@@ -3834,8 +3907,11 @@ $metadataCommand
     }
   }
 
-  /// Connection status indicator (displays latency or reconnection status)
-  Widget _buildConnectionIndicator(int latency) {
+  /// Connection status indicator (displays latency, bandwidth, or reconnect status).
+  Widget _buildConnectionIndicator({
+    required int latency,
+    required int bandwidthBitsPerSecond,
+  }) {
     final colorScheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -3844,7 +3920,17 @@ $metadataCommand
       ),
       child: _sshState.isReconnecting
           ? _buildReconnectingIndicator()
-          : _buildLatencyIndicator(latency),
+          : GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _rotateConnectionIndicatorMode,
+              child: switch (_connectionIndicatorMode) {
+                _ConnectionIndicatorMode.latency => _buildLatencyIndicator(
+                  latency,
+                ),
+                _ConnectionIndicatorMode.bandwidth =>
+                  _buildBandwidthIndicator(bandwidthBitsPerSecond),
+              },
+            ),
     );
   }
 
@@ -3880,6 +3966,60 @@ $metadataCommand
         ),
       ],
     );
+  }
+
+  Widget _buildBandwidthIndicator(int bitsPerSecond) {
+    final indicatorColor = bitsPerSecond > 0
+        ? DesignColors.primary
+        : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.55);
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          Icons.swap_vert,
+          size: 10,
+          color: indicatorColor.withValues(alpha: 0.8),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          _formatBandwidth(bitsPerSecond),
+          style: GoogleFonts.jetBrainsMono(
+            fontSize: 10,
+            color: indicatorColor.withValues(alpha: 0.8),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _rotateConnectionIndicatorMode() {
+    if (_sshState.isReconnecting || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _connectionIndicatorMode = switch (_connectionIndicatorMode) {
+        _ConnectionIndicatorMode.latency => _ConnectionIndicatorMode.bandwidth,
+        _ConnectionIndicatorMode.bandwidth => _ConnectionIndicatorMode.latency,
+      };
+    });
+  }
+
+  String _formatBandwidth(int bitsPerSecond) {
+    if (bitsPerSecond >= 1000 * 1000) {
+      final megabits = bitsPerSecond / (1000 * 1000);
+      final precision = megabits >= 10 ? 0 : 1;
+      return '${megabits.toStringAsFixed(precision)}Mbit/s';
+    }
+
+    if (bitsPerSecond >= 1000) {
+      final kilobits = bitsPerSecond / 1000;
+      final precision = kilobits >= 10 ? 0 : 1;
+      return '${kilobits.toStringAsFixed(precision)}kbit/s';
+    }
+
+    return '$bitsPerSecond bit/s';
   }
 
   /// Reconnecting indicator

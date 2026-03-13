@@ -177,11 +177,20 @@ class SshClient {
   /// Detected absolute path of the tmux binary
   String? _tmuxPath;
 
+  int _receivedPayloadBytes = 0;
+  int _sentPayloadBytes = 0;
+
   /// Lock for exclusive access to exec channel
   Completer<void>? _execLock;
 
   /// Absolute path of tmux (null if not detected)
   String? get tmuxPath => _tmuxPath;
+
+  int get receivedPayloadBytes => _receivedPayloadBytes;
+
+  int get sentPayloadBytes => _sentPayloadBytes;
+
+  int get totalPayloadBytes => _receivedPayloadBytes + _sentPayloadBytes;
 
   /// Keep-alive timer
   Timer? _keepAliveTimer;
@@ -242,6 +251,7 @@ class SshClient {
 
     _state = SshConnectionState.connecting;
     _lastError = null;
+    _resetPayloadCounters();
 
     try {
       // Socket connection
@@ -285,9 +295,15 @@ class SshClient {
       if (sanitizedTmuxPath != null) {
         // Verify user-specified path exists
         final verifyExitCode = await _withExecLock(() async {
-          final session = await _client!.execute('test -x $sanitizedTmuxPath');
-          await session.stdout.drain();
-          await session.stderr.drain();
+          final command = 'test -x $sanitizedTmuxPath';
+          _recordSentBytes(utf8.encode(command).length);
+          final session = await _client!.execute(command);
+          await session.stdout.forEach((data) {
+            _recordReceivedBytes(data.length);
+          });
+          await session.stderr.forEach((data) {
+            _recordReceivedBytes(data.length);
+          });
           final code = session.exitCode;
           session.close();
           return code;
@@ -428,7 +444,11 @@ class SshClient {
     if (_client == null) return;
 
     try {
-      _controlShell = PersistentShell(_client!);
+      _controlShell = PersistentShell(
+        _client!,
+        onBytesReceived: _recordReceivedBytes,
+        onBytesSent: _recordSentBytes,
+      );
       await _controlShell!.start();
     } catch (e) {
       // Even if persistent shell fails to start, the connection itself continues
@@ -437,7 +457,11 @@ class SshClient {
     }
 
     try {
-      _inputShell = PersistentShell(_client!);
+      _inputShell = PersistentShell(
+        _client!,
+        onBytesReceived: _recordReceivedBytes,
+        onBytesSent: _recordSentBytes,
+      );
       await _inputShell!.start();
     } catch (e) {
       _inputShell = null;
@@ -469,7 +493,11 @@ class SshClient {
 
     try {
       await shell?.dispose();
-      final nextShell = PersistentShell(_client!);
+      final nextShell = PersistentShell(
+        _client!,
+        onBytesReceived: _recordReceivedBytes,
+        onBytesSent: _recordSentBytes,
+      );
       await nextShell.start();
       return nextShell;
     } catch (_) {
@@ -502,10 +530,17 @@ class SshClient {
     // Step 1: Detect via login shell
     try {
       final path = await _withExecLock(() async {
-        final session = await _client!.execute(r"$SHELL -lc 'command -v tmux'");
+        const command = r"$SHELL -lc 'command -v tmux'";
+        _recordSentBytes(utf8.encode(command).length);
+        final session = await _client!.execute(command);
         final stdoutBytes = <int>[];
-        await session.stdout.forEach((data) => stdoutBytes.addAll(data));
-        await session.stderr.drain();
+        await session.stdout.forEach((data) {
+          _recordReceivedBytes(data.length);
+          stdoutBytes.addAll(data);
+        });
+        await session.stderr.forEach((data) {
+          _recordReceivedBytes(data.length);
+        });
         session.close();
         return utf8.decode(stdoutBytes, allowMalformed: true).trim();
       });
@@ -528,9 +563,15 @@ class SshClient {
     for (final candidate in candidates) {
       try {
         final exitCode = await _withExecLock(() async {
-          final session = await _client!.execute('test -x $candidate');
-          await session.stdout.drain();
-          await session.stderr.drain();
+          final command = 'test -x $candidate';
+          _recordSentBytes(utf8.encode(command).length);
+          final session = await _client!.execute(command);
+          await session.stdout.forEach((data) {
+            _recordReceivedBytes(data.length);
+          });
+          await session.stderr.forEach((data) {
+            _recordReceivedBytes(data.length);
+          });
           final code = session.exitCode;
           session.close();
           return code;
@@ -668,13 +709,19 @@ class SshClient {
 
       // Set up stdout/stderr listeners
       _stdoutSubscription = _session!.stdout.listen(
-        _handleData,
+        (data) {
+          _recordReceivedBytes(data.length);
+          _handleData(data);
+        },
         onError: _handleError,
         onDone: _handleDone,
       );
 
       _stderrSubscription = _session!.stderr.listen(
-        _handleData,
+        (data) {
+          _recordReceivedBytes(data.length);
+          _handleData(data);
+        },
         onError: _handleError,
       );
     } catch (e) {
@@ -727,20 +774,28 @@ class SshClient {
       );
 
       _streamingShellStdoutSubscription = _streamingShellSession!.stdout.listen(
-        _handleStreamingShellData,
+        (data) {
+          _recordReceivedBytes(data.length);
+          _handleStreamingShellData(data);
+        },
         onError: _handleStreamingShellError,
         onDone: _handleStreamingShellDone,
       );
 
       _streamingShellStderrSubscription = _streamingShellSession!.stderr.listen(
-        _handleStreamingShellData,
+        (data) {
+          _recordReceivedBytes(data.length);
+          _handleStreamingShellData(data);
+        },
         onError: _handleStreamingShellError,
       );
 
       final command = startupCommand.endsWith('\n')
           ? startupCommand
           : '$startupCommand\n';
-      _streamingShellSession!.write(utf8.encode(command));
+      final commandBytes = utf8.encode(command);
+      _recordSentBytes(commandBytes.length);
+      _streamingShellSession!.write(commandBytes);
     } catch (e) {
       await stopStreamingShell();
       throw SshConnectionError('Failed to start streaming shell: $e', e);
@@ -771,7 +826,9 @@ class SshClient {
     if (_isDisposed || !isConnected || _session == null) {
       throw SshConnectionError('Not connected or shell not started');
     }
-    _session!.write(utf8.encode(data));
+    final encoded = utf8.encode(data);
+    _recordSentBytes(encoded.length);
+    _session!.write(encoded);
   }
 
   /// Write byte data to the shell
@@ -781,6 +838,7 @@ class SshClient {
     if (_isDisposed || !isConnected || _session == null) {
       throw SshConnectionError('Not connected or shell not started');
     }
+    _recordSentBytes(data.length);
     _session!.write(data);
   }
 
@@ -789,7 +847,9 @@ class SshClient {
     if (_isDisposed || !isConnected || _streamingShellSession == null) {
       throw SshConnectionError('Streaming shell not started');
     }
-    _streamingShellSession!.write(utf8.encode(data));
+    final encoded = utf8.encode(data);
+    _recordSentBytes(encoded.length);
+    _streamingShellSession!.write(encoded);
   }
 
   /// Stop the dedicated streaming shell without disconnecting SSH.
@@ -870,6 +930,7 @@ class SshClient {
     try {
       final resolvedCommand = _resolveTmuxCommand(command);
       return await _withExecLock(() async {
+        _recordSentBytes(utf8.encode(resolvedCommand).length);
         final session = await _client!.execute(resolvedCommand);
 
         // Collect output (collect as byte sequence and decode at the end)
@@ -880,13 +941,19 @@ class SshClient {
         final stderrCompleter = Completer<void>();
 
         session.stdout.listen(
-          (data) => stdoutBytes.addAll(data),
+          (data) {
+            _recordReceivedBytes(data.length);
+            stdoutBytes.addAll(data);
+          },
           onDone: () => stdoutCompleter.complete(),
           onError: (e) => stdoutCompleter.completeError(e),
         );
 
         session.stderr.listen(
-          (data) => stderrBytes.addAll(data),
+          (data) {
+            _recordReceivedBytes(data.length);
+            stderrBytes.addAll(data);
+          },
           onDone: () => stderrCompleter.complete(),
           onError: (e) => stderrCompleter.completeError(e),
         );
@@ -1005,6 +1072,7 @@ class SshClient {
     try {
       final resolvedCommand = _resolveTmuxCommand(command);
       return await _withExecLock(() async {
+        _recordSentBytes(utf8.encode(resolvedCommand).length);
         final session = await _client!.execute(resolvedCommand);
 
         // Accumulate as byte sequence (prevents UTF-8 boundary splits from chunk-by-chunk decoding)
@@ -1015,13 +1083,19 @@ class SshClient {
         final stderrCompleter = Completer<void>();
 
         session.stdout.listen(
-          (data) => stdoutBytes.addAll(data),
+          (data) {
+            _recordReceivedBytes(data.length);
+            stdoutBytes.addAll(data);
+          },
           onDone: () => stdoutCompleter.complete(),
           onError: (e) => stdoutCompleter.completeError(e),
         );
 
         session.stderr.listen(
-          (data) => stderrBytes.addAll(data),
+          (data) {
+            _recordReceivedBytes(data.length);
+            stderrBytes.addAll(data);
+          },
           onDone: () => stderrCompleter.complete(),
           onError: (e) => stderrCompleter.completeError(e),
         );
@@ -1075,6 +1149,31 @@ class SshClient {
     _isDisposed = true;
     await disconnect();
     await _connectionStateController.close();
+  }
+
+  void _resetPayloadCounters() {
+    _receivedPayloadBytes = 0;
+    _sentPayloadBytes = 0;
+  }
+
+  void _recordReceivedBytes(int bytes) {
+    if (bytes <= 0) {
+      return;
+    }
+    _receivedPayloadBytes += bytes;
+  }
+
+  void _recordSentBytes(int bytes) {
+    if (bytes <= 0) {
+      return;
+    }
+    _sentPayloadBytes += bytes;
+  }
+
+  @visibleForTesting
+  void debugRecordPayloadBytes({int received = 0, int sent = 0}) {
+    _recordReceivedBytes(received);
+    _recordSentBytes(sent);
   }
 }
 
