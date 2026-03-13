@@ -35,8 +35,7 @@ class TmuxControlClient {
 
   Completer<String>? _pendingCommand;
   _CommandResponseBuffer? _commandResponseBuffer;
-  String _pendingLine = '';
-  late ByteConversionSink _utf8Sink;
+  final List<int> _pendingLineBytes = <int>[];
   bool _isStarted = false;
   bool _isStopped = false;
 
@@ -110,7 +109,6 @@ class TmuxControlClient {
     }
     _pendingCommand = null;
     _commandResponseBuffer = null;
-    _pendingLine = '';
     _resetDecoder();
     await _sshClient.stopStreamingShell();
   }
@@ -166,30 +164,34 @@ class TmuxControlClient {
   }
 
   void _handleBytes(Uint8List data) {
-    _utf8Sink.add(data);
+    var lineStart = 0;
+
+    for (var index = 0; index < data.length; index++) {
+      if (data[index] != 0x0A) {
+        continue;
+      }
+
+      if (_pendingLineBytes.isEmpty) {
+        _handleLineBytes(Uint8List.sublistView(data, lineStart, index));
+      } else {
+        _pendingLineBytes.addAll(data.sublist(lineStart, index));
+        _handleLineBytes(Uint8List.fromList(_pendingLineBytes));
+        _pendingLineBytes.clear();
+      }
+
+      lineStart = index + 1;
+    }
+
+    if (lineStart < data.length) {
+      _pendingLineBytes.addAll(data.sublist(lineStart));
+    }
   }
 
-  void _handleTextChunk(String chunk) {
-    // Process lines by scanning for newlines with an offset rather than
-    // repeatedly slicing _pendingLine (which allocates a new String for the
-    // remainder on every line).
-    final text = _pendingLine.isEmpty ? chunk : '$_pendingLine$chunk';
-    var start = 0;
-
-    while (true) {
-      final newlineIndex = text.indexOf('\n', start);
-      if (newlineIndex == -1) {
-        _pendingLine = start == 0 ? text : text.substring(start);
-        return;
-      }
-
-      var end = newlineIndex;
-      if (end > start && text.codeUnitAt(end - 1) == 0x0D) {
-        end--;
-      }
-      _handleLine(text.substring(start, end));
-      start = newlineIndex + 1;
-    }
+  void _handleLineBytes(Uint8List bytes) {
+    final length =
+        bytes.isNotEmpty && bytes.last == 0x0D ? bytes.length - 1 : bytes.length;
+    final line = utf8.decode(bytes.sublist(0, length), allowMalformed: true);
+    _handleLine(line);
   }
 
   void _handleLine(String line) {
@@ -290,12 +292,7 @@ class TmuxControlClient {
   }
 
   void _resetDecoder() {
-    _pendingLine = '';
-    _utf8Sink = utf8.decoder.startChunkedConversion(
-      StringConversionSink.fromStringSink(
-        _StreamingStringSink(_handleTextChunk),
-      ),
-    );
+    _pendingLineBytes.clear();
   }
 
   static String _escapeShellArg(String value) {
@@ -439,35 +436,4 @@ class _ParsedPaneOutput {
   final String payload;
 
   const _ParsedPaneOutput({required this.paneId, required this.payload});
-}
-
-class _StreamingStringSink implements StringSink {
-  final void Function(String chunk) onChunk;
-
-  _StreamingStringSink(this.onChunk);
-
-  @override
-  void write(Object? obj) {
-    if (obj != null) {
-      onChunk(obj.toString());
-    }
-  }
-
-  @override
-  void writeAll(Iterable<Object?> objects, [String separator = '']) {
-    if (objects.isEmpty) {
-      return;
-    }
-    onChunk(objects.map((obj) => obj?.toString() ?? '').join(separator));
-  }
-
-  @override
-  void writeCharCode(int charCode) {
-    onChunk(String.fromCharCode(charCode));
-  }
-
-  @override
-  void writeln([Object? obj = '']) {
-    onChunk('${obj ?? ''}\n');
-  }
 }

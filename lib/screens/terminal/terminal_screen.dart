@@ -120,6 +120,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int _controlRestartAttempt = 0;
   bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
+
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
 
@@ -1035,6 +1036,45 @@ $metadataCommand
       }
 
       _applyResyncUpdate(nextView);
+
+      // Post-snapshot ordering fence: send a no-op through the control
+      // mode channel (same stream as %output).  We awaited the snapshot
+      // response before sending this, so tmux processes the fence at
+      // Tf > Ts (snapshot time).  By the time the fence response arrives,
+      // all %output generated before Tf has been delivered.  Clearing
+      // after a successful fence drops pre-snapshot duplicates.
+      //
+      // Bounded-loss tradeoff: output produced between Ts and Tf (one
+      // RTT) is NOT in the snapshot but IS cleared by the fence.  This
+      // is an intentional trade — losing at most one RTT of output
+      // avoids the corruption caused by double-applying duplicates.
+      // For append-only streams the gap is visible until the next
+      // %output arrives; for interactive programs the next keypress
+      // triggers a refresh.
+      //
+      // If the fence fails (timeout / session closed), skip the clear:
+      // the deferred buffer may contain duplicates, but flushing
+      // duplicates is less harmful than silently losing genuinely new
+      // output.  Keep _isResyncingPane true so that:
+      //   (a) new output during history backfill is deferred (prevents
+      //       scrolling snapshot lines into xterm scrollback which would
+      //       break history-prepend dedup), and
+      //   (b) reentrancy is blocked (a second resync cannot start while
+      //       history is still being fetched).
+      final controlClient = _controlClient;
+      if (controlClient != null && controlClient.isStarted) {
+        try {
+          await controlClient.sendCommand(
+            'display-message -p ""',
+            timeout: const Duration(seconds: 1),
+          );
+          // Fence succeeded — all pre-Tf output delivered; safe to clear.
+          _deferredStreamOutput.clear();
+        } catch (_) {
+          // Fence failed — skip clear to avoid losing post-snapshot output.
+        }
+      }
+
       await _prependHistoryScrollback(
         sshClient: sshClient,
         paneId: activePane.id,
@@ -1048,6 +1088,14 @@ $metadataCommand
       }
     } finally {
       _isResyncingPane = false;
+      // Flush any remaining deferred output.  Three scenarios:
+      //  1. Snapshot applied + fence succeeded: buffer was cleared after
+      //     the fence, so only genuinely post-snapshot output remains.
+      //  2. Snapshot applied + fence failed: buffer may contain a mix of
+      //     pre-/post-snapshot output — duplicates are preferable to loss.
+      //  3. Snapshot never applied (error path): all output since resync
+      //     start is still in the buffer and must be flushed to avoid
+      //     silent data loss.
       _flushDeferredStreamOutput();
     }
   }
@@ -1105,7 +1153,14 @@ $metadataCommand
       }
     }
 
-    _terminal.mainBuffer.lines.insertAll(0, historyLines);
+    // Use replaceWith instead of insertAll to avoid xterm circular buffer
+    // assertion failures.  insertAll(0, ...) shifts existing elements via
+    // _moveChild, which calls _move on items that may be in an inconsistent
+    // attached state after circular wrapping.  replaceWith properly detaches
+    // all old items first, then attaches every item via _adoptChild, and
+    // resets _startIndex to 0.
+    final currentLines = _terminal.mainBuffer.lines.toList();
+    _terminal.mainBuffer.lines.replaceWith([...historyLines, ...currentLines]);
     _terminal.notifyListeners();
     if (_terminalMode == TerminalMode.normal &&
         (_paneTerminalViewKey.currentState?.shouldAutoFollow ??

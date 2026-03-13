@@ -190,5 +190,76 @@ void main() {
       expect(outputs.single.paneId, '%1');
       expect(outputs.single.data, '漢漢\n');
     });
+
+    test('tolerates malformed utf8 bytes in pane output', () {
+      final outputs = <({String paneId, String data})>[];
+      final client = TmuxControlClient(
+        SshClient(),
+        onPaneOutput: (paneId, data) {
+          outputs.add((paneId: paneId, data: data));
+        },
+      );
+
+      final bytes = <int>[
+        ...ascii.encode('%output %1 '),
+        0xC3,
+        0x28,
+        ...ascii.encode(r'\012'),
+        0x0A,
+      ];
+
+      expect(
+        () => client.debugAddBytes(Uint8List.fromList(bytes)),
+        returnsNormally,
+      );
+
+      expect(outputs, hasLength(1));
+      expect(outputs.single.paneId, '%1');
+      expect(outputs.single.data, '\uFFFD(\n');
+    });
+
+    test('continues parsing later output after a malformed line', () {
+      final outputs = <({String paneId, String data})>[];
+      final client = TmuxControlClient(
+        SshClient(),
+        onPaneOutput: (paneId, data) {
+          outputs.add((paneId: paneId, data: data));
+        },
+      );
+
+      final bytes = <int>[
+        ...ascii.encode('%output %1 '),
+        0xC3,
+        0x28,
+        ...ascii.encode(r'\012'),
+        0x0A,
+        ...ascii.encode('%output %1 ok'),
+        ...ascii.encode(r'\012'),
+        0x0A,
+      ];
+
+      client.debugAddBytes(Uint8List.fromList(bytes));
+
+      expect(outputs, hasLength(2));
+      expect(outputs[0], (paneId: '%1', data: '\uFFFD(\n'));
+      expect(outputs[1], (paneId: '%1', data: 'ok\n'));
+    });
+
+    test('preserves multibyte utf8 split across byte chunks', () {
+      final outputs = <({String paneId, String data})>[];
+      final client = TmuxControlClient(
+        SshClient(),
+        onPaneOutput: (paneId, data) {
+          outputs.add((paneId: paneId, data: data));
+        },
+      );
+
+      final encoded = utf8.encode('%output %1 é\\012\n');
+      client.debugAddBytes(Uint8List.fromList(encoded.sublist(0, 12)));
+      client.debugAddBytes(Uint8List.fromList(encoded.sublist(12)));
+
+      expect(outputs, hasLength(1));
+      expect(outputs.single, (paneId: '%1', data: 'é\n'));
+    });
   });
 }

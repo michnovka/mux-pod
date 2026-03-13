@@ -57,6 +57,13 @@ dependencies:
   package_info_plus: ^9.0.0
   xterm: ^4.0.0
 
+dependency_overrides:
+  # Local fork fixing circular buffer corruption in scrollUp/scrollDown.
+  # See: https://github.com/TerminalStudio/xterm.dart/issues/222
+  # Remove once upstream ships a fix.
+  xterm:
+    path: packages/xterm
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
