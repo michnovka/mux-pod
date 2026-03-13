@@ -15,7 +15,7 @@ import '../../services/keychain/secure_storage.dart';
 import '../../services/network/network_monitor.dart';
 import '../../services/ssh/input_queue.dart';
 import '../../services/ssh/ssh_client.dart'
-    show SshClient, SshConnectOptions, SshHostKeyError;
+    show SshConnectOptions, SshHostKeyError;
 import '../../services/terminal/bounded_text_buffer.dart';
 import '../../services/terminal/terminal_output_normalizer.dart';
 import '../../services/terminal/terminal_snapshot.dart';
@@ -28,10 +28,11 @@ import '../../theme/design_colors.dart';
 import '../../widgets/special_keys_bar.dart';
 import '../../providers/terminal_display_provider.dart';
 import '../settings/settings_screen.dart';
+import 'widgets/pane_history_view.dart';
 import 'widgets/pane_terminal_view.dart';
 
 /// Terminal mode used by the mobile UI.
-enum TerminalMode { normal, select }
+enum TerminalMode { normal, select, history }
 
 class _PaneSnapshotPayload {
   final String activeContent;
@@ -89,6 +90,38 @@ class _TmuxTargetSelection {
   }
 }
 
+class _PaneHistoryCacheEntry {
+  final String paneId;
+  final String content;
+  final int oldestCapturedStartLine;
+  final bool hasMoreAbove;
+  final bool alternateScreen;
+
+  const _PaneHistoryCacheEntry({
+    required this.paneId,
+    required this.content,
+    required this.oldestCapturedStartLine,
+    required this.hasMoreAbove,
+    required this.alternateScreen,
+  });
+
+  _PaneHistoryCacheEntry copyWith({
+    String? content,
+    int? oldestCapturedStartLine,
+    bool? hasMoreAbove,
+    bool? alternateScreen,
+  }) {
+    return _PaneHistoryCacheEntry(
+      paneId: paneId,
+      content: content ?? this.content,
+      oldestCapturedStartLine:
+          oldestCapturedStartLine ?? this.oldestCapturedStartLine,
+      hasMoreAbove: hasMoreAbove ?? this.hasMoreAbove,
+      alternateScreen: alternateScreen ?? this.alternateScreen,
+    );
+  }
+}
+
 /// Terminal screen (compliant with HTML design specification)
 class TerminalScreen extends ConsumerStatefulWidget {
   final String connectionId;
@@ -116,6 +149,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     with WidgetsBindingObserver {
   static const int _maxDeferredStreamOutputChars = 256 * 1024;
   static const int _literalInputChunkLength = 1024;
+  static const int _historyChunkLineCount = 400;
   static const Duration _connectionLookupTimeout = Duration(seconds: 3);
   static const Duration _initialControlRestartDelay = Duration(
     milliseconds: 250,
@@ -129,10 +163,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   final _paneTerminalViewKey = GlobalKey<PaneTerminalViewState>();
   final _terminalScrollController = _StableScrollController();
+  final _historyVerticalScrollController = ScrollController();
+  final _historyHorizontalScrollController = ScrollController();
   late Terminal _terminal;
   final _terminalController = TerminalController();
   int _terminalScrollbackLines = AppSettings().scrollbackLines;
   final Map<String, _PaneRenderCacheEntry> _paneRenderCache = {};
+  final Map<String, _PaneHistoryCacheEntry> _paneHistoryCache = {};
+  final _historyPendingLinesNotifier = ValueNotifier<int>(0);
 
   // Connection state (managed locally)
   bool _isConnecting = false;
@@ -158,6 +196,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int _controlRestartAttempt = 0;
   bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
+  bool _isHistoryLoading = false;
+  bool _isHistoryLoadingOlder = false;
 
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
@@ -407,6 +447,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     _terminalScrollbackLines = settings.scrollbackLines;
     _paneRenderCache.clear();
+    _paneHistoryCache.clear();
     _resetTerminalEmulator();
     if (mounted) {
       setState(() {});
@@ -441,13 +482,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    final resolvedViewportState =
+        viewportState ??
+        _paneTerminalViewKey.currentState?.captureViewportState() ??
+        _paneRenderCache[resolvedPaneId]?.viewportState ??
+        const PaneTerminalViewportState();
+
     _paneRenderCache[resolvedPaneId] = _PaneRenderCacheEntry(
       terminal: _terminal..onOutput = _handleTerminalOutput,
       frame: _cacheFrameForTerminal(),
-      viewportState:
-          viewportState ??
-          _paneTerminalViewKey.currentState?.captureViewportState() ??
-          const PaneTerminalViewportState(),
+      viewportState: resolvedViewportState,
     );
   }
 
@@ -580,6 +624,351 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
   }
 
+  _PaneHistoryCacheEntry? get _activeHistoryEntry {
+    final paneId = ref.read(tmuxProvider).activePaneId;
+    if (paneId == null) {
+      return null;
+    }
+    return _paneHistoryCache[paneId];
+  }
+
+  String _normalizeHistoryText(String text) {
+    return _trimSingleTrailingNewline(text.replaceAll('\r\n', '\n'));
+  }
+
+  List<String> _historyLines(String content) {
+    if (content.isEmpty) {
+      return const [];
+    }
+    return content.split('\n');
+  }
+
+  String _captureLiveTailHistoryText() {
+    return _normalizeHistoryText(_terminal.buffer.getText());
+  }
+
+  void _seedHistoryCacheForActivePane() {
+    final paneId = ref.read(tmuxProvider).activePaneId;
+    if (paneId == null) {
+      return;
+    }
+
+    _paneHistoryCache[paneId] = _PaneHistoryCacheEntry(
+      paneId: paneId,
+      content: _captureLiveTailHistoryText(),
+      oldestCapturedStartLine: 0,
+      hasMoreAbove: !_viewNotifier.value.alternateScreen,
+      alternateScreen: _viewNotifier.value.alternateScreen,
+    );
+  }
+
+  Future<void> _enterHistoryMode() async {
+    if (_terminalMode == TerminalMode.history) {
+      return;
+    }
+
+    if (_terminalMode == TerminalMode.select) {
+      setState(() {
+        _terminalMode = TerminalMode.normal;
+      });
+      _flushDeferredStreamOutput();
+    }
+
+    final activePane = ref.read(tmuxProvider).activePane;
+    if (activePane == null) {
+      return;
+    }
+
+    _terminalController.clearSelection();
+    _historyPendingLinesNotifier.value = 0;
+    _seedHistoryCacheForActivePane();
+
+    if (mounted) {
+      setState(() {
+        _terminalMode = TerminalMode.history;
+        _isHistoryLoading = true;
+        _isHistoryLoadingOlder = false;
+      });
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _terminalMode != TerminalMode.history) {
+        return;
+      }
+      if (_historyHorizontalScrollController.hasClients) {
+        _historyHorizontalScrollController.jumpTo(
+          _historyHorizontalScrollController.position.minScrollExtent,
+        );
+      }
+      if (_historyVerticalScrollController.hasClients) {
+        _historyVerticalScrollController.jumpTo(
+          _historyVerticalScrollController.position.maxScrollExtent,
+        );
+      }
+    });
+
+    await _loadInitialHistorySnapshot(activePane.id);
+  }
+
+  void _exitHistoryMode({bool jumpToLive = false}) {
+    if (_terminalMode != TerminalMode.history) {
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _terminalMode = TerminalMode.normal;
+        _isHistoryLoading = false;
+        _isHistoryLoadingOlder = false;
+      });
+    }
+    _historyPendingLinesNotifier.value = 0;
+
+    if (jumpToLive) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) {
+          return;
+        }
+        _paneTerminalViewKey.currentState?.scrollToBottom();
+      });
+    }
+  }
+
+  void _recordHistoryPendingLinesFromTerminalAdvance({
+    required int beforeAbsoluteCursorY,
+  }) {
+    final afterAbsoluteCursorY = _terminal.buffer.absoluteCursorY;
+    final delta = afterAbsoluteCursorY - beforeAbsoluteCursorY;
+    if (delta > 0) {
+      _historyPendingLinesNotifier.value += delta;
+    }
+  }
+
+  Future<void> _loadInitialHistorySnapshot(String paneId) async {
+    final sshClient = ref.read(sshProvider.notifier).client;
+    if (sshClient == null || !sshClient.isConnected) {
+      if (mounted && _terminalMode == TerminalMode.history) {
+        setState(() {
+          _isHistoryLoading = false;
+        });
+      }
+      return;
+    }
+
+    final existingEntry = _paneHistoryCache[paneId];
+    if (existingEntry?.alternateScreen == true) {
+      if (mounted && _terminalMode == TerminalMode.history) {
+        setState(() {
+          _isHistoryLoading = false;
+        });
+      }
+      return;
+    }
+
+    final maxHistoryLines = ref.read(settingsProvider).scrollbackLines;
+    final chunkSize = maxHistoryLines < _historyChunkLineCount
+        ? maxHistoryLines
+        : _historyChunkLineCount;
+    if (chunkSize <= 0) {
+      if (mounted && _terminalMode == TerminalMode.history) {
+        setState(() {
+          _isHistoryLoading = false;
+        });
+      }
+      return;
+    }
+
+    try {
+      final historyOutput = await sshClient.execPersistent(
+        TmuxCommands.capturePane(
+          paneId,
+          escapeSequences: false,
+          preserveTrailingSpaces: true,
+          startLine: -chunkSize,
+        ),
+        timeout: const Duration(seconds: 2),
+      );
+
+      final normalized = _normalizeHistoryText(historyOutput);
+      final capturedLines = _historyLines(normalized).length;
+      final hasMoreAbove =
+          capturedLines >= chunkSize && chunkSize < maxHistoryLines;
+
+      final nextEntry = _PaneHistoryCacheEntry(
+        paneId: paneId,
+        content: normalized,
+        oldestCapturedStartLine: -chunkSize,
+        hasMoreAbove: hasMoreAbove,
+        alternateScreen: false,
+      );
+      final keepPinnedToBottom =
+          !_historyVerticalScrollController.hasClients ||
+          (_historyVerticalScrollController.position.maxScrollExtent -
+                  _historyVerticalScrollController.position.pixels) <=
+              32;
+      _paneHistoryCache[paneId] = nextEntry;
+
+      if (mounted &&
+          _terminalMode == TerminalMode.history &&
+          ref.read(tmuxProvider).activePaneId == paneId) {
+        setState(() {
+          _isHistoryLoading = false;
+        });
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted ||
+              _terminalMode != TerminalMode.history ||
+              !_historyVerticalScrollController.hasClients) {
+            return;
+          }
+          if (keepPinnedToBottom) {
+            _historyVerticalScrollController.jumpTo(
+              _historyVerticalScrollController.position.maxScrollExtent,
+            );
+          }
+        });
+      }
+    } catch (_) {
+      if (mounted &&
+          _terminalMode == TerminalMode.history &&
+          ref.read(tmuxProvider).activePaneId == paneId) {
+        setState(() {
+          _isHistoryLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _loadOlderHistoryChunk() async {
+    if (_isHistoryLoading ||
+        _isHistoryLoadingOlder ||
+        _terminalMode != TerminalMode.history) {
+      return;
+    }
+
+    final activePaneId = ref.read(tmuxProvider).activePaneId;
+    final entry = _activeHistoryEntry;
+    final sshClient = ref.read(sshProvider.notifier).client;
+    if (activePaneId == null ||
+        entry == null ||
+        sshClient == null ||
+        !sshClient.isConnected ||
+        entry.alternateScreen ||
+        !entry.hasMoreAbove ||
+        entry.oldestCapturedStartLine >= 0) {
+      return;
+    }
+
+    final maxHistoryLines = ref.read(settingsProvider).scrollbackLines;
+    final loadedLines = -entry.oldestCapturedStartLine;
+    if (loadedLines >= maxHistoryLines) {
+      _paneHistoryCache[activePaneId] = entry.copyWith(hasMoreAbove: false);
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+
+    final remainingLines = maxHistoryLines - loadedLines;
+    final chunkSize = remainingLines < _historyChunkLineCount
+        ? remainingLines
+        : _historyChunkLineCount;
+    if (chunkSize <= 0) {
+      _paneHistoryCache[activePaneId] = entry.copyWith(hasMoreAbove: false);
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+
+    final oldPixels = _historyVerticalScrollController.hasClients
+        ? _historyVerticalScrollController.position.pixels
+        : 0.0;
+    final oldMaxExtent = _historyVerticalScrollController.hasClients
+        ? _historyVerticalScrollController.position.maxScrollExtent
+        : 0.0;
+
+    if (mounted) {
+      setState(() {
+        _isHistoryLoadingOlder = true;
+      });
+    }
+
+    try {
+      final newStart = entry.oldestCapturedStartLine - chunkSize;
+      final olderOutput = await sshClient.execPersistent(
+        TmuxCommands.capturePane(
+          activePaneId,
+          escapeSequences: false,
+          preserveTrailingSpaces: true,
+          startLine: newStart,
+          endLine: entry.oldestCapturedStartLine - 1,
+        ),
+        timeout: const Duration(seconds: 2),
+      );
+
+      final normalizedOlder = _normalizeHistoryText(olderOutput);
+      final olderLines = _historyLines(normalizedOlder);
+      final capturedLineCount = olderLines.length;
+      if (olderLines.isEmpty) {
+        _paneHistoryCache[activePaneId] = entry.copyWith(hasMoreAbove: false);
+      } else {
+        final currentLines = _historyLines(entry.content);
+        if (currentLines.isNotEmpty &&
+            olderLines.last.trimRight() == currentLines.first.trimRight()) {
+          olderLines.removeLast();
+        }
+
+        if (olderLines.isEmpty) {
+          _paneHistoryCache[activePaneId] = entry.copyWith(hasMoreAbove: false);
+        } else {
+          final olderText = olderLines.join('\n');
+          _paneHistoryCache[activePaneId] = entry.copyWith(
+            content: entry.content.isEmpty
+                ? olderText
+                : '$olderText\n${entry.content}',
+            oldestCapturedStartLine: newStart,
+            hasMoreAbove:
+                capturedLineCount >= chunkSize && -newStart < maxHistoryLines,
+          );
+
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted ||
+                _terminalMode != TerminalMode.history ||
+                ref.read(tmuxProvider).activePaneId != activePaneId ||
+                !_historyVerticalScrollController.hasClients) {
+              return;
+            }
+            final position = _historyVerticalScrollController.position;
+            final delta = position.maxScrollExtent - oldMaxExtent;
+            final target = (oldPixels + delta).clamp(
+              position.minScrollExtent,
+              position.maxScrollExtent,
+            );
+            position.jumpTo(target);
+          });
+        }
+      }
+    } catch (_) {
+      // Keep the current frozen history content on fetch failures.
+    } finally {
+      if (mounted &&
+          _terminalMode == TerminalMode.history &&
+          ref.read(tmuxProvider).activePaneId == activePaneId) {
+        setState(() {
+          _isHistoryLoadingOlder = false;
+        });
+      } else {
+        _isHistoryLoadingOlder = false;
+      }
+    }
+  }
+
+  void _leaveHistoryModeBeforeSwitch() {
+    if (_terminalMode == TerminalMode.history) {
+      _exitHistoryMode();
+    }
+  }
+
   void _prunePaneRenderCache() {
     final validPaneIds = <String>{};
     for (final session in ref.read(tmuxProvider).sessions) {
@@ -590,6 +979,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
     }
     _paneRenderCache.removeWhere((paneId, _) => !validPaneIds.contains(paneId));
+    _paneHistoryCache.removeWhere(
+      (paneId, _) => !validPaneIds.contains(paneId),
+    );
   }
 
   /// Connect via SSH and set up tmux session
@@ -968,9 +1360,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    final cursorBeforeWrite = _terminal.buffer.absoluteCursorY;
     final shouldAutoScroll =
         _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
     _terminal.write(data);
+    if (_terminalMode == TerminalMode.history) {
+      _recordHistoryPendingLinesFromTerminalAdvance(
+        beforeAbsoluteCursorY: cursorBeforeWrite,
+      );
+      return;
+    }
     if (shouldAutoScroll || !_hasInitialScrolled) {
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
@@ -1023,9 +1422,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final bufferedOutput = _deferredStreamOutput.takeAll();
+    final cursorBeforeWrite = _terminal.buffer.absoluteCursorY;
     final shouldAutoScroll =
         _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
     _terminal.write(bufferedOutput);
+    if (_terminalMode == TerminalMode.history) {
+      _recordHistoryPendingLinesFromTerminalAdvance(
+        beforeAbsoluteCursorY: cursorBeforeWrite,
+      );
+      return;
+    }
     if (shouldAutoScroll) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
     }
@@ -1163,7 +1569,6 @@ $metadataCommand
         return;
       }
 
-      final scrollbackLines = ref.read(settingsProvider).scrollbackLines;
       final snapshotCommand = _buildPaneSnapshotCommand(activePane.id);
 
       final startTime = DateTime.now();
@@ -1277,12 +1682,7 @@ $metadataCommand
       // If the fence fails (timeout / session closed), skip the clear:
       // the deferred buffer may contain duplicates, but flushing
       // duplicates is less harmful than silently losing genuinely new
-      // output.  Keep _isResyncingPane true so that:
-      //   (a) new output during history backfill is deferred (prevents
-      //       scrolling snapshot lines into xterm scrollback which would
-      //       break history-prepend dedup), and
-      //   (b) reentrancy is blocked (a second resync cannot start while
-      //       history is still being fetched).
+      // output.
       final controlClient = _controlClient;
       if (controlClient != null && controlClient.isStarted) {
         try {
@@ -1296,13 +1696,6 @@ $metadataCommand
           // Fence failed — skip clear to avoid losing post-snapshot output.
         }
       }
-
-      await _prependHistoryScrollback(
-        sshClient: sshClient,
-        paneId: activePane.id,
-        scrollbackLines: scrollbackLines,
-        alternateScreen: nextView.alternateScreen,
-      );
     } catch (_) {
       final currentState = ref.read(sshProvider);
       if (!currentState.isReconnecting) {
@@ -1325,99 +1718,6 @@ $metadataCommand
   void _applyResyncUpdate(TerminalSnapshotFrame viewData) {
     _pendingViewData = viewData;
     _applyUpdate();
-  }
-
-  Future<void> _prependHistoryScrollback({
-    required SshClient sshClient,
-    required String paneId,
-    required int scrollbackLines,
-    required bool alternateScreen,
-  }) async {
-    if (alternateScreen || scrollbackLines <= _terminal.viewHeight) {
-      return;
-    }
-
-    final historyOutput = await sshClient.execPersistent(
-      TmuxCommands.capturePane(
-        paneId,
-        escapeSequences: false,
-        preserveTrailingSpaces: true,
-        startLine: -scrollbackLines,
-        endLine: -1,
-      ),
-      timeout: const Duration(seconds: 2),
-    );
-
-    final normalized = _trimSingleTrailingNewline(
-      historyOutput.replaceAll('\r\n', '\n'),
-    );
-    if (normalized.isEmpty) {
-      return;
-    }
-
-    var historyLines = normalized
-        .split('\n')
-        .map((line) => _buildHistoryBufferLine(line, _terminal.viewWidth))
-        .toList();
-    if (historyLines.isEmpty) {
-      return;
-    }
-
-    // Drop the last history line if it duplicates the first visible line.
-    // tmux can place the same line in both scrollback (-1) and the visible
-    // area (0) after a full-screen redraw.
-    if (_terminal.mainBuffer.lines.length > 0) {
-      final firstVisible = _terminal.mainBuffer.lines[0].getText().trimRight();
-      final lastHistory = historyLines.last.getText().trimRight();
-      if (lastHistory.isNotEmpty && lastHistory == firstVisible) {
-        historyLines.removeLast();
-        if (historyLines.isEmpty) return;
-      }
-    }
-
-    // Use replaceWith instead of insertAll to avoid xterm circular buffer
-    // assertion failures.  insertAll(0, ...) shifts existing elements via
-    // _moveChild, which calls _move on items that may be in an inconsistent
-    // attached state after circular wrapping.  replaceWith properly detaches
-    // all old items first, then attaches every item via _adoptChild, and
-    // resets _startIndex to 0.
-    final currentLines = _terminal.mainBuffer.lines.toList();
-    _terminal.mainBuffer.lines.replaceWith([...historyLines, ...currentLines]);
-    _terminal.notifyListeners();
-    if (_terminalMode == TerminalMode.normal &&
-        (_paneTerminalViewKey.currentState?.shouldAutoFollow ??
-            !_hasInitialScrolled)) {
-      _paneTerminalViewKey.currentState?.scrollToBottom();
-    }
-  }
-
-  BufferLine _buildHistoryBufferLine(String text, int width) {
-    final line = BufferLine(width);
-    var column = 0;
-
-    for (final rune in text.runes) {
-      if (column >= width) {
-        break;
-      }
-
-      if (rune == 0x09) {
-        final nextTabStop = ((column ~/ 8) + 1) * 8;
-        while (column < nextTabStop && column < width) {
-          line.setCodePoint(column, 0x20);
-          column += 1;
-        }
-        continue;
-      }
-
-      line.setCodePoint(column, rune);
-      final cellWidth = line.getWidth(column);
-      if (cellWidth <= 0) {
-        continue;
-      }
-      column += cellWidth;
-    }
-
-    return line;
   }
 
   /// Apply pending update
@@ -1459,7 +1759,7 @@ $metadataCommand
   }
 
   void _handleTerminalOutput(String data) {
-    if (_terminalMode == TerminalMode.select) {
+    if (_terminalMode != TerminalMode.normal) {
       return;
     }
 
@@ -1548,8 +1848,11 @@ $metadataCommand
     // Dispose ValueNotifier
     _viewNotifier.dispose();
     _latencyNotifier.dispose();
+    _historyPendingLinesNotifier.dispose();
     // Dispose scroll controller
     _terminalScrollController.dispose();
+    _historyVerticalScrollController.dispose();
+    _historyHorizontalScrollController.dispose();
     _terminalController.dispose();
     super.dispose();
   }
@@ -1594,9 +1897,11 @@ $metadataCommand
                   duration: const Duration(milliseconds: 200),
                   decoration: BoxDecoration(
                     border: Border.all(
-                      color: _terminalMode == TerminalMode.select
-                          ? DesignColors.warning
-                          : Colors.transparent,
+                      color: switch (_terminalMode) {
+                        TerminalMode.select => DesignColors.warning,
+                        TerminalMode.history => DesignColors.primary,
+                        TerminalMode.normal => Colors.transparent,
+                      },
                       width: 3,
                     ),
                   ),
@@ -1606,18 +1911,40 @@ $metadataCommand
                         child: ValueListenableBuilder<TerminalSnapshotFrame>(
                           valueListenable: _viewNotifier,
                           builder: (context, viewData, _) {
+                            final backgroundColor = Theme.of(
+                              context,
+                            ).scaffoldBackgroundColor;
+                            final foregroundColor = Theme.of(
+                              context,
+                            ).colorScheme.onSurface.withValues(alpha: 0.9);
+
+                            if (_terminalMode == TerminalMode.history) {
+                              final historyEntry = _activeHistoryEntry;
+                              return PaneHistoryView(
+                                content: historyEntry?.content ?? '',
+                                paneWidth: viewData.paneWidth,
+                                backgroundColor: backgroundColor,
+                                foregroundColor: foregroundColor,
+                                zoomScale: _zoomScale,
+                                verticalScrollController:
+                                    _historyVerticalScrollController,
+                                horizontalScrollController:
+                                    _historyHorizontalScrollController,
+                                hasMoreAbove:
+                                    historyEntry?.hasMoreAbove ?? false,
+                                isLoadingOlder: _isHistoryLoadingOlder,
+                                onLoadOlder: _loadOlderHistoryChunk,
+                              );
+                            }
+
                             return PaneTerminalView(
                               key: _paneTerminalViewKey,
                               terminal: _terminal,
                               terminalController: _terminalController,
                               paneWidth: viewData.paneWidth,
                               paneHeight: viewData.paneHeight,
-                              backgroundColor: Theme.of(
-                                context,
-                              ).scaffoldBackgroundColor,
-                              foregroundColor: Theme.of(
-                                context,
-                              ).colorScheme.onSurface.withValues(alpha: 0.9),
+                              backgroundColor: backgroundColor,
+                              foregroundColor: foregroundColor,
                               mode: _terminalMode == TerminalMode.select
                                   ? PaneTerminalMode.select
                                   : PaneTerminalMode.normal,
@@ -1634,6 +1961,10 @@ $metadataCommand
                                   _terminalScrollController,
                               onTwoFingerSwipe: _handleTwoFingerSwipe,
                               navigableDirections: _getNavigableDirections(),
+                              onRequestHistoryMode:
+                                  _terminalMode == TerminalMode.normal
+                                  ? _enterHistoryMode
+                                  : null,
                             );
                           },
                         ),
@@ -1649,12 +1980,14 @@ $metadataCommand
                           },
                         ),
                       ),
+                      if (_terminalMode == TerminalMode.history)
+                        _buildHistoryModeOverlay(),
                     ],
                   ),
                 ),
               ),
               // SpecialKeysBar: only shown when the on-screen keyboard is visible
-              if (keyboardVisible)
+              if (keyboardVisible && _terminalMode != TerminalMode.history)
                 SpecialKeysBar(
                   onLiteralKeyPressed: _sendLiteralKey,
                   onSpecialKeyPressed: _sendSpecialKey,
@@ -1688,6 +2021,108 @@ $metadataCommand
             _buildErrorOverlay(sshState.error ?? _connectionError),
         ],
       ),
+    );
+  }
+
+  Widget _buildHistoryModeOverlay() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final chipColor = isDark
+        ? Colors.black.withValues(alpha: 0.72)
+        : Colors.white.withValues(alpha: 0.92);
+    final textColor = Theme.of(context).colorScheme.onSurface;
+
+    return Stack(
+      children: [
+        Positioned(
+          top: 8,
+          left: 8,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: chipColor,
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: DesignColors.primary.withValues(alpha: 0.25),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.history,
+                    size: 16,
+                    color: DesignColors.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _isHistoryLoading
+                        ? 'Loading history...'
+                        : _isHistoryLoadingOlder
+                        ? 'Loading older history...'
+                        : 'History mode',
+                    style: GoogleFonts.jetBrainsMono(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: textColor,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          right: 12,
+          bottom: 12,
+          child: ValueListenableBuilder<int>(
+            valueListenable: _historyPendingLinesNotifier,
+            builder: (context, pendingLines, _) {
+              return Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: () => _exitHistoryMode(jumpToLive: true),
+                  borderRadius: BorderRadius.circular(14),
+                  child: Ink(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: chipColor,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: DesignColors.primary.withValues(alpha: 0.28),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.arrow_downward,
+                          size: 16,
+                          color: DesignColors.primary,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          pendingLines > 0
+                              ? 'Jump to live · $pendingLines new'
+                              : 'Jump to live',
+                          style: GoogleFonts.jetBrainsMono(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: textColor,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 
@@ -1773,7 +2208,7 @@ $metadataCommand
   }
 
   void _sendLiteralKey(String key) {
-    if (_terminalMode == TerminalMode.select) {
+    if (_terminalMode != TerminalMode.normal) {
       return;
     }
     _ensureTerminalViewportAtBottomForInput();
@@ -1794,7 +2229,7 @@ $metadataCommand
   }
 
   void _sendSpecialKey(String tmuxKey) {
-    if (_terminalMode == TerminalMode.select) {
+    if (_terminalMode != TerminalMode.normal) {
       return;
     }
     _ensureTerminalViewportAtBottomForInput();
@@ -1858,6 +2293,7 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || _isSwitchingPane) return;
 
+    _leaveHistoryModeBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
     );
@@ -1931,6 +2367,7 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
+    _leaveHistoryModeBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
     );
@@ -2019,6 +2456,7 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
+    _leaveHistoryModeBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
     );
@@ -2760,7 +3198,41 @@ $metadataCommand
                 height: 1,
                 color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
               ),
-              // Mode switching (Normal / Scroll & Select)
+              ListTile(
+                leading: Icon(
+                  Icons.history,
+                  color: _terminalMode == TerminalMode.history
+                      ? DesignColors.primary
+                      : inactiveIconColor,
+                ),
+                title: Text(
+                  _terminalMode == TerminalMode.history
+                      ? 'History Mode'
+                      : 'Browse History',
+                  style: TextStyle(
+                    color: _terminalMode == TerminalMode.history
+                        ? DesignColors.primary
+                        : textColor,
+                    fontWeight: _terminalMode == TerminalMode.history
+                        ? FontWeight.bold
+                        : FontWeight.normal,
+                  ),
+                ),
+                subtitle: Text(
+                  _terminalMode == TerminalMode.history
+                      ? 'Frozen history view; live output continues in the background'
+                      : 'Drag past the top of the live tail or tap here to browse older output',
+                  style: TextStyle(color: mutedTextColor, fontSize: 12),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  if (_terminalMode == TerminalMode.history) {
+                    _exitHistoryMode(jumpToLive: true);
+                  } else {
+                    unawaited(_enterHistoryMode());
+                  }
+                },
+              ),
               ListTile(
                 leading: Icon(
                   _terminalMode == TerminalMode.select
@@ -2773,7 +3245,7 @@ $metadataCommand
                 title: Text(
                   _terminalMode == TerminalMode.select
                       ? 'Select Mode'
-                      : 'Normal Mode',
+                      : 'Touch Selection',
                   style: TextStyle(
                     color: _terminalMode == TerminalMode.select
                         ? DesignColors.warning
@@ -2784,44 +3256,49 @@ $metadataCommand
                   ),
                 ),
                 subtitle: Text(
-                  _terminalMode == TerminalMode.select
-                      ? 'Selection is local and input is paused'
-                      : 'Tap to enable touch selection and copying',
+                  _terminalMode == TerminalMode.history
+                      ? 'Unavailable while browsing frozen history'
+                      : _terminalMode == TerminalMode.select
+                      ? 'Selection is local and live terminal input is paused'
+                      : 'Enable touch selection and local copying',
                   style: TextStyle(color: mutedTextColor, fontSize: 12),
                 ),
                 trailing: Switch(
                   value: _terminalMode == TerminalMode.select,
-                  onChanged: (value) {
-                    final newMode = value
-                        ? TerminalMode.select
-                        : TerminalMode.normal;
-                    setState(() {
-                      _terminalMode = newMode;
-                    });
-                    if (newMode == TerminalMode.normal) {
-                      _flushDeferredStreamOutput();
-                    } else {
-                      _terminalController.clearSelection();
-                    }
-                    Navigator.pop(context);
-                  },
+                  onChanged: _terminalMode == TerminalMode.history
+                      ? null
+                      : (value) {
+                          setState(() {
+                            _terminalMode = value
+                                ? TerminalMode.select
+                                : TerminalMode.normal;
+                          });
+                          if (value) {
+                            _terminalController.clearSelection();
+                          } else {
+                            _flushDeferredStreamOutput();
+                          }
+                          Navigator.pop(context);
+                        },
                   activeThumbColor: DesignColors.warning,
                 ),
-                onTap: () {
-                  final isSelecting = _terminalMode == TerminalMode.select;
-                  final newMode = isSelecting
-                      ? TerminalMode.normal
-                      : TerminalMode.select;
-                  setState(() {
-                    _terminalMode = newMode;
-                  });
-                  if (newMode == TerminalMode.normal) {
-                    _flushDeferredStreamOutput();
-                  } else {
-                    _terminalController.clearSelection();
-                  }
-                  Navigator.pop(context);
-                },
+                onTap: _terminalMode == TerminalMode.history
+                    ? null
+                    : () {
+                        final enteringSelect =
+                            _terminalMode != TerminalMode.select;
+                        setState(() {
+                          _terminalMode = enteringSelect
+                              ? TerminalMode.select
+                              : TerminalMode.normal;
+                        });
+                        if (enteringSelect) {
+                          _terminalController.clearSelection();
+                        } else {
+                          _flushDeferredStreamOutput();
+                        }
+                        Navigator.pop(context);
+                      },
               ),
               // Reset zoom
               ListTile(

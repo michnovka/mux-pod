@@ -45,6 +45,7 @@ class PaneTerminalView extends ConsumerStatefulWidget {
   final ScrollController? verticalScrollController;
   final void Function(SwipeDirection direction)? onTwoFingerSwipe;
   final Map<SwipeDirection, bool>? navigableDirections;
+  final VoidCallback? onRequestHistoryMode;
 
   const PaneTerminalView({
     super.key,
@@ -61,6 +62,7 @@ class PaneTerminalView extends ConsumerStatefulWidget {
     this.verticalScrollController,
     this.onTwoFingerSwipe,
     this.navigableDirections,
+    this.onRequestHistoryMode,
   });
 
   @override
@@ -81,6 +83,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   double _baseScale = 1.0;
   bool _isUserScrollInProgress = false;
   bool _followBottom = true;
+  bool _historyRequestSent = false;
 
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
   Offset _twoFingerPanStart = Offset.zero;
@@ -341,6 +344,28 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
 
     if (!_isUserScrollInProgress && isNearBottom) {
       _followBottom = true;
+    }
+
+    final isAtTop =
+        notification.metrics.pixels <= notification.metrics.minScrollExtent + 1;
+    if (!isAtTop || isNearBottom) {
+      _historyRequestSent = false;
+      return false;
+    }
+
+    if (_historyRequestSent || widget.onRequestHistoryMode == null) {
+      return false;
+    }
+
+    final shouldRequestHistory =
+        (notification is OverscrollNotification &&
+            notification.dragDetails != null) ||
+        (notification is ScrollUpdateNotification &&
+            notification.dragDetails != null);
+
+    if (shouldRequestHistory) {
+      _historyRequestSent = true;
+      widget.onRequestHistoryMode?.call();
     }
 
     return false;

@@ -23,6 +23,7 @@ void main() {
     required Terminal terminal,
     Key? paneKey,
     ScrollController? verticalScrollController,
+    VoidCallback? onRequestHistoryMode,
   }) {
     return ProviderScope(
       overrides: [settingsProvider.overrideWith(() => _TestSettingsNotifier())],
@@ -40,6 +41,7 @@ void main() {
               backgroundColor: Colors.black,
               foregroundColor: Colors.white,
               verticalScrollController: verticalScrollController,
+              onRequestHistoryMode: onRequestHistoryMode,
             ),
           ),
         ),
@@ -212,6 +214,55 @@ void main() {
 
       final restoredState = paneKey.currentState!.captureViewportState();
       expect(restoredState.zoomScale, closeTo(1.6, 0.01));
+    });
+
+    testWidgets('requests history mode when overscrolling above live tail', (
+      tester,
+    ) async {
+      final terminal = Terminal(maxLines: 200, reflowEnabled: false);
+      final paneKey = GlobalKey<PaneTerminalViewState>();
+      final verticalScrollController = ScrollController();
+      var requestCount = 0;
+
+      for (var index = 0; index < 80; index += 1) {
+        terminal.write('line $index\r\n');
+      }
+
+      await tester.pumpWidget(
+        buildHarness(
+          paneWidth: 80,
+          paneHeight: 24,
+          terminal: terminal,
+          paneKey: paneKey,
+          verticalScrollController: verticalScrollController,
+          onRequestHistoryMode: () {
+            requestCount += 1;
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.dragFrom(
+        tester.getCenter(find.byType(PaneTerminalView)),
+        const Offset(0, 240),
+      );
+      await tester.pumpAndSettle();
+
+      expect(paneKey.currentState?.shouldAutoFollow, isFalse);
+
+      verticalScrollController.jumpTo(
+        verticalScrollController.position.minScrollExtent,
+      );
+      await tester.pumpAndSettle();
+
+      final paneRect = tester.getRect(find.byType(PaneTerminalView));
+      await tester.dragFrom(
+        Offset(paneRect.center.dx, paneRect.top + 4),
+        const Offset(0, 120),
+      );
+      await tester.pumpAndSettle();
+
+      expect(requestCount, greaterThanOrEqualTo(1));
     });
   });
 }
