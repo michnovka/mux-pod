@@ -210,6 +210,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
   bool _isHistoryLoading = false;
+  double _lastKeyboardInset = 0;
 
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
@@ -910,6 +911,38 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         position.jumpTo(target);
       }
       _paneTerminalViewKey.currentState?.scrollToBottom();
+    });
+  }
+
+  void _syncKeyboardViewportState({
+    required bool keyboardVisible,
+    required double keyboardInset,
+  }) {
+    if ((keyboardInset - _lastKeyboardInset).abs() < 0.5) {
+      return;
+    }
+
+    _lastKeyboardInset = keyboardInset;
+
+    if (!keyboardVisible || _terminalMode != TerminalMode.normal) {
+      return;
+    }
+
+    final paneView = _paneTerminalViewKey.currentState;
+    final shouldFollowBottom =
+        paneView?.shouldAutoFollow ?? paneView?.isNearBottom ?? true;
+    if (!shouldFollowBottom) {
+      return;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _terminalMode != TerminalMode.normal) {
+        return;
+      }
+
+      _terminalScrollController.armUnsuppressedStickToBottom();
+      _paneTerminalViewKey.currentState?.scrollToBottom();
+      _scrollHistorySurfaceToLiveTail();
     });
   }
 
@@ -2143,6 +2176,10 @@ $metadataCommand
     _terminalScrollController.viewportShrinkBudget = keyboardVisible
         ? keyboardInset + 120
         : 0;
+    _syncKeyboardViewportState(
+      keyboardVisible: keyboardVisible,
+      keyboardInset: keyboardInset,
+    );
 
     return Scaffold(
       key: _scaffoldKey,
@@ -4214,10 +4251,27 @@ class _StableScrollController extends ScrollController {
   /// above).
   bool suppressScrollToMax = false;
 
+  int _unsuppressedStickToBottomPasses = 0;
+
   /// Total height lost by the viewport when the keyboard opened (keyboard
   /// inset + SpecialKeysBar estimate).  Used to decide whether content would
   /// have fit without the keyboard.
   double viewportShrinkBudget = 0;
+
+  void armUnsuppressedStickToBottom([int passes = 2]) {
+    if (passes <= 0) {
+      return;
+    }
+    _unsuppressedStickToBottomPasses = passes;
+  }
+
+  bool consumeUnsuppressedStickToBottom() {
+    if (_unsuppressedStickToBottomPasses <= 0) {
+      return false;
+    }
+    _unsuppressedStickToBottomPasses -= 1;
+    return true;
+  }
 
   @override
   ScrollPosition createScrollPosition(
@@ -4264,6 +4318,9 @@ class _StableScrollPosition extends ScrollPositionWithSingleContext {
   void jumpTo(double value) {
     // Suppress xterm's _scrollToBottom which calls jumpTo(maxScrollExtent)
     if (_shouldSuppress && value >= maxScrollExtent - 1 && value > pixels) {
+      if (controller.consumeUnsuppressedStickToBottom()) {
+        super.jumpTo(value);
+      }
       return;
     }
     super.jumpTo(value);
@@ -4275,6 +4332,9 @@ class _StableScrollPosition extends ScrollPositionWithSingleContext {
     // performLayout. The correction is always positive when sticking to
     // a newly-larger maxScrollExtent after a viewport shrink.
     if (_shouldSuppress && correction > 0) {
+      if (controller.consumeUnsuppressedStickToBottom()) {
+        super.correctBy(correction);
+      }
       return;
     }
     super.correctBy(correction);
