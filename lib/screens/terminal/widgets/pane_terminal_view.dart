@@ -71,6 +71,7 @@ class PaneTerminalView extends ConsumerStatefulWidget {
 
 class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   static const double _autoScrollThresholdPx = 32;
+  static const double _historyEntryThresholdPx = 48;
 
   final ScrollController _horizontalScrollController = ScrollController();
   ScrollController? _internalVerticalScrollController;
@@ -346,9 +347,10 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       _followBottom = true;
     }
 
-    final isAtTop =
-        notification.metrics.pixels <= notification.metrics.minScrollExtent + 1;
-    if (!isAtTop || isNearBottom) {
+    final isNearTop =
+        notification.metrics.pixels <=
+        notification.metrics.minScrollExtent + _historyEntryThresholdPx;
+    if (!isNearTop || isNearBottom) {
       _historyRequestSent = false;
       return false;
     }
@@ -357,11 +359,16 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       return false;
     }
 
+    DragUpdateDetails? dragDetails;
+    if (notification is ScrollUpdateNotification) {
+      dragDetails = notification.dragDetails;
+    } else if (notification is OverscrollNotification) {
+      dragDetails = notification.dragDetails;
+    }
+
+    final primaryDelta = dragDetails?.primaryDelta ?? dragDetails?.delta.dy;
     final shouldRequestHistory =
-        (notification is OverscrollNotification &&
-            notification.dragDetails != null) ||
-        (notification is ScrollUpdateNotification &&
-            notification.dragDetails != null);
+        dragDetails != null && primaryDelta != null && primaryDelta > 0;
 
     if (shouldRequestHistory) {
       _historyRequestSent = true;

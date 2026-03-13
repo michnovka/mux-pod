@@ -93,31 +93,38 @@ class _TmuxTargetSelection {
 class _PaneHistoryCacheEntry {
   final String paneId;
   final String content;
-  final int oldestCapturedStartLine;
-  final bool hasMoreAbove;
+  final int loadedLineCount;
+  final int retainedLineLimit;
+  final bool reachedHistoryStart;
   final bool alternateScreen;
+  final bool isSeedOnly;
 
   const _PaneHistoryCacheEntry({
     required this.paneId,
     required this.content,
-    required this.oldestCapturedStartLine,
-    required this.hasMoreAbove,
+    required this.loadedLineCount,
+    required this.retainedLineLimit,
+    required this.reachedHistoryStart,
     required this.alternateScreen,
+    required this.isSeedOnly,
   });
 
   _PaneHistoryCacheEntry copyWith({
     String? content,
-    int? oldestCapturedStartLine,
-    bool? hasMoreAbove,
+    int? loadedLineCount,
+    int? retainedLineLimit,
+    bool? reachedHistoryStart,
     bool? alternateScreen,
+    bool? isSeedOnly,
   }) {
     return _PaneHistoryCacheEntry(
       paneId: paneId,
       content: content ?? this.content,
-      oldestCapturedStartLine:
-          oldestCapturedStartLine ?? this.oldestCapturedStartLine,
-      hasMoreAbove: hasMoreAbove ?? this.hasMoreAbove,
+      loadedLineCount: loadedLineCount ?? this.loadedLineCount,
+      retainedLineLimit: retainedLineLimit ?? this.retainedLineLimit,
+      reachedHistoryStart: reachedHistoryStart ?? this.reachedHistoryStart,
       alternateScreen: alternateScreen ?? this.alternateScreen,
+      isSeedOnly: isSeedOnly ?? this.isSeedOnly,
     );
   }
 }
@@ -149,7 +156,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     with WidgetsBindingObserver {
   static const int _maxDeferredStreamOutputChars = 256 * 1024;
   static const int _literalInputChunkLength = 1024;
-  static const int _historyChunkLineCount = 400;
   static const Duration _connectionLookupTimeout = Duration(seconds: 3);
   static const Duration _initialControlRestartDelay = Duration(
     milliseconds: 250,
@@ -197,7 +203,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
   bool _isHistoryLoading = false;
-  bool _isHistoryLoadingOlder = false;
 
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
@@ -643,8 +648,25 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     return content.split('\n');
   }
 
+  int _historyLineCount(String content) => _historyLines(content).length;
+
   String _captureLiveTailHistoryText() {
     return _normalizeHistoryText(_terminal.buffer.getText());
+  }
+
+  String _captureSeedHistoryText() {
+    if (_viewNotifier.value.alternateScreen) {
+      return _captureLiveTailHistoryText();
+    }
+
+    final snapshotContent = _viewNotifier.value.mainContent.isNotEmpty
+        ? _viewNotifier.value.mainContent
+        : _viewNotifier.value.content;
+    if (snapshotContent.isNotEmpty) {
+      return _normalizeHistoryText(snapshotContent);
+    }
+
+    return _captureLiveTailHistoryText();
   }
 
   void _seedHistoryCacheForActivePane() {
@@ -653,12 +675,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    final seedContent = _captureSeedHistoryText();
+    final retainedLineLimit = ref.read(settingsProvider).scrollbackLines;
+
     _paneHistoryCache[paneId] = _PaneHistoryCacheEntry(
       paneId: paneId,
-      content: _captureLiveTailHistoryText(),
-      oldestCapturedStartLine: 0,
-      hasMoreAbove: !_viewNotifier.value.alternateScreen,
+      content: seedContent,
+      loadedLineCount: _historyLineCount(seedContent),
+      retainedLineLimit: retainedLineLimit,
+      reachedHistoryStart: false,
       alternateScreen: _viewNotifier.value.alternateScreen,
+      isSeedOnly: true,
     );
   }
 
@@ -687,7 +714,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       setState(() {
         _terminalMode = TerminalMode.history;
         _isHistoryLoading = true;
-        _isHistoryLoadingOlder = false;
       });
     }
 
@@ -707,7 +733,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
     });
 
-    await _loadInitialHistorySnapshot(activePane.id);
+    await _loadFullHistorySnapshot(activePane.id);
   }
 
   void _exitHistoryMode({bool jumpToLive = false}) {
@@ -719,7 +745,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       setState(() {
         _terminalMode = TerminalMode.normal;
         _isHistoryLoading = false;
-        _isHistoryLoadingOlder = false;
       });
     }
     _historyPendingLinesNotifier.value = 0;
@@ -744,7 +769,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  Future<void> _loadInitialHistorySnapshot(String paneId) async {
+  Future<void> _loadFullHistorySnapshot(String paneId) async {
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected) {
       if (mounted && _terminalMode == TerminalMode.history) {
@@ -766,10 +791,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final maxHistoryLines = ref.read(settingsProvider).scrollbackLines;
-    final chunkSize = maxHistoryLines < _historyChunkLineCount
-        ? maxHistoryLines
-        : _historyChunkLineCount;
-    if (chunkSize <= 0) {
+    if (maxHistoryLines <= 0) {
       if (mounted && _terminalMode == TerminalMode.history) {
         setState(() {
           _isHistoryLoading = false;
@@ -778,34 +800,41 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    final oldPixels = _historyVerticalScrollController.hasClients
+        ? _historyVerticalScrollController.position.pixels
+        : 0.0;
+    final oldMaxExtent = _historyVerticalScrollController.hasClients
+        ? _historyVerticalScrollController.position.maxScrollExtent
+        : 0.0;
+    final keepPinnedToBottom =
+        !_historyVerticalScrollController.hasClients ||
+        (_historyVerticalScrollController.position.maxScrollExtent -
+                _historyVerticalScrollController.position.pixels) <=
+            32;
+
     try {
       final historyOutput = await sshClient.execPersistent(
         TmuxCommands.capturePane(
           paneId,
-          escapeSequences: false,
+          escapeSequences: true,
           preserveTrailingSpaces: true,
-          startLine: -chunkSize,
+          startLine: -maxHistoryLines,
         ),
-        timeout: const Duration(seconds: 2),
+        timeout: const Duration(seconds: 4),
       );
 
       final normalized = _normalizeHistoryText(historyOutput);
-      final capturedLines = _historyLines(normalized).length;
-      final hasMoreAbove =
-          capturedLines >= chunkSize && chunkSize < maxHistoryLines;
+      final loadedLineCount = _historyLineCount(normalized);
 
       final nextEntry = _PaneHistoryCacheEntry(
         paneId: paneId,
         content: normalized,
-        oldestCapturedStartLine: -chunkSize,
-        hasMoreAbove: hasMoreAbove,
+        loadedLineCount: loadedLineCount,
+        retainedLineLimit: maxHistoryLines,
+        reachedHistoryStart: loadedLineCount < maxHistoryLines,
         alternateScreen: false,
+        isSeedOnly: false,
       );
-      final keepPinnedToBottom =
-          !_historyVerticalScrollController.hasClients ||
-          (_historyVerticalScrollController.position.maxScrollExtent -
-                  _historyVerticalScrollController.position.pixels) <=
-              32;
       _paneHistoryCache[paneId] = nextEntry;
 
       if (mounted &&
@@ -820,145 +849,28 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
               !_historyVerticalScrollController.hasClients) {
             return;
           }
+          final position = _historyVerticalScrollController.position;
           if (keepPinnedToBottom) {
-            _historyVerticalScrollController.jumpTo(
-              _historyVerticalScrollController.position.maxScrollExtent,
-            );
+            position.jumpTo(position.maxScrollExtent);
+            return;
           }
+
+          final delta = position.maxScrollExtent - oldMaxExtent;
+          final target = (oldPixels + delta).clamp(
+            position.minScrollExtent,
+            position.maxScrollExtent,
+          );
+          position.jumpTo(target);
         });
       }
     } catch (_) {
+      // Keep the seed content visible on history fetch failures.
       if (mounted &&
           _terminalMode == TerminalMode.history &&
           ref.read(tmuxProvider).activePaneId == paneId) {
         setState(() {
           _isHistoryLoading = false;
         });
-      }
-    }
-  }
-
-  Future<void> _loadOlderHistoryChunk() async {
-    if (_isHistoryLoading ||
-        _isHistoryLoadingOlder ||
-        _terminalMode != TerminalMode.history) {
-      return;
-    }
-
-    final activePaneId = ref.read(tmuxProvider).activePaneId;
-    final entry = _activeHistoryEntry;
-    final sshClient = ref.read(sshProvider.notifier).client;
-    if (activePaneId == null ||
-        entry == null ||
-        sshClient == null ||
-        !sshClient.isConnected ||
-        entry.alternateScreen ||
-        !entry.hasMoreAbove ||
-        entry.oldestCapturedStartLine >= 0) {
-      return;
-    }
-
-    final maxHistoryLines = ref.read(settingsProvider).scrollbackLines;
-    final loadedLines = -entry.oldestCapturedStartLine;
-    if (loadedLines >= maxHistoryLines) {
-      _paneHistoryCache[activePaneId] = entry.copyWith(hasMoreAbove: false);
-      if (mounted) {
-        setState(() {});
-      }
-      return;
-    }
-
-    final remainingLines = maxHistoryLines - loadedLines;
-    final chunkSize = remainingLines < _historyChunkLineCount
-        ? remainingLines
-        : _historyChunkLineCount;
-    if (chunkSize <= 0) {
-      _paneHistoryCache[activePaneId] = entry.copyWith(hasMoreAbove: false);
-      if (mounted) {
-        setState(() {});
-      }
-      return;
-    }
-
-    final oldPixels = _historyVerticalScrollController.hasClients
-        ? _historyVerticalScrollController.position.pixels
-        : 0.0;
-    final oldMaxExtent = _historyVerticalScrollController.hasClients
-        ? _historyVerticalScrollController.position.maxScrollExtent
-        : 0.0;
-
-    if (mounted) {
-      setState(() {
-        _isHistoryLoadingOlder = true;
-      });
-    }
-
-    try {
-      final newStart = entry.oldestCapturedStartLine - chunkSize;
-      final olderOutput = await sshClient.execPersistent(
-        TmuxCommands.capturePane(
-          activePaneId,
-          escapeSequences: false,
-          preserveTrailingSpaces: true,
-          startLine: newStart,
-          endLine: entry.oldestCapturedStartLine - 1,
-        ),
-        timeout: const Duration(seconds: 2),
-      );
-
-      final normalizedOlder = _normalizeHistoryText(olderOutput);
-      final olderLines = _historyLines(normalizedOlder);
-      final capturedLineCount = olderLines.length;
-      if (olderLines.isEmpty) {
-        _paneHistoryCache[activePaneId] = entry.copyWith(hasMoreAbove: false);
-      } else {
-        final currentLines = _historyLines(entry.content);
-        if (currentLines.isNotEmpty &&
-            olderLines.last.trimRight() == currentLines.first.trimRight()) {
-          olderLines.removeLast();
-        }
-
-        if (olderLines.isEmpty) {
-          _paneHistoryCache[activePaneId] = entry.copyWith(hasMoreAbove: false);
-        } else {
-          final olderText = olderLines.join('\n');
-          _paneHistoryCache[activePaneId] = entry.copyWith(
-            content: entry.content.isEmpty
-                ? olderText
-                : '$olderText\n${entry.content}',
-            oldestCapturedStartLine: newStart,
-            hasMoreAbove:
-                capturedLineCount >= chunkSize && -newStart < maxHistoryLines,
-          );
-
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted ||
-                _terminalMode != TerminalMode.history ||
-                ref.read(tmuxProvider).activePaneId != activePaneId ||
-                !_historyVerticalScrollController.hasClients) {
-              return;
-            }
-            final position = _historyVerticalScrollController.position;
-            final delta = position.maxScrollExtent - oldMaxExtent;
-            final target = (oldPixels + delta).clamp(
-              position.minScrollExtent,
-              position.maxScrollExtent,
-            );
-            position.jumpTo(target);
-          });
-        }
-      }
-    } catch (_) {
-      // Keep the current frozen history content on fetch failures.
-    } finally {
-      if (mounted &&
-          _terminalMode == TerminalMode.history &&
-          ref.read(tmuxProvider).activePaneId == activePaneId) {
-        setState(() {
-          _isHistoryLoadingOlder = false;
-        });
-      } else {
-        _isHistoryLoadingOlder = false;
       }
     }
   }
@@ -1893,8 +1805,7 @@ $metadataCommand
                 },
               ),
               Expanded(
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
+                child: Container(
                   decoration: BoxDecoration(
                     border: Border.all(
                       color: switch (_terminalMode) {
@@ -1930,10 +1841,17 @@ $metadataCommand
                                     _historyVerticalScrollController,
                                 horizontalScrollController:
                                     _historyHorizontalScrollController,
-                                hasMoreAbove:
-                                    historyEntry?.hasMoreAbove ?? false,
-                                isLoadingOlder: _isHistoryLoadingOlder,
-                                onLoadOlder: _loadOlderHistoryChunk,
+                                isLoading: _isHistoryLoading,
+                                alternateScreen:
+                                    historyEntry?.alternateScreen ?? false,
+                                isSeedOnly: historyEntry?.isSeedOnly ?? true,
+                                reachedHistoryStart:
+                                    historyEntry?.reachedHistoryStart ?? false,
+                                loadedLineCount:
+                                    historyEntry?.loadedLineCount ?? 0,
+                                retainedLineLimit:
+                                    historyEntry?.retainedLineLimit ??
+                                    ref.read(settingsProvider).scrollbackLines,
                               );
                             }
 
@@ -2057,9 +1975,7 @@ $metadataCommand
                   const SizedBox(width: 8),
                   Text(
                     _isHistoryLoading
-                        ? 'Loading history...'
-                        : _isHistoryLoadingOlder
-                        ? 'Loading older history...'
+                        ? 'Loading retained history...'
                         : 'History mode',
                     style: GoogleFonts.jetBrainsMono(
                       fontSize: 12,

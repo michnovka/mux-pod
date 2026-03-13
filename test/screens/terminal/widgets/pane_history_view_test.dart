@@ -12,6 +12,21 @@ class _TestSettingsNotifier extends SettingsNotifier {
   }
 }
 
+InlineSpan? _findSpanByText(InlineSpan span, String text) {
+  if (span is TextSpan) {
+    if (span.text == text) {
+      return span;
+    }
+    for (final child in span.children ?? const <InlineSpan>[]) {
+      final found = _findSpanByText(child, text);
+      if (found != null) {
+        return found;
+      }
+    }
+  }
+  return null;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   GoogleFonts.config.allowRuntimeFetching = false;
@@ -21,9 +36,12 @@ void main() {
     required int paneWidth,
     required ScrollController verticalScrollController,
     required ScrollController horizontalScrollController,
-    required bool hasMoreAbove,
-    required bool isLoadingOlder,
-    VoidCallback? onLoadOlder,
+    required bool isLoading,
+    required bool alternateScreen,
+    required bool isSeedOnly,
+    required bool reachedHistoryStart,
+    required int loadedLineCount,
+    required int retainedLineLimit,
   }) {
     return ProviderScope(
       overrides: [settingsProvider.overrideWith(() => _TestSettingsNotifier())],
@@ -40,9 +58,12 @@ void main() {
               zoomScale: 1.0,
               verticalScrollController: verticalScrollController,
               horizontalScrollController: horizontalScrollController,
-              hasMoreAbove: hasMoreAbove,
-              isLoadingOlder: isLoadingOlder,
-              onLoadOlder: onLoadOlder,
+              isLoading: isLoading,
+              alternateScreen: alternateScreen,
+              isSeedOnly: isSeedOnly,
+              reachedHistoryStart: reachedHistoryStart,
+              loadedLineCount: loadedLineCount,
+              retainedLineLimit: retainedLineLimit,
             ),
           ),
         ),
@@ -51,59 +72,63 @@ void main() {
   }
 
   group('PaneHistoryView', () {
-    testWidgets('renders history content', (tester) async {
-      final verticalController = ScrollController();
-      final horizontalController = ScrollController();
-
-      await tester.pumpWidget(
-        buildHarness(
-          content: 'alpha\nbeta\ngamma',
-          paneWidth: 80,
-          verticalScrollController: verticalController,
-          horizontalScrollController: horizontalController,
-          hasMoreAbove: false,
-          isLoadingOlder: false,
-        ),
-      );
-
-      expect(find.textContaining('alpha'), findsOneWidget);
-      expect(find.textContaining('gamma'), findsOneWidget);
-    });
-
-    testWidgets('requests older history when overscrolling at the top', (
+    testWidgets('renders ansi history content with status metadata', (
       tester,
     ) async {
       final verticalController = ScrollController();
       final horizontalController = ScrollController();
-      var loadOlderCount = 0;
-      final content = List.generate(120, (index) => 'line $index').join('\n');
 
       await tester.pumpWidget(
         buildHarness(
-          content: content,
-          paneWidth: 120,
+          content: 'plain \x1b[31mred\x1b[0m',
+          paneWidth: 80,
           verticalScrollController: verticalController,
           horizontalScrollController: horizontalController,
-          hasMoreAbove: true,
-          isLoadingOlder: false,
-          onLoadOlder: () {
-            loadOlderCount += 1;
-          },
+          isLoading: false,
+          alternateScreen: false,
+          isSeedOnly: false,
+          reachedHistoryStart: true,
+          loadedLineCount: 321,
+          retainedLineLimit: 1000,
         ),
       );
-      await tester.pumpAndSettle();
 
-      verticalController.jumpTo(verticalController.position.minScrollExtent);
-      await tester.pumpAndSettle();
+      expect(find.text('Start of retained history'), findsOneWidget);
+      expect(find.text('321 retained lines loaded.'), findsOneWidget);
+      expect(find.byType(Scrollbar), findsOneWidget);
 
-      final historyRect = tester.getRect(find.byType(PaneHistoryView));
-      await tester.dragFrom(
-        Offset(historyRect.center.dx, historyRect.top + 4),
-        const Offset(0, 260),
+      final richText = tester.widget<RichText>(find.byType(RichText).last);
+      final redSpan = _findSpanByText(richText.text, 'red');
+      expect(redSpan, isA<TextSpan>());
+      expect((redSpan as TextSpan).style?.color, const Color(0xFFCD3131));
+    });
+
+    testWidgets('shows a seed-only loading message while full history loads', (
+      tester,
+    ) async {
+      final verticalController = ScrollController();
+      final horizontalController = ScrollController();
+
+      await tester.pumpWidget(
+        buildHarness(
+          content: 'tail line',
+          paneWidth: 80,
+          verticalScrollController: verticalController,
+          horizontalScrollController: horizontalController,
+          isLoading: true,
+          alternateScreen: false,
+          isSeedOnly: true,
+          reachedHistoryStart: false,
+          loadedLineCount: 1,
+          retainedLineLimit: 10000,
+        ),
       );
-      await tester.pumpAndSettle();
 
-      expect(loadOlderCount, greaterThanOrEqualTo(1));
+      expect(find.text('Loading retained history...'), findsOneWidget);
+      expect(
+        find.textContaining('Showing the recent tail while tmux fetches'),
+        findsOneWidget,
+      );
     });
   });
 }
