@@ -519,6 +519,32 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _showActivePaneFromCacheOrPlaceholder();
   }
 
+  Future<void> _recoverFromFailedSwitch(
+    _TmuxTargetSelection previousSelection, {
+    bool restartControlClient = false,
+  }) async {
+    _restoreLocalSelection(previousSelection);
+
+    try {
+      if (restartControlClient && previousSelection.sessionName != null) {
+        await _restartTerminalStream(
+          restartControlClient: true,
+          refreshTree: false,
+        );
+      }
+
+      final paneId = previousSelection.paneId;
+      final sshClient = ref.read(sshProvider.notifier).client;
+      if (paneId != null && sshClient != null && sshClient.isConnected) {
+        await sshClient.execPersistentInput(
+          TmuxCommands.sendKeys(paneId, '\x1b[I', literal: true),
+        );
+      }
+    } catch (_) {
+      // Best-effort recovery only. The local selection has already been restored.
+    }
+  }
+
   void _persistActivePaneSelection(String paneId) {
     final tmuxState = ref.read(tmuxProvider);
     final sessionName = tmuxState.activeSessionName;
@@ -1865,7 +1891,10 @@ $metadataCommand
       );
     } catch (_) {
       if (!switchConfirmed) {
-        _restoreLocalSelection(previousSelection);
+        await _recoverFromFailedSwitch(
+          previousSelection,
+          restartControlClient: true,
+        );
       }
     } finally {
       if (switchConfirmed) {
@@ -1942,7 +1971,7 @@ $metadataCommand
       );
     } catch (_) {
       if (!remoteSelectionChanged) {
-        _restoreLocalSelection(previousSelection);
+        await _recoverFromFailedSwitch(previousSelection);
       }
     } finally {
       if (remoteSelectionChanged) {
@@ -2004,7 +2033,7 @@ $metadataCommand
       );
     } catch (_) {
       if (!remoteSelectionChanged) {
-        _restoreLocalSelection(previousSelection);
+        await _recoverFromFailedSwitch(previousSelection);
       }
     } finally {
       if (remoteSelectionChanged) {
