@@ -85,6 +85,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   bool _isUserScrollInProgress = false;
   bool _followBottom = true;
   bool _historyRequestSent = false;
+  bool _historyEntryArmed = false;
 
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
   Offset _twoFingerPanStart = Offset.zero;
@@ -321,6 +322,15 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     return (metrics.maxScrollExtent - metrics.pixels) <= _autoScrollThresholdPx;
   }
 
+  void _setHistoryEntryArmed(bool value) {
+    if (_historyEntryArmed == value || !mounted) {
+      return;
+    }
+    setState(() {
+      _historyEntryArmed = value;
+    });
+  }
+
   bool _handleScrollNotification(ScrollNotification notification) {
     if (notification.metrics.axis != Axis.vertical) {
       return false;
@@ -330,16 +340,31 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         notification.dragDetails != null) {
       _isUserScrollInProgress = true;
       _followBottom = false;
+      _setHistoryEntryArmed(false);
       return false;
     }
 
     final isNearBottom = _isNearBottomForMetrics(notification.metrics);
+    final isNearTop =
+        notification.metrics.pixels <=
+        notification.metrics.minScrollExtent + _historyEntryThresholdPx;
 
     if (notification is ScrollEndNotification ||
         (notification is UserScrollNotification &&
             notification.direction == ScrollDirection.idle)) {
       _isUserScrollInProgress = false;
       _followBottom = isNearBottom;
+      final shouldEnterHistory =
+          _historyEntryArmed &&
+          !_historyRequestSent &&
+          widget.onRequestHistoryMode != null;
+      _setHistoryEntryArmed(false);
+      if (shouldEnterHistory) {
+        _historyRequestSent = true;
+        widget.onRequestHistoryMode?.call();
+      } else if (!isNearTop) {
+        _historyRequestSent = false;
+      }
       return false;
     }
 
@@ -347,11 +372,9 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       _followBottom = true;
     }
 
-    final isNearTop =
-        notification.metrics.pixels <=
-        notification.metrics.minScrollExtent + _historyEntryThresholdPx;
-    if (!isNearTop || isNearBottom) {
+    if (!isNearTop) {
       _historyRequestSent = false;
+      _setHistoryEntryArmed(false);
       return false;
     }
 
@@ -371,11 +394,58 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         dragDetails != null && primaryDelta != null && primaryDelta > 0;
 
     if (shouldRequestHistory) {
-      _historyRequestSent = true;
-      widget.onRequestHistoryMode?.call();
+      _setHistoryEntryArmed(true);
     }
 
     return false;
+  }
+
+  Widget _buildHistoryEntryOverlay() {
+    final theme = Theme.of(context);
+    final chipColor = theme.brightness == Brightness.dark
+        ? Colors.black.withValues(alpha: 0.72)
+        : Colors.white.withValues(alpha: 0.92);
+
+    return Positioned(
+      top: 10,
+      left: 0,
+      right: 0,
+      child: IgnorePointer(
+        child: Center(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: chipColor,
+              borderRadius: BorderRadius.circular(999),
+              border: Border.all(
+                color: DesignColors.primary.withValues(alpha: 0.24),
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(
+                    Icons.history,
+                    size: 14,
+                    color: DesignColors.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Release to browse history',
+                    style: GoogleFonts.jetBrainsMono(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: theme.colorScheme.onSurface,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> copySelection() async {
@@ -884,6 +954,9 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
             child: Stack(
               children: [
                 terminalWidget,
+                if (_historyEntryArmed &&
+                    widget.mode == PaneTerminalMode.normal)
+                  _buildHistoryEntryOverlay(),
                 if (_isTwoFingerPanning || _twoFingerSwipeResult != null)
                   _buildTwoFingerSwipeOverlay(),
                 _buildSelectionActions(),

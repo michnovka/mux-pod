@@ -800,18 +800,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    final oldPixels = _historyVerticalScrollController.hasClients
-        ? _historyVerticalScrollController.position.pixels
-        : 0.0;
-    final oldMaxExtent = _historyVerticalScrollController.hasClients
-        ? _historyVerticalScrollController.position.maxScrollExtent
-        : 0.0;
-    final keepPinnedToBottom =
-        !_historyVerticalScrollController.hasClients ||
-        (_historyVerticalScrollController.position.maxScrollExtent -
-                _historyVerticalScrollController.position.pixels) <=
-            32;
-
     try {
       final historyOutput = await sshClient.execPersistent(
         TmuxCommands.capturePane(
@@ -825,6 +813,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
       final normalized = _normalizeHistoryText(historyOutput);
       final loadedLineCount = _historyLineCount(normalized);
+      final oldPixels = _historyVerticalScrollController.hasClients
+          ? _historyVerticalScrollController.position.pixels
+          : 0.0;
+      final oldMaxExtent = _historyVerticalScrollController.hasClients &&
+              _historyVerticalScrollController.position.hasContentDimensions
+          ? _historyVerticalScrollController.position.maxScrollExtent
+          : 0.0;
+      final keepPinnedToBottom =
+          !_historyVerticalScrollController.hasClients ||
+          (_historyVerticalScrollController.position.hasContentDimensions &&
+                  (_historyVerticalScrollController.position.maxScrollExtent -
+                          _historyVerticalScrollController.position.pixels) <=
+                      32);
 
       final nextEntry = _PaneHistoryCacheEntry(
         paneId: paneId,
@@ -873,6 +874,44 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         });
       }
     }
+  }
+
+  String _historyModeTitle(_PaneHistoryCacheEntry? entry) {
+    if (entry?.alternateScreen == true) {
+      return 'Alternate screen snapshot';
+    }
+    if (_isHistoryLoading) {
+      return 'Loading retained history...';
+    }
+    if (entry == null) {
+      return 'History mode';
+    }
+    if (entry.isSeedOnly) {
+      return 'Recent tail only';
+    }
+    if (entry.reachedHistoryStart) {
+      return 'Start of retained history';
+    }
+    return 'Retained limit reached';
+  }
+
+  String _historyModeDetail(_PaneHistoryCacheEntry? entry) {
+    if (entry?.alternateScreen == true) {
+      return 'Visible snapshot only. Alternate-screen apps do not expose retained scrollback here.';
+    }
+    if (entry == null) {
+      return 'Browse retained tmux output while live updates continue in the background.';
+    }
+    if (_isHistoryLoading) {
+      return 'Showing the recent tail while tmux fetches up to ${entry.retainedLineLimit} retained lines.';
+    }
+    if (entry.isSeedOnly) {
+      return 'Retained history is unavailable right now, so only the recent visible tail is shown.';
+    }
+    if (entry.reachedHistoryStart) {
+      return '${entry.loadedLineCount} retained lines loaded.';
+    }
+    return 'Showing ${entry.loadedLineCount} of up to ${entry.retainedLineLimit} retained lines.';
   }
 
   void _leaveHistoryModeBeforeSwitch() {
@@ -1948,6 +1987,9 @@ $metadataCommand
         ? Colors.black.withValues(alpha: 0.72)
         : Colors.white.withValues(alpha: 0.92);
     final textColor = Theme.of(context).colorScheme.onSurface;
+    final historyEntry = _activeHistoryEntry;
+    final title = _historyModeTitle(historyEntry);
+    final detail = _historyModeDetail(historyEntry);
 
     return Stack(
       children: [
@@ -1963,24 +2005,44 @@ $metadataCommand
               ),
             ),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
               child: Row(
                 mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Icon(
-                    Icons.history,
-                    size: 16,
-                    color: DesignColors.primary,
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(
+                      Icons.history,
+                      size: 16,
+                      color: DesignColors.primary,
+                    ),
                   ),
                   const SizedBox(width: 8),
-                  Text(
-                    _isHistoryLoading
-                        ? 'Loading retained history...'
-                        : 'History mode',
-                    style: GoogleFonts.jetBrainsMono(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: textColor,
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 260),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          style: GoogleFonts.jetBrainsMono(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: textColor,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          detail,
+                          style: GoogleFonts.jetBrainsMono(
+                            fontSize: 10,
+                            height: 1.3,
+                            fontWeight: FontWeight.w500,
+                            color: textColor.withValues(alpha: 0.76),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],

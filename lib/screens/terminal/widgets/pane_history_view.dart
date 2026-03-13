@@ -37,38 +37,6 @@ class PaneHistoryView extends ConsumerWidget {
     required this.retainedLineLimit,
   });
 
-  String get _topStatusTitle {
-    if (alternateScreen) {
-      return 'Alternate screen snapshot';
-    }
-    if (isLoading) {
-      return 'Loading retained history...';
-    }
-    if (isSeedOnly) {
-      return 'Recent tail only';
-    }
-    if (reachedHistoryStart) {
-      return 'Start of retained history';
-    }
-    return 'Top of loaded history';
-  }
-
-  String get _topStatusDetail {
-    if (alternateScreen) {
-      return 'This pane is using an alternate screen, so only the visible snapshot is available here.';
-    }
-    if (isLoading) {
-      return 'Showing the recent tail while tmux fetches up to $retainedLineLimit retained lines.';
-    }
-    if (isSeedOnly) {
-      return 'Retained history is unavailable right now, so this view is showing only the recent visible tail.';
-    }
-    if (reachedHistoryStart) {
-      return '$loadedLineCount retained lines loaded.';
-    }
-    return 'Showing the latest $loadedLineCount of up to $retainedLineLimit retained lines.';
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(settingsProvider);
@@ -116,50 +84,11 @@ class PaneHistoryView extends ConsumerWidget {
             child: SingleChildScrollView(
               controller: verticalScrollController,
               physics: const ClampingScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(14, 18, 18, 18),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: chipColor,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: chipBorderColor),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _topStatusTitle,
-                            style: theme.textTheme.labelLarge?.copyWith(
-                              color: foregroundColor,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            _topStatusDetail,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: foregroundColor.withValues(alpha: 0.72),
-                              height: 1.35,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  RichText(
-                    text: historySpan,
-                    softWrap: false,
-                    textScaler: TextScaler.noScaling,
-                  ),
-                ],
+              padding: const EdgeInsets.fromLTRB(4, 4, 10, 8),
+              child: RichText(
+                text: historySpan,
+                softWrap: false,
+                textScaler: TextScaler.noScaling,
               ),
             ),
           ),

@@ -72,7 +72,7 @@ void main() {
   }
 
   group('PaneHistoryView', () {
-    testWidgets('renders ansi history content with status metadata', (
+    testWidgets('renders ansi history content with a scrollbar', (
       tester,
     ) async {
       final verticalController = ScrollController();
@@ -80,7 +80,10 @@ void main() {
 
       await tester.pumpWidget(
         buildHarness(
-          content: 'plain \x1b[31mred\x1b[0m',
+          content: List.generate(
+            24,
+            (index) => index == 5 ? 'plain \x1b[31mred\x1b[0m' : 'line $index',
+          ).join('\n'),
           paneWidth: 80,
           verticalScrollController: verticalController,
           horizontalScrollController: horizontalController,
@@ -93,8 +96,6 @@ void main() {
         ),
       );
 
-      expect(find.text('Start of retained history'), findsOneWidget);
-      expect(find.text('321 retained lines loaded.'), findsOneWidget);
       expect(find.byType(Scrollbar), findsOneWidget);
 
       final richText = tester.widget<RichText>(find.byType(RichText).last);
@@ -124,11 +125,7 @@ void main() {
         ),
       );
 
-      expect(find.text('Loading retained history...'), findsOneWidget);
-      expect(
-        find.textContaining('Showing the recent tail while tmux fetches'),
-        findsOneWidget,
-      );
+      expect(find.byType(RichText), findsOneWidget);
     });
   });
 }
