@@ -129,5 +129,89 @@ void main() {
 
       expect(paneKey.currentState?.shouldAutoFollow, isTrue);
     });
+
+    testWidgets('captures and restores viewport state', (tester) async {
+      final terminal = Terminal(maxLines: 300, reflowEnabled: false);
+      final paneKey = GlobalKey<PaneTerminalViewState>();
+      final verticalScrollController = ScrollController();
+
+      for (var index = 0; index < 120; index += 1) {
+        terminal.write('line $index\r\n');
+      }
+
+      await tester.pumpWidget(
+        buildHarness(
+          paneWidth: 220,
+          paneHeight: 24,
+          terminal: terminal,
+          paneKey: paneKey,
+          verticalScrollController: verticalScrollController,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.dragFrom(
+        tester.getCenter(find.byType(PaneTerminalView)),
+        const Offset(0, 140),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.drag(
+        find.byType(SingleChildScrollView),
+        const Offset(-120, 0),
+      );
+      await tester.pumpAndSettle();
+
+      final savedState = paneKey.currentState!.captureViewportState();
+      expect(savedState.followBottom, isFalse);
+      expect(savedState.verticalDistanceFromBottom, greaterThan(0));
+      expect(savedState.horizontalOffset, greaterThan(0));
+
+      paneKey.currentState!.scrollToBottom();
+      await tester.pumpAndSettle();
+
+      await tester.drag(
+        find.byType(SingleChildScrollView),
+        const Offset(120, 0),
+      );
+      await tester.pumpAndSettle();
+
+      paneKey.currentState!.restoreViewportState(savedState);
+      await tester.pumpAndSettle();
+
+      final restoredState = paneKey.currentState!.captureViewportState();
+      expect(restoredState.followBottom, isFalse);
+      expect(
+        restoredState.verticalDistanceFromBottom,
+        closeTo(savedState.verticalDistanceFromBottom, 4),
+      );
+      expect(
+        restoredState.horizontalOffset,
+        closeTo(savedState.horizontalOffset, 4),
+      );
+    });
+
+    testWidgets('restores zoom from cached viewport state', (tester) async {
+      final terminal = Terminal(maxLines: 100, reflowEnabled: false);
+      final paneKey = GlobalKey<PaneTerminalViewState>();
+
+      await tester.pumpWidget(
+        buildHarness(
+          paneWidth: 80,
+          paneHeight: 24,
+          terminal: terminal,
+          paneKey: paneKey,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      paneKey.currentState!.restoreViewportState(
+        const PaneTerminalViewportState(zoomScale: 1.6),
+      );
+      await tester.pumpAndSettle();
+
+      final restoredState = paneKey.currentState!.captureViewportState();
+      expect(restoredState.zoomScale, closeTo(1.6, 0.01));
+    });
   });
 }
