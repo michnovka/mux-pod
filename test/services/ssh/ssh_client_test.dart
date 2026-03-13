@@ -15,4 +15,17 @@ void main() {
       expect(SshClient.isSafeTmuxPath('/tmp/tmux\nwhoami'), isFalse);
     });
   });
+
+  group('SshClient payload counters', () {
+    test('tracks aggregate sent and received payload bytes', () {
+      final client = SshClient();
+
+      client.debugRecordPayloadBytes(received: 1536, sent: 512);
+      client.debugRecordPayloadBytes(received: 64, sent: 128);
+
+      expect(client.receivedPayloadBytes, 1600);
+      expect(client.sentPayloadBytes, 640);
+      expect(client.totalPayloadBytes, 2240);
+    });
+  });
 }

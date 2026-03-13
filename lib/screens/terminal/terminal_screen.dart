@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -15,7 +16,7 @@ import '../../services/keychain/secure_storage.dart';
 import '../../services/network/network_monitor.dart';
 import '../../services/ssh/input_queue.dart';
 import '../../services/ssh/ssh_client.dart'
-    show SshClient, SshConnectOptions, SshHostKeyError;
+    show SshConnectOptions, SshHostKeyError;
 import '../../services/terminal/bounded_text_buffer.dart';
 import '../../services/terminal/terminal_output_normalizer.dart';
 import '../../services/terminal/terminal_snapshot.dart';
@@ -32,6 +33,8 @@ import 'widgets/pane_terminal_view.dart';
 
 /// Terminal mode used by the mobile UI.
 enum TerminalMode { normal, select }
+
+enum _ConnectionIndicatorMode { latency, bandwidth }
 
 class _PaneSnapshotPayload {
   final String activeContent;
@@ -133,6 +136,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   final _terminalController = TerminalController();
   int _terminalScrollbackLines = AppSettings().scrollbackLines;
   final Map<String, _PaneRenderCacheEntry> _paneRenderCache = {};
+  final _historyPendingLinesNotifier = ValueNotifier<int>(0);
 
   // Connection state (managed locally)
   bool _isConnecting = false;
@@ -146,6 +150,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     const TerminalSnapshotFrame(),
   );
   final _latencyNotifier = ValueNotifier<int>(0);
+  final _bandwidthNotifier = ValueNotifier<int>(0);
   final _deferredStreamOutput = BoundedTextBuffer(
     maxLength: _maxDeferredStreamOutputChars,
   );
@@ -155,9 +160,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Timer? _controlSyncTimer;
   Timer? _controlRestartTimer;
   Timer? _latencyTimer;
+  Timer? _bandwidthTimer;
   int _controlRestartAttempt = 0;
   bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
+  bool _isFollowingLiveTail = true;
+  double _lastKeyboardInset = 0;
+  _ConnectionIndicatorMode _connectionIndicatorMode =
+      _ConnectionIndicatorMode.latency;
+  int _lastBandwidthSampleTotalBytes = 0;
+  DateTime? _lastBandwidthSampleAt;
 
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
@@ -335,6 +347,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    _startBandwidthPolling();
     unawaited(_refreshLatency());
     _latencyTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       unawaited(_refreshLatency());
@@ -345,9 +358,67 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _latencyTimer?.cancel();
     _latencyTimer = null;
     _isLatencyProbeInFlight = false;
+    _stopBandwidthPolling(resetValue: resetValue);
     if (resetValue && !_isDisposed) {
       _latencyNotifier.value = 0;
     }
+  }
+
+  void _startBandwidthPolling() {
+    _stopBandwidthPolling();
+    if (_isDisposed || _isInBackground) {
+      return;
+    }
+
+    final sshClient = _sshNotifier?.client;
+    _lastBandwidthSampleTotalBytes = sshClient?.totalPayloadBytes ?? 0;
+    _lastBandwidthSampleAt = DateTime.now();
+
+    _bandwidthTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      _refreshBandwidth();
+    });
+  }
+
+  void _stopBandwidthPolling({bool resetValue = false}) {
+    _bandwidthTimer?.cancel();
+    _bandwidthTimer = null;
+    _lastBandwidthSampleTotalBytes = 0;
+    _lastBandwidthSampleAt = null;
+    if (resetValue && !_isDisposed) {
+      _bandwidthNotifier.value = 0;
+    }
+  }
+
+  void _refreshBandwidth() {
+    if (_isDisposed || _isInBackground || !mounted) {
+      return;
+    }
+
+    final sshClient = _sshNotifier?.client;
+    if (sshClient == null || !sshClient.isConnected) {
+      return;
+    }
+
+    final now = DateTime.now();
+    final lastSampleAt = _lastBandwidthSampleAt;
+    if (lastSampleAt == null) {
+      _lastBandwidthSampleAt = now;
+      _lastBandwidthSampleTotalBytes = sshClient.totalPayloadBytes;
+      return;
+    }
+
+    final elapsedMs = now.difference(lastSampleAt).inMilliseconds;
+    if (elapsedMs <= 0) {
+      return;
+    }
+
+    final totalBytes = sshClient.totalPayloadBytes;
+    final deltaBytes = math.max(0, totalBytes - _lastBandwidthSampleTotalBytes);
+    final bitsPerSecond = (deltaBytes * 8 * 1000 / elapsedMs).round();
+
+    _lastBandwidthSampleAt = now;
+    _lastBandwidthSampleTotalBytes = totalBytes;
+    _bandwidthNotifier.value = bitsPerSecond;
   }
 
   Future<void> _refreshLatency() async {
@@ -441,13 +512,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    final resolvedViewportState =
+        viewportState ??
+        _paneTerminalViewKey.currentState?.captureViewportState() ??
+        _paneRenderCache[resolvedPaneId]?.viewportState ??
+        const PaneTerminalViewportState();
+
     _paneRenderCache[resolvedPaneId] = _PaneRenderCacheEntry(
       terminal: _terminal..onOutput = _handleTerminalOutput,
       frame: _cacheFrameForTerminal(),
-      viewportState:
-          viewportState ??
-          _paneTerminalViewKey.currentState?.captureViewportState() ??
-          const PaneTerminalViewportState(),
+      viewportState: resolvedViewportState,
     );
   }
 
@@ -467,6 +541,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _pendingViewData = cacheEntry.frame;
     _viewNotifier.value = cacheEntry.frame;
     _hasInitialScrolled = true;
+    _isFollowingLiveTail = cacheEntry.viewportState.followBottom;
     _paneTerminalViewKey.currentState?.restoreViewportState(
       cacheEntry.viewportState,
     );
@@ -490,6 +565,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _pendingViewData = emptyView;
     _viewNotifier.value = emptyView;
     _hasInitialScrolled = false;
+    _isFollowingLiveTail = true;
+    _historyPendingLinesNotifier.value = 0;
   }
 
   bool _showActivePaneFromCacheOrPlaceholder() {
@@ -578,6 +655,84 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           windowIndex: windowIndex,
           paneId: paneId,
         );
+  }
+
+  void _syncKeyboardViewportState({
+    required bool keyboardVisible,
+    required double keyboardInset,
+  }) {
+    if ((keyboardInset - _lastKeyboardInset).abs() < 0.5) {
+      return;
+    }
+
+    _lastKeyboardInset = keyboardInset;
+
+    if (!keyboardVisible || _terminalMode != TerminalMode.normal) {
+      return;
+    }
+
+    final paneView = _paneTerminalViewKey.currentState;
+    final shouldFollowBottom =
+        paneView?.shouldAutoFollow ?? paneView?.isNearBottom ?? true;
+    if (!shouldFollowBottom) {
+      return;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _terminalMode != TerminalMode.normal) {
+        return;
+      }
+
+      _terminalScrollController.armUnsuppressedStickToBottom();
+      _paneTerminalViewKey.currentState?.scrollToBottom();
+    });
+  }
+
+  void _handleLiveFollowChanged(bool followBottom) {
+    if (_isFollowingLiveTail == followBottom) {
+      if (followBottom && _historyPendingLinesNotifier.value != 0) {
+        _historyPendingLinesNotifier.value = 0;
+      }
+      return;
+    }
+
+    if (followBottom) {
+      _historyPendingLinesNotifier.value = 0;
+    }
+
+    if (!mounted || _isDisposed) {
+      _isFollowingLiveTail = followBottom;
+      return;
+    }
+
+    setState(() {
+      _isFollowingLiveTail = followBottom;
+    });
+  }
+
+  void _jumpToLive() {
+    _historyPendingLinesNotifier.value = 0;
+    _terminalScrollController.armUnsuppressedStickToBottom();
+    _paneTerminalViewKey.currentState?.scrollToBottom();
+  }
+
+  void _recordPendingLiveLinesFromTerminalAdvance({
+    required int beforeAbsoluteCursorY,
+  }) {
+    if (_terminal.isUsingAltBuffer || _isFollowingLiveTail) {
+      return;
+    }
+
+    final afterAbsoluteCursorY = _terminal.buffer.absoluteCursorY;
+    final delta = afterAbsoluteCursorY - beforeAbsoluteCursorY;
+    if (delta > 0) {
+      _historyPendingLinesNotifier.value += delta;
+    }
+  }
+
+  void _resetTransientTerminalUiBeforeSwitch() {
+    _historyPendingLinesNotifier.value = 0;
+    _isFollowingLiveTail = true;
   }
 
   void _prunePaneRenderCache() {
@@ -968,9 +1123,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    final cursorBeforeWrite = _terminal.buffer.absoluteCursorY;
     final shouldAutoScroll =
         _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
     _terminal.write(data);
+    _recordPendingLiveLinesFromTerminalAdvance(
+      beforeAbsoluteCursorY: cursorBeforeWrite,
+    );
     if (shouldAutoScroll || !_hasInitialScrolled) {
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
@@ -1023,9 +1182,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final bufferedOutput = _deferredStreamOutput.takeAll();
+    final cursorBeforeWrite = _terminal.buffer.absoluteCursorY;
     final shouldAutoScroll =
         _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
     _terminal.write(bufferedOutput);
+    _recordPendingLiveLinesFromTerminalAdvance(
+      beforeAbsoluteCursorY: cursorBeforeWrite,
+    );
     if (shouldAutoScroll) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
     }
@@ -1038,6 +1201,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       paneId,
       escapeSequences: true,
       preserveTrailingSpaces: true,
+      startLine: _terminalScrollbackLines > 0 ? -_terminalScrollbackLines : null,
     );
     final alternateSnapshotCommand = TmuxCommands.capturePane(
       paneId,
@@ -1163,7 +1327,6 @@ $metadataCommand
         return;
       }
 
-      final scrollbackLines = ref.read(settingsProvider).scrollbackLines;
       final snapshotCommand = _buildPaneSnapshotCommand(activePane.id);
 
       final startTime = DateTime.now();
@@ -1277,12 +1440,7 @@ $metadataCommand
       // If the fence fails (timeout / session closed), skip the clear:
       // the deferred buffer may contain duplicates, but flushing
       // duplicates is less harmful than silently losing genuinely new
-      // output.  Keep _isResyncingPane true so that:
-      //   (a) new output during history backfill is deferred (prevents
-      //       scrolling snapshot lines into xterm scrollback which would
-      //       break history-prepend dedup), and
-      //   (b) reentrancy is blocked (a second resync cannot start while
-      //       history is still being fetched).
+      // output.
       final controlClient = _controlClient;
       if (controlClient != null && controlClient.isStarted) {
         try {
@@ -1296,13 +1454,6 @@ $metadataCommand
           // Fence failed — skip clear to avoid losing post-snapshot output.
         }
       }
-
-      await _prependHistoryScrollback(
-        sshClient: sshClient,
-        paneId: activePane.id,
-        scrollbackLines: scrollbackLines,
-        alternateScreen: nextView.alternateScreen,
-      );
     } catch (_) {
       final currentState = ref.read(sshProvider);
       if (!currentState.isReconnecting) {
@@ -1325,99 +1476,6 @@ $metadataCommand
   void _applyResyncUpdate(TerminalSnapshotFrame viewData) {
     _pendingViewData = viewData;
     _applyUpdate();
-  }
-
-  Future<void> _prependHistoryScrollback({
-    required SshClient sshClient,
-    required String paneId,
-    required int scrollbackLines,
-    required bool alternateScreen,
-  }) async {
-    if (alternateScreen || scrollbackLines <= _terminal.viewHeight) {
-      return;
-    }
-
-    final historyOutput = await sshClient.execPersistent(
-      TmuxCommands.capturePane(
-        paneId,
-        escapeSequences: false,
-        preserveTrailingSpaces: true,
-        startLine: -scrollbackLines,
-        endLine: -1,
-      ),
-      timeout: const Duration(seconds: 2),
-    );
-
-    final normalized = _trimSingleTrailingNewline(
-      historyOutput.replaceAll('\r\n', '\n'),
-    );
-    if (normalized.isEmpty) {
-      return;
-    }
-
-    var historyLines = normalized
-        .split('\n')
-        .map((line) => _buildHistoryBufferLine(line, _terminal.viewWidth))
-        .toList();
-    if (historyLines.isEmpty) {
-      return;
-    }
-
-    // Drop the last history line if it duplicates the first visible line.
-    // tmux can place the same line in both scrollback (-1) and the visible
-    // area (0) after a full-screen redraw.
-    if (_terminal.mainBuffer.lines.length > 0) {
-      final firstVisible = _terminal.mainBuffer.lines[0].getText().trimRight();
-      final lastHistory = historyLines.last.getText().trimRight();
-      if (lastHistory.isNotEmpty && lastHistory == firstVisible) {
-        historyLines.removeLast();
-        if (historyLines.isEmpty) return;
-      }
-    }
-
-    // Use replaceWith instead of insertAll to avoid xterm circular buffer
-    // assertion failures.  insertAll(0, ...) shifts existing elements via
-    // _moveChild, which calls _move on items that may be in an inconsistent
-    // attached state after circular wrapping.  replaceWith properly detaches
-    // all old items first, then attaches every item via _adoptChild, and
-    // resets _startIndex to 0.
-    final currentLines = _terminal.mainBuffer.lines.toList();
-    _terminal.mainBuffer.lines.replaceWith([...historyLines, ...currentLines]);
-    _terminal.notifyListeners();
-    if (_terminalMode == TerminalMode.normal &&
-        (_paneTerminalViewKey.currentState?.shouldAutoFollow ??
-            !_hasInitialScrolled)) {
-      _paneTerminalViewKey.currentState?.scrollToBottom();
-    }
-  }
-
-  BufferLine _buildHistoryBufferLine(String text, int width) {
-    final line = BufferLine(width);
-    var column = 0;
-
-    for (final rune in text.runes) {
-      if (column >= width) {
-        break;
-      }
-
-      if (rune == 0x09) {
-        final nextTabStop = ((column ~/ 8) + 1) * 8;
-        while (column < nextTabStop && column < width) {
-          line.setCodePoint(column, 0x20);
-          column += 1;
-        }
-        continue;
-      }
-
-      line.setCodePoint(column, rune);
-      final cellWidth = line.getWidth(column);
-      if (cellWidth <= 0) {
-        continue;
-      }
-      column += cellWidth;
-    }
-
-    return line;
   }
 
   /// Apply pending update
@@ -1459,7 +1517,7 @@ $metadataCommand
   }
 
   void _handleTerminalOutput(String data) {
-    if (_terminalMode == TerminalMode.select) {
+    if (_terminalMode != TerminalMode.normal) {
       return;
     }
 
@@ -1548,6 +1606,8 @@ $metadataCommand
     // Dispose ValueNotifier
     _viewNotifier.dispose();
     _latencyNotifier.dispose();
+    _bandwidthNotifier.dispose();
+    _historyPendingLinesNotifier.dispose();
     // Dispose scroll controller
     _terminalScrollController.dispose();
     _terminalController.dispose();
@@ -1574,6 +1634,10 @@ $metadataCommand
     _terminalScrollController.viewportShrinkBudget = keyboardVisible
         ? keyboardInset + 120
         : 0;
+    _syncKeyboardViewportState(
+      keyboardVisible: keyboardVisible,
+      keyboardInset: keyboardInset,
+    );
 
     return Scaffold(
       key: _scaffoldKey,
@@ -1590,66 +1654,70 @@ $metadataCommand
                 },
               ),
               Expanded(
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                      color: _terminalMode == TerminalMode.select
-                          ? DesignColors.warning
-                          : Colors.transparent,
-                      width: 3,
+                child: ColoredBox(
+                  color: _terminalMode == TerminalMode.select
+                      ? DesignColors.warning
+                      : Colors.transparent,
+                  child: Padding(
+                    padding: const EdgeInsets.all(3),
+                    child: Stack(
+                      children: [
+                        RepaintBoundary(
+                          child: ValueListenableBuilder<TerminalSnapshotFrame>(
+                            valueListenable: _viewNotifier,
+                            builder: (context, viewData, _) {
+                              final backgroundColor = Theme.of(
+                                context,
+                              ).scaffoldBackgroundColor;
+                              final foregroundColor = Theme.of(
+                                context,
+                              ).colorScheme.onSurface.withValues(alpha: 0.9);
+                              return PaneTerminalView(
+                                key: _paneTerminalViewKey,
+                                terminal: _terminal,
+                                terminalController: _terminalController,
+                                paneWidth: viewData.paneWidth,
+                                paneHeight: viewData.paneHeight,
+                                backgroundColor: backgroundColor,
+                                foregroundColor: foregroundColor,
+                                mode: _terminalMode == TerminalMode.select
+                                    ? PaneTerminalMode.select
+                                    : PaneTerminalMode.normal,
+                                readOnly: false,
+                                verticalScrollEnabled: true,
+                                zoomEnabled: true,
+                                showCursor: ref
+                                    .watch(settingsProvider)
+                                    .showTerminalCursor,
+                                onZoomChanged: (scale) {
+                                  setState(() {
+                                    _zoomScale = scale;
+                                  });
+                                },
+                                verticalScrollController:
+                                    _terminalScrollController,
+                                onTwoFingerSwipe: _handleTwoFingerSwipe,
+                                navigableDirections: _getNavigableDirections(),
+                                onFollowBottomChanged: _handleLiveFollowChanged,
+                              );
+                            },
+                          ),
+                        ),
+                        // Pane indicator: directly watch tmuxProvider via Consumer
+                        Positioned(
+                          top: 8,
+                          right: 8,
+                          child: Consumer(
+                            builder: (context, ref, _) {
+                              final tmuxState = ref.watch(tmuxProvider);
+                              return _buildPaneIndicator(tmuxState);
+                            },
+                          ),
+                        ),
+                        if (_terminalMode == TerminalMode.normal)
+                          _buildJumpToLiveOverlay(),
+                      ],
                     ),
-                  ),
-                  child: Stack(
-                    children: [
-                      RepaintBoundary(
-                        child: ValueListenableBuilder<TerminalSnapshotFrame>(
-                          valueListenable: _viewNotifier,
-                          builder: (context, viewData, _) {
-                            return PaneTerminalView(
-                              key: _paneTerminalViewKey,
-                              terminal: _terminal,
-                              terminalController: _terminalController,
-                              paneWidth: viewData.paneWidth,
-                              paneHeight: viewData.paneHeight,
-                              backgroundColor: Theme.of(
-                                context,
-                              ).scaffoldBackgroundColor,
-                              foregroundColor: Theme.of(
-                                context,
-                              ).colorScheme.onSurface.withValues(alpha: 0.9),
-                              mode: _terminalMode == TerminalMode.select
-                                  ? PaneTerminalMode.select
-                                  : PaneTerminalMode.normal,
-                              zoomEnabled: true,
-                              showCursor: ref
-                                  .watch(settingsProvider)
-                                  .showTerminalCursor,
-                              onZoomChanged: (scale) {
-                                setState(() {
-                                  _zoomScale = scale;
-                                });
-                              },
-                              verticalScrollController:
-                                  _terminalScrollController,
-                              onTwoFingerSwipe: _handleTwoFingerSwipe,
-                              navigableDirections: _getNavigableDirections(),
-                            );
-                          },
-                        ),
-                      ),
-                      // Pane indicator: directly watch tmuxProvider via Consumer
-                      Positioned(
-                        top: 8,
-                        right: 8,
-                        child: Consumer(
-                          builder: (context, ref, _) {
-                            final tmuxState = ref.watch(tmuxProvider);
-                            return _buildPaneIndicator(tmuxState);
-                          },
-                        ),
-                      ),
-                    ],
                   ),
                 ),
               ),
@@ -1687,6 +1755,69 @@ $metadataCommand
           if (_connectionError != null || sshState.hasError)
             _buildErrorOverlay(sshState.error ?? _connectionError),
         ],
+      ),
+    );
+  }
+
+  Widget _buildJumpToLiveOverlay() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final chipColor = isDark
+        ? Colors.black.withValues(alpha: 0.72)
+        : Colors.white.withValues(alpha: 0.92);
+    final textColor = Theme.of(context).colorScheme.onSurface;
+
+    return Positioned(
+      right: 12,
+      bottom: 12,
+      child: ValueListenableBuilder<int>(
+        valueListenable: _historyPendingLinesNotifier,
+        builder: (context, pendingLines, _) {
+          if (_isFollowingLiveTail && pendingLines <= 0) {
+            return const SizedBox.shrink();
+          }
+
+          return Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: _jumpToLive,
+              borderRadius: BorderRadius.circular(14),
+              child: Ink(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: chipColor,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: DesignColors.primary.withValues(alpha: 0.28),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.arrow_downward,
+                      size: 16,
+                      color: DesignColors.primary,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      pendingLines > 0
+                          ? 'Jump to live · $pendingLines new'
+                          : 'Jump to live',
+                      style: GoogleFonts.jetBrainsMono(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: textColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -1773,7 +1904,7 @@ $metadataCommand
   }
 
   void _sendLiteralKey(String key) {
-    if (_terminalMode == TerminalMode.select) {
+    if (_terminalMode != TerminalMode.normal) {
       return;
     }
     _ensureTerminalViewportAtBottomForInput();
@@ -1794,7 +1925,7 @@ $metadataCommand
   }
 
   void _sendSpecialKey(String tmuxKey) {
-    if (_terminalMode == TerminalMode.select) {
+    if (_terminalMode != TerminalMode.normal) {
       return;
     }
     _ensureTerminalViewportAtBottomForInput();
@@ -1858,6 +1989,7 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || _isSwitchingPane) return;
 
+    _resetTransientTerminalUiBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
     );
@@ -1931,6 +2063,7 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
+    _resetTransientTerminalUiBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
     );
@@ -2019,6 +2152,7 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
+    _resetTransientTerminalUiBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
     );
@@ -2290,11 +2424,16 @@ $metadataCommand
                   ),
                 ),
               ),
-            // Latency / Reconnect indicator
-            ValueListenableBuilder<int>(
-              valueListenable: _latencyNotifier,
-              builder: (context, latency, _) =>
-                  _buildConnectionIndicator(latency),
+            // Latency / Bandwidth / Reconnect indicator
+            AnimatedBuilder(
+              animation: Listenable.merge([
+                _latencyNotifier,
+                _bandwidthNotifier,
+              ]),
+              builder: (context, _) => _buildConnectionIndicator(
+                latency: _latencyNotifier.value,
+                bandwidthBitsPerSecond: _bandwidthNotifier.value,
+              ),
             ),
             // Settings button
             IconButton(
@@ -2760,7 +2899,23 @@ $metadataCommand
                 height: 1,
                 color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
               ),
-              // Mode switching (Normal / Scroll & Select)
+              ListTile(
+                leading: Icon(Icons.history, color: DesignColors.primary),
+                title: Text(
+                  'Retained Scrollback',
+                  style: TextStyle(
+                    color: textColor,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                subtitle: Text(
+                  'The main tmux buffer is loaded directly into the terminal. Scroll normally to browse retained output.',
+                  style: TextStyle(color: mutedTextColor, fontSize: 12),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                },
+              ),
               ListTile(
                 leading: Icon(
                   _terminalMode == TerminalMode.select
@@ -2773,7 +2928,7 @@ $metadataCommand
                 title: Text(
                   _terminalMode == TerminalMode.select
                       ? 'Select Mode'
-                      : 'Normal Mode',
+                      : 'Touch Selection',
                   style: TextStyle(
                     color: _terminalMode == TerminalMode.select
                         ? DesignColors.warning
@@ -2785,40 +2940,38 @@ $metadataCommand
                 ),
                 subtitle: Text(
                   _terminalMode == TerminalMode.select
-                      ? 'Selection is local and input is paused'
-                      : 'Tap to enable touch selection and copying',
+                      ? 'Selection is local and live terminal input is paused'
+                      : 'Enable touch selection and local copying',
                   style: TextStyle(color: mutedTextColor, fontSize: 12),
                 ),
                 trailing: Switch(
                   value: _terminalMode == TerminalMode.select,
                   onChanged: (value) {
-                    final newMode = value
-                        ? TerminalMode.select
-                        : TerminalMode.normal;
                     setState(() {
-                      _terminalMode = newMode;
+                      _terminalMode = value
+                          ? TerminalMode.select
+                          : TerminalMode.normal;
                     });
-                    if (newMode == TerminalMode.normal) {
-                      _flushDeferredStreamOutput();
-                    } else {
+                    if (value) {
                       _terminalController.clearSelection();
+                    } else {
+                      _flushDeferredStreamOutput();
                     }
                     Navigator.pop(context);
                   },
                   activeThumbColor: DesignColors.warning,
                 ),
                 onTap: () {
-                  final isSelecting = _terminalMode == TerminalMode.select;
-                  final newMode = isSelecting
-                      ? TerminalMode.normal
-                      : TerminalMode.select;
+                  final enteringSelect = _terminalMode != TerminalMode.select;
                   setState(() {
-                    _terminalMode = newMode;
+                    _terminalMode = enteringSelect
+                        ? TerminalMode.select
+                        : TerminalMode.normal;
                   });
-                  if (newMode == TerminalMode.normal) {
-                    _flushDeferredStreamOutput();
-                  } else {
+                  if (enteringSelect) {
                     _terminalController.clearSelection();
+                  } else {
+                    _flushDeferredStreamOutput();
                   }
                   Navigator.pop(context);
                 },
@@ -2968,8 +3121,11 @@ $metadataCommand
     }
   }
 
-  /// Connection status indicator (displays latency or reconnection status)
-  Widget _buildConnectionIndicator(int latency) {
+  /// Connection status indicator (displays latency, bandwidth, or reconnect status).
+  Widget _buildConnectionIndicator({
+    required int latency,
+    required int bandwidthBitsPerSecond,
+  }) {
     final colorScheme = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -2978,7 +3134,17 @@ $metadataCommand
       ),
       child: _sshState.isReconnecting
           ? _buildReconnectingIndicator()
-          : _buildLatencyIndicator(latency),
+          : GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: _rotateConnectionIndicatorMode,
+              child: switch (_connectionIndicatorMode) {
+                _ConnectionIndicatorMode.latency => _buildLatencyIndicator(
+                  latency,
+                ),
+                _ConnectionIndicatorMode.bandwidth =>
+                  _buildBandwidthIndicator(bandwidthBitsPerSecond),
+              },
+            ),
     );
   }
 
@@ -3014,6 +3180,60 @@ $metadataCommand
         ),
       ],
     );
+  }
+
+  Widget _buildBandwidthIndicator(int bitsPerSecond) {
+    final indicatorColor = bitsPerSecond > 0
+        ? DesignColors.primary
+        : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.55);
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          Icons.swap_vert,
+          size: 10,
+          color: indicatorColor.withValues(alpha: 0.8),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          _formatBandwidth(bitsPerSecond),
+          style: GoogleFonts.jetBrainsMono(
+            fontSize: 10,
+            color: indicatorColor.withValues(alpha: 0.8),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _rotateConnectionIndicatorMode() {
+    if (_sshState.isReconnecting || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _connectionIndicatorMode = switch (_connectionIndicatorMode) {
+        _ConnectionIndicatorMode.latency => _ConnectionIndicatorMode.bandwidth,
+        _ConnectionIndicatorMode.bandwidth => _ConnectionIndicatorMode.latency,
+      };
+    });
+  }
+
+  String _formatBandwidth(int bitsPerSecond) {
+    if (bitsPerSecond >= 1000 * 1000) {
+      final megabits = bitsPerSecond / (1000 * 1000);
+      final precision = megabits >= 10 ? 0 : 1;
+      return '${megabits.toStringAsFixed(precision)}Mbit/s';
+    }
+
+    if (bitsPerSecond >= 1000) {
+      final kilobits = bitsPerSecond / 1000;
+      final precision = kilobits >= 10 ? 0 : 1;
+      return '${kilobits.toStringAsFixed(precision)}kbit/s';
+    }
+
+    return '$bitsPerSecond bit/s';
   }
 
   /// Reconnecting indicator
@@ -3385,10 +3605,27 @@ class _StableScrollController extends ScrollController {
   /// above).
   bool suppressScrollToMax = false;
 
+  int _unsuppressedStickToBottomPasses = 0;
+
   /// Total height lost by the viewport when the keyboard opened (keyboard
   /// inset + SpecialKeysBar estimate).  Used to decide whether content would
   /// have fit without the keyboard.
   double viewportShrinkBudget = 0;
+
+  void armUnsuppressedStickToBottom([int passes = 2]) {
+    if (passes <= 0) {
+      return;
+    }
+    _unsuppressedStickToBottomPasses = passes;
+  }
+
+  bool consumeUnsuppressedStickToBottom() {
+    if (_unsuppressedStickToBottomPasses <= 0) {
+      return false;
+    }
+    _unsuppressedStickToBottomPasses -= 1;
+    return true;
+  }
 
   @override
   ScrollPosition createScrollPosition(
@@ -3435,6 +3672,9 @@ class _StableScrollPosition extends ScrollPositionWithSingleContext {
   void jumpTo(double value) {
     // Suppress xterm's _scrollToBottom which calls jumpTo(maxScrollExtent)
     if (_shouldSuppress && value >= maxScrollExtent - 1 && value > pixels) {
+      if (controller.consumeUnsuppressedStickToBottom()) {
+        super.jumpTo(value);
+      }
       return;
     }
     super.jumpTo(value);
@@ -3446,6 +3686,9 @@ class _StableScrollPosition extends ScrollPositionWithSingleContext {
     // performLayout. The correction is always positive when sticking to
     // a newly-larger maxScrollExtent after a viewport shrink.
     if (_shouldSuppress && correction > 0) {
+      if (controller.consumeUnsuppressedStickToBottom()) {
+        super.correctBy(correction);
+      }
       return;
     }
     super.correctBy(correction);

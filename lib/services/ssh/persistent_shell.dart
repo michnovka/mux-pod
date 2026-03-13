@@ -10,6 +10,8 @@ import 'package:dartssh2/dartssh2.dart';
 /// Eliminates channel open/close overhead, enabling command execution in about 1 RTT.
 class PersistentShell {
   final SSHClient _sshClient;
+  final void Function(int bytes)? _onBytesReceived;
+  final void Function(int bytes)? _onBytesSent;
   SSHSession? _session;
 
   /// Core text of the marker
@@ -62,7 +64,12 @@ class PersistentShell {
   /// stdout subscription
   StreamSubscription<Uint8List>? _stdoutSubscription;
 
-  PersistentShell(this._sshClient);
+  PersistentShell(
+    this._sshClient, {
+    void Function(int bytes)? onBytesReceived,
+    void Function(int bytes)? onBytesSent,
+  }) : _onBytesReceived = onBytesReceived,
+       _onBytesSent = onBytesSent;
 
   /// Start the shell session
   Future<void> start() async {
@@ -94,11 +101,13 @@ class PersistentShell {
     // - export HISTFILE=... : For Bash/Zsh (overrides after startup files)
     // - set fish_history ... : For fish (export causes syntax error in fish, so separate)
     // - 2>/dev/null suppresses errors on unsupported shells
-    _session!.write(utf8.encode(
+    final initializationBytes = utf8.encode(
       'export HISTFILE=/dev/null HISTSIZE=0 HISTFILESIZE=0 SAVEHIST=0 2>/dev/null;'
       ' set fish_history "" 2>/dev/null; true;'
       ' export PS1="" PS2="" 2>/dev/null; stty -echo\n',
-    ));
+    );
+    _onBytesSent?.call(initializationBytes.length);
+    _session!.write(initializationBytes);
     await Future.delayed(const Duration(milliseconds: 100));
 
     // Clear buffer (discard initialization output)
@@ -134,7 +143,9 @@ class PersistentShell {
     // This reliably distinguishes markers in echo-back from markers in actual output.
     final commandWithMarkers =
         "printf '$_printfStartMarker\\n'; $command; printf '$_printfEndMarker\\n'\n";
-    _session!.write(utf8.encode(commandWithMarkers));
+    final commandBytes = utf8.encode(commandWithMarkers);
+    _onBytesSent?.call(commandBytes.length);
+    _session!.write(commandBytes);
 
     // Wait for result with timeout
     final effectiveTimeout = timeout ?? const Duration(seconds: 5);
@@ -155,6 +166,8 @@ class PersistentShell {
 
   /// Handler for stdout data reception
   void _onData(Uint8List data) {
+    _onBytesReceived?.call(data.length);
+
     // Ignore if no pending command or already completed
     final pending = _pendingCommand;
     if (pending == null || pending.isCompleted) {
