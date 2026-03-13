@@ -29,11 +29,10 @@ import '../../theme/design_colors.dart';
 import '../../widgets/special_keys_bar.dart';
 import '../../providers/terminal_display_provider.dart';
 import '../settings/settings_screen.dart';
-import 'widgets/pane_history_view.dart';
 import 'widgets/pane_terminal_view.dart';
 
 /// Terminal mode used by the mobile UI.
-enum TerminalMode { normal, select, history }
+enum TerminalMode { normal, select }
 
 enum _ConnectionIndicatorMode { latency, bandwidth }
 
@@ -93,45 +92,6 @@ class _TmuxTargetSelection {
   }
 }
 
-class _PaneHistoryCacheEntry {
-  final String paneId;
-  final String content;
-  final int loadedLineCount;
-  final int retainedLineLimit;
-  final bool reachedHistoryStart;
-  final bool alternateScreen;
-  final bool isSeedOnly;
-
-  const _PaneHistoryCacheEntry({
-    required this.paneId,
-    required this.content,
-    required this.loadedLineCount,
-    required this.retainedLineLimit,
-    required this.reachedHistoryStart,
-    required this.alternateScreen,
-    required this.isSeedOnly,
-  });
-
-  _PaneHistoryCacheEntry copyWith({
-    String? content,
-    int? loadedLineCount,
-    int? retainedLineLimit,
-    bool? reachedHistoryStart,
-    bool? alternateScreen,
-    bool? isSeedOnly,
-  }) {
-    return _PaneHistoryCacheEntry(
-      paneId: paneId,
-      content: content ?? this.content,
-      loadedLineCount: loadedLineCount ?? this.loadedLineCount,
-      retainedLineLimit: retainedLineLimit ?? this.retainedLineLimit,
-      reachedHistoryStart: reachedHistoryStart ?? this.reachedHistoryStart,
-      alternateScreen: alternateScreen ?? this.alternateScreen,
-      isSeedOnly: isSeedOnly ?? this.isSeedOnly,
-    );
-  }
-}
-
 /// Terminal screen (compliant with HTML design specification)
 class TerminalScreen extends ConsumerStatefulWidget {
   final String connectionId;
@@ -160,16 +120,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   static const int _maxDeferredStreamOutputChars = 256 * 1024;
   static const int _literalInputChunkLength = 1024;
   static const Duration _connectionLookupTimeout = Duration(seconds: 3);
-  static const Duration _historyCacheRefreshThrottle = Duration(
-    milliseconds: 500,
-  );
   static const Duration _initialControlRestartDelay = Duration(
     milliseconds: 250,
   );
   static const Duration _maxControlRestartDelay = Duration(seconds: 4);
-  static const double _historyBottomThresholdPx = 24;
-  static const double _historyEnterThresholdPx = 56;
-  static const double _historyRevealOffsetPx = 96;
   static const String _snapshotMainMarker = '\x01__MUXPOD_MAIN__\x01';
   static const String _snapshotAltMarker = '\x01__MUXPOD_ALT__\x01';
   static const String _snapshotMetadataMarker = '\x01__MUXPOD_META__\x01';
@@ -178,13 +132,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   final _paneTerminalViewKey = GlobalKey<PaneTerminalViewState>();
   final _terminalScrollController = _StableScrollController();
-  final _historyVerticalScrollController = ScrollController();
-  final _historyHorizontalScrollController = ScrollController();
   late Terminal _terminal;
   final _terminalController = TerminalController();
   int _terminalScrollbackLines = AppSettings().scrollbackLines;
   final Map<String, _PaneRenderCacheEntry> _paneRenderCache = {};
-  final Map<String, _PaneHistoryCacheEntry> _paneHistoryCache = {};
   final _historyPendingLinesNotifier = ValueNotifier<int>(0);
 
   // Connection state (managed locally)
@@ -210,11 +161,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Timer? _controlRestartTimer;
   Timer? _latencyTimer;
   Timer? _bandwidthTimer;
-  Timer? _historyCacheRefreshTimer;
   int _controlRestartAttempt = 0;
   bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
-  bool _isHistoryLoading = false;
+  bool _isFollowingLiveTail = true;
   double _lastKeyboardInset = 0;
   _ConnectionIndicatorMode _connectionIndicatorMode =
       _ConnectionIndicatorMode.latency;
@@ -256,7 +206,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   void initState() {
     super.initState();
     _terminal = _createTerminalEmulator();
-    _historyVerticalScrollController.addListener(_handleHistorySurfaceScroll);
     WidgetsBinding.instance.addObserver(this);
 
     // Set up listeners on the next frame (because ref is needed)
@@ -529,7 +478,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     _terminalScrollbackLines = settings.scrollbackLines;
     _paneRenderCache.clear();
-    _paneHistoryCache.clear();
     _resetTerminalEmulator();
     if (mounted) {
       setState(() {});
@@ -593,7 +541,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _pendingViewData = cacheEntry.frame;
     _viewNotifier.value = cacheEntry.frame;
     _hasInitialScrolled = true;
-    _isHistoryLoading = false;
+    _isFollowingLiveTail = cacheEntry.viewportState.followBottom;
     _paneTerminalViewKey.currentState?.restoreViewportState(
       cacheEntry.viewportState,
     );
@@ -617,7 +565,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _pendingViewData = emptyView;
     _viewNotifier.value = emptyView;
     _hasInitialScrolled = false;
-    _isHistoryLoading = false;
+    _isFollowingLiveTail = true;
+    _historyPendingLinesNotifier.value = 0;
   }
 
   bool _showActivePaneFromCacheOrPlaceholder() {
@@ -630,8 +579,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     if (activePane != null) {
       ref.read(terminalDisplayProvider.notifier).updatePane(activePane);
-      _seedHistoryCacheForActivePane(rebuild: false);
-      _keepHistorySurfacePinnedToLiveTail();
     }
 
     return restored;
@@ -710,280 +657,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
   }
 
-  _PaneHistoryCacheEntry? get _activeHistoryEntry {
-    final paneId = ref.read(tmuxProvider).activePaneId;
-    if (paneId == null) {
-      return null;
-    }
-    return _paneHistoryCache[paneId];
-  }
-
-  String _normalizeHistoryText(String text) {
-    return _trimSingleTrailingNewline(text.replaceAll('\r\n', '\n'));
-  }
-
-  List<String> _historyLines(String content) {
-    if (content.isEmpty) {
-      return const [];
-    }
-    return content.split('\n');
-  }
-
-  int _historyLineCount(String content) => _historyLines(content).length;
-
-  bool _isNearHistorySurfaceBottom(ScrollMetrics metrics) {
-    return (metrics.maxScrollExtent - metrics.pixels) <=
-        _historyBottomThresholdPx;
-  }
-
-  bool _historyEntriesEqual(
-    _PaneHistoryCacheEntry? left,
-    _PaneHistoryCacheEntry right,
-  ) {
-    if (left == null) {
-      return false;
-    }
-
-    return left.content == right.content &&
-        left.loadedLineCount == right.loadedLineCount &&
-        left.retainedLineLimit == right.retainedLineLimit &&
-        left.reachedHistoryStart == right.reachedHistoryStart &&
-        left.alternateScreen == right.alternateScreen &&
-        left.isSeedOnly == right.isSeedOnly;
-  }
-
-  String _captureVisibleTerminalText() {
-    final buffer = _terminal.buffer;
-    if (buffer.height <= 0 || buffer.viewWidth <= 0) {
-      return '';
-    }
-
-    final startLine = math.max(0, buffer.height - buffer.viewHeight);
-    final endLine = math.max(0, buffer.height - 1);
-
-    return _normalizeHistoryText(
-      buffer.getText(
-        BufferRangeLine(
-          CellOffset(0, startLine),
-          CellOffset(math.max(0, buffer.viewWidth - 1), endLine),
-        ),
-      ),
-    );
-  }
-
-  String _captureLiveTailHistoryText() {
-    return _normalizeHistoryText(_terminal.buffer.getText());
-  }
-
-  int _historyOverlapLineCount(
-    List<String> olderLines,
-    List<String> liveLines,
-  ) {
-    if (olderLines.isEmpty || liveLines.isEmpty) {
-      return 0;
-    }
-
-    final maxOverlap = math.min(olderLines.length, liveLines.length);
-    for (var overlap = maxOverlap; overlap > 0; overlap -= 1) {
-      var matches = true;
-      for (var index = 0; index < overlap; index += 1) {
-        if (olderLines[olderLines.length - overlap + index].trimRight() !=
-            liveLines[index].trimRight()) {
-          matches = false;
-          break;
-        }
-      }
-      if (matches) {
-        return overlap;
-      }
-    }
-
-    return 0;
-  }
-
-  String _historyContentAboveLiveTail(
-    String capturedText, {
-    String? liveTailText,
-  }) {
-    final historyLines = _historyLines(_normalizeHistoryText(capturedText));
-    if (historyLines.isEmpty) {
-      return '';
-    }
-
-    final liveLines = _historyLines(liveTailText ?? _captureVisibleTerminalText());
-    final overlap = _historyOverlapLineCount(historyLines, liveLines);
-    final olderLines = overlap <= 0
-        ? historyLines
-        : historyLines.sublist(0, historyLines.length - overlap);
-    return olderLines.join('\n');
-  }
-
-  List<String> _trimHistoryLinesToRetainedLimit(List<String> lines, int limit) {
-    if (limit <= 0 || lines.length <= limit) {
-      return lines;
-    }
-    return lines.sublist(lines.length - limit);
-  }
-
-  String _mergeHistoryWithRecentTail({
-    required String baseContent,
-    required String recentContent,
-    required int retainedLineLimit,
-  }) {
-    final baseLines = _historyLines(baseContent);
-    final recentLines = _historyLines(recentContent);
-    if (baseLines.isEmpty) {
-      return recentContent;
-    }
-    if (recentLines.isEmpty) {
-      return baseContent;
-    }
-
-    final overlap = _historyOverlapLineCount(baseLines, recentLines);
-    final mergedLines = <String>[
-      ...baseLines.take(baseLines.length - overlap),
-      ...recentLines,
-    ];
-    return _trimHistoryLinesToRetainedLimit(
-      mergedLines,
-      retainedLineLimit,
-    ).join('\n');
-  }
-
-  bool _seedHistoryCacheForActivePane({bool rebuild = true}) {
-    final paneId = ref.read(tmuxProvider).activePaneId;
-    if (paneId == null) {
-      return false;
-    }
-
-    final retainedLineLimit = ref.read(settingsProvider).scrollbackLines;
-    final alternateScreen = _viewNotifier.value.alternateScreen;
-    final existingEntry = _paneHistoryCache[paneId];
-
-    late final _PaneHistoryCacheEntry nextEntry;
-    if (alternateScreen) {
-      nextEntry =
-          existingEntry?.copyWith(
-            retainedLineLimit: retainedLineLimit,
-            alternateScreen: true,
-            isSeedOnly: true,
-          ) ??
-          _PaneHistoryCacheEntry(
-            paneId: paneId,
-            content: '',
-            loadedLineCount: 0,
-            retainedLineLimit: retainedLineLimit,
-            reachedHistoryStart: false,
-            alternateScreen: true,
-            isSeedOnly: true,
-          );
-    } else {
-      final recentHistoryContent = _historyContentAboveLiveTail(
-        _captureLiveTailHistoryText(),
-      );
-      if (existingEntry != null &&
-          !existingEntry.isSeedOnly &&
-          !existingEntry.alternateScreen) {
-        final mergedContent = _mergeHistoryWithRecentTail(
-          baseContent: existingEntry.content,
-          recentContent: recentHistoryContent,
-          retainedLineLimit: retainedLineLimit,
-        );
-        nextEntry = existingEntry.copyWith(
-          content: mergedContent,
-          loadedLineCount: _historyLineCount(mergedContent),
-          retainedLineLimit: retainedLineLimit,
-          alternateScreen: false,
-        );
-      } else {
-        nextEntry = _PaneHistoryCacheEntry(
-          paneId: paneId,
-          content: recentHistoryContent,
-          loadedLineCount: _historyLineCount(recentHistoryContent),
-          retainedLineLimit: retainedLineLimit,
-          reachedHistoryStart: false,
-          alternateScreen: false,
-          isSeedOnly: true,
-        );
-      }
-    }
-
-    if (_historyEntriesEqual(existingEntry, nextEntry)) {
-      return false;
-    }
-
-    _paneHistoryCache[paneId] = nextEntry;
-
-    if (mounted &&
-        rebuild &&
-        ref.read(tmuxProvider).activePaneId == paneId) {
-      setState(() {});
-    }
-
-    return true;
-  }
-
-  void _scheduleHistoryCacheRefresh() {
-    if (_terminalMode == TerminalMode.history || _isDisposed) {
-      return;
-    }
-
-    if (_historyCacheRefreshTimer != null) {
-      return;
-    }
-
-    _historyCacheRefreshTimer = Timer(_historyCacheRefreshThrottle, () {
-      _historyCacheRefreshTimer = null;
-      if (!mounted || _isDisposed || _terminalMode == TerminalMode.history) {
-        return;
-      }
-
-      final changed = _seedHistoryCacheForActivePane();
-      if (changed) {
-        _keepHistorySurfacePinnedToLiveTail();
-      }
-    });
-  }
-
-  void _keepHistorySurfacePinnedToLiveTail() {
-    if (_terminalMode == TerminalMode.history) {
-      return;
-    }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_historyVerticalScrollController.hasClients) {
-        return;
-      }
-
-      final position = _historyVerticalScrollController.position;
-      if (_isNearHistorySurfaceBottom(position)) {
-        position.jumpTo(position.maxScrollExtent);
-      }
-    });
-  }
-
-  void _scrollHistorySurfaceToLiveTail({bool animate = false}) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_historyVerticalScrollController.hasClients) {
-        return;
-      }
-
-      final position = _historyVerticalScrollController.position;
-      final target = position.maxScrollExtent;
-      if (animate) {
-        unawaited(
-          position.animateTo(
-            target,
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOutCubic,
-          ),
-        );
-      } else {
-        position.jumpTo(target);
-      }
-      _paneTerminalViewKey.currentState?.scrollToBottom();
-    });
-  }
-
   void _syncKeyboardViewportState({
     required bool keyboardVisible,
     required double keyboardInset,
@@ -1012,146 +685,44 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
       _terminalScrollController.armUnsuppressedStickToBottom();
       _paneTerminalViewKey.currentState?.scrollToBottom();
-      _scrollHistorySurfaceToLiveTail();
     });
   }
 
-  void _handleHistorySurfaceScroll() {
-    if (!mounted || !_historyVerticalScrollController.hasClients) {
-      return;
-    }
-
-    if (_viewNotifier.value.alternateScreen) {
-      if (_terminalMode == TerminalMode.history) {
-        setState(() {
-          _terminalMode = TerminalMode.normal;
-        });
+  void _handleLiveFollowChanged(bool followBottom) {
+    if (_isFollowingLiveTail == followBottom) {
+      if (followBottom && _historyPendingLinesNotifier.value != 0) {
+        _historyPendingLinesNotifier.value = 0;
       }
       return;
     }
 
-    final position = _historyVerticalScrollController.position;
-    final distanceFromBottom = position.maxScrollExtent - position.pixels;
-    final browsingHistory = _terminalMode == TerminalMode.history
-        ? distanceFromBottom > _historyBottomThresholdPx
-        : distanceFromBottom > _historyEnterThresholdPx;
-
-    if (browsingHistory) {
-      if (_terminalMode == TerminalMode.select) {
-        _terminalController.clearSelection();
-        _flushDeferredStreamOutput();
-      }
-      if (_terminalMode != TerminalMode.history) {
-        _activateHistoryMode(distanceFromBottom: distanceFromBottom);
-      }
-      return;
-    }
-
-    if (_terminalMode == TerminalMode.history) {
-      setState(() {
-        _terminalMode = TerminalMode.normal;
-      });
-      _seedHistoryCacheForActivePane();
-    }
-
-    if (_historyPendingLinesNotifier.value != 0) {
+    if (followBottom) {
       _historyPendingLinesNotifier.value = 0;
     }
-  }
 
-  void _ensureFullHistoryLoadedForActivePane() {
-    final activePane = ref.read(tmuxProvider).activePane;
-    if (activePane == null || _viewNotifier.value.alternateScreen) {
+    if (!mounted || _isDisposed) {
+      _isFollowingLiveTail = followBottom;
       return;
     }
 
-    final retainedLineLimit = ref.read(settingsProvider).scrollbackLines;
-    final existingEntry = _paneHistoryCache[activePane.id];
-    final alreadyLoaded =
-        existingEntry != null &&
-        !existingEntry.isSeedOnly &&
-        !existingEntry.alternateScreen &&
-        existingEntry.retainedLineLimit == retainedLineLimit;
-    if (alreadyLoaded) {
-      return;
-    }
-
-    unawaited(_loadFullHistorySnapshot(activePane.id));
-  }
-
-  Future<void> _enterHistoryMode() async {
-    if (_terminalMode == TerminalMode.select) {
-      setState(() {
-        _terminalMode = TerminalMode.normal;
-      });
-      _flushDeferredStreamOutput();
-    }
-
-    if (ref.read(tmuxProvider).activePane == null) {
-      return;
-    }
-
-    _activateHistoryMode(distanceFromBottom: _historyRevealOffsetPx);
-  }
-
-  void _activateHistoryMode({required double distanceFromBottom}) {
-    _historyCacheRefreshTimer?.cancel();
-    _historyCacheRefreshTimer = null;
-    _terminalController.clearSelection();
-    _historyPendingLinesNotifier.value = 0;
-    _seedHistoryCacheForActivePane(rebuild: false);
-    _ensureFullHistoryLoadedForActivePane();
-
-    if (_historyHorizontalScrollController.hasClients) {
-      _historyHorizontalScrollController.jumpTo(
-        _historyHorizontalScrollController.position.minScrollExtent,
-      );
-    }
-
-    if (_terminalMode != TerminalMode.history) {
-      setState(() {
-        _terminalMode = TerminalMode.history;
-      });
-    }
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_historyVerticalScrollController.hasClients) {
-        return;
-      }
-
-      final position = _historyVerticalScrollController.position;
-      final clampedDistance = distanceFromBottom.clamp(
-        _historyBottomThresholdPx,
-        _historyRevealOffsetPx,
-      );
-      final target = (position.maxScrollExtent - clampedDistance).clamp(
-        position.minScrollExtent,
-        position.maxScrollExtent,
-      );
-      if ((position.pixels - target).abs() <= 0.5) {
-        return;
-      }
-      position.jumpTo(target);
+    setState(() {
+      _isFollowingLiveTail = followBottom;
     });
   }
 
-  void _exitHistoryMode({bool jumpToLive = false}) {
-    if (_terminalMode != TerminalMode.history && !jumpToLive) {
+  void _jumpToLive() {
+    _historyPendingLinesNotifier.value = 0;
+    _terminalScrollController.armUnsuppressedStickToBottom();
+    _paneTerminalViewKey.currentState?.scrollToBottom();
+  }
+
+  void _recordPendingLiveLinesFromTerminalAdvance({
+    required int beforeAbsoluteCursorY,
+  }) {
+    if (_terminal.isUsingAltBuffer || _isFollowingLiveTail) {
       return;
     }
 
-    _historyPendingLinesNotifier.value = 0;
-    if (_historyHorizontalScrollController.hasClients) {
-      _historyHorizontalScrollController.jumpTo(
-        _historyHorizontalScrollController.position.minScrollExtent,
-      );
-    }
-    _scrollHistorySurfaceToLiveTail(animate: jumpToLive);
-  }
-
-  void _recordHistoryPendingLinesFromTerminalAdvance({
-    required int beforeAbsoluteCursorY,
-  }) {
     final afterAbsoluteCursorY = _terminal.buffer.absoluteCursorY;
     final delta = afterAbsoluteCursorY - beforeAbsoluteCursorY;
     if (delta > 0) {
@@ -1159,174 +730,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  Future<void> _loadFullHistorySnapshot(String paneId) async {
-    final activePaneId = ref.read(tmuxProvider).activePaneId;
-    if (_isHistoryLoading && activePaneId == paneId) {
-      return;
-    }
-
-    final sshClient = ref.read(sshProvider.notifier).client;
-    if (sshClient == null || !sshClient.isConnected) {
-      if (mounted && activePaneId == paneId) {
-        setState(() {
-          _isHistoryLoading = false;
-        });
-      }
-      return;
-    }
-
-    final existingEntry = _paneHistoryCache[paneId];
-    if (existingEntry?.alternateScreen == true || _viewNotifier.value.alternateScreen) {
-      if (mounted && activePaneId == paneId) {
-        setState(() {
-          _isHistoryLoading = false;
-        });
-      }
-      return;
-    }
-
-    final maxHistoryLines = ref.read(settingsProvider).scrollbackLines;
-    if (maxHistoryLines <= 0) {
-      if (mounted && activePaneId == paneId) {
-        setState(() {
-          _isHistoryLoading = false;
-        });
-      }
-      return;
-    }
-
-    if (mounted && activePaneId == paneId) {
-      setState(() {
-        _isHistoryLoading = true;
-      });
-    }
-
-    try {
-      final historyOutput = await sshClient.execPersistent(
-        TmuxCommands.capturePane(
-          paneId,
-          escapeSequences: true,
-          preserveTrailingSpaces: true,
-          startLine: -maxHistoryLines,
-        ),
-        timeout: const Duration(seconds: 4),
-      );
-
-      final visibleLiveTail = _captureVisibleTerminalText();
-      final fullHistoryContent = _historyContentAboveLiveTail(
-        historyOutput,
-        liveTailText: visibleLiveTail,
-      );
-      final mergedContent = _mergeHistoryWithRecentTail(
-        baseContent: fullHistoryContent,
-        recentContent: _historyContentAboveLiveTail(
-          _captureLiveTailHistoryText(),
-          liveTailText: visibleLiveTail,
-        ),
-        retainedLineLimit: maxHistoryLines,
-      );
-
-      final oldPixels = _historyVerticalScrollController.hasClients
-          ? _historyVerticalScrollController.position.pixels
-          : 0.0;
-      final oldMaxExtent = _historyVerticalScrollController.hasClients &&
-              _historyVerticalScrollController.position.hasContentDimensions
-          ? _historyVerticalScrollController.position.maxScrollExtent
-          : 0.0;
-      final keepPinnedToBottom =
-          !_historyVerticalScrollController.hasClients ||
-          (_historyVerticalScrollController.position.hasContentDimensions &&
-              _isNearHistorySurfaceBottom(
-                _historyVerticalScrollController.position,
-              ));
-
-      final capturedLineCount = _historyLineCount(fullHistoryContent);
-      _paneHistoryCache[paneId] = _PaneHistoryCacheEntry(
-        paneId: paneId,
-        content: mergedContent,
-        loadedLineCount: _historyLineCount(mergedContent),
-        retainedLineLimit: maxHistoryLines,
-        reachedHistoryStart: capturedLineCount < maxHistoryLines,
-        alternateScreen: false,
-        isSeedOnly: false,
-      );
-
-      if (mounted && ref.read(tmuxProvider).activePaneId == paneId) {
-        setState(() {
-          _isHistoryLoading = false;
-        });
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!mounted || !_historyVerticalScrollController.hasClients) {
-            return;
-          }
-
-          final position = _historyVerticalScrollController.position;
-          if (keepPinnedToBottom) {
-            position.jumpTo(position.maxScrollExtent);
-            return;
-          }
-
-          final delta = position.maxScrollExtent - oldMaxExtent;
-          final target = (oldPixels + delta).clamp(
-            position.minScrollExtent,
-            position.maxScrollExtent,
-          );
-          position.jumpTo(target);
-        });
-      }
-    } catch (_) {
-      if (mounted && ref.read(tmuxProvider).activePaneId == paneId) {
-        setState(() {
-          _isHistoryLoading = false;
-        });
-      }
-    }
-  }
-
-  String _historyModeTitle(_PaneHistoryCacheEntry? entry) {
-    if (entry?.alternateScreen == true) {
-      return 'Alternate screen active';
-    }
-    if (_isHistoryLoading) {
-      return 'Loading retained history...';
-    }
-    if (entry == null) {
-      return 'History';
-    }
-    if (entry.isSeedOnly) {
-      return 'Recent history only';
-    }
-    if (entry.reachedHistoryStart) {
-      return 'Start of retained history';
-    }
-    return 'Retained limit reached';
-  }
-
-  String _historyModeDetail(_PaneHistoryCacheEntry? entry) {
-    if (entry?.alternateScreen == true) {
-      return 'Alternate-screen apps keep their own viewport. Jump to live to interact with them.';
-    }
-    if (entry == null) {
-      return 'Scroll up through retained tmux output while the live terminal stays pinned below.';
-    }
-    if (_isHistoryLoading) {
-      return 'Showing recent local history while tmux fetches up to ${entry.retainedLineLimit} retained lines.';
-    }
-    if (entry.isSeedOnly) {
-      return 'Showing recent local scrollback only.';
-    }
-    if (entry.reachedHistoryStart) {
-      return '${entry.loadedLineCount} retained lines loaded.';
-    }
-    return 'Showing the newest ${entry.loadedLineCount} of up to ${entry.retainedLineLimit} retained lines.';
-  }
-
-  void _leaveHistoryModeBeforeSwitch() {
-    if (_terminalMode == TerminalMode.history) {
-      _exitHistoryMode();
-    }
-    _isHistoryLoading = false;
+  void _resetTransientTerminalUiBeforeSwitch() {
     _historyPendingLinesNotifier.value = 0;
+    _isFollowingLiveTail = true;
   }
 
   void _prunePaneRenderCache() {
@@ -1339,9 +745,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
     }
     _paneRenderCache.removeWhere((paneId, _) => !validPaneIds.contains(paneId));
-    _paneHistoryCache.removeWhere(
-      (paneId, _) => !validPaneIds.contains(paneId),
-    );
   }
 
   /// Connect via SSH and set up tmux session
@@ -1724,14 +1127,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final shouldAutoScroll =
         _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
     _terminal.write(data);
-    if (_terminalMode == TerminalMode.history) {
-      _recordHistoryPendingLinesFromTerminalAdvance(
-        beforeAbsoluteCursorY: cursorBeforeWrite,
-      );
-      _paneTerminalViewKey.currentState?.scrollToBottom();
-      return;
-    }
-    _scheduleHistoryCacheRefresh();
+    _recordPendingLiveLinesFromTerminalAdvance(
+      beforeAbsoluteCursorY: cursorBeforeWrite,
+    );
     if (shouldAutoScroll || !_hasInitialScrolled) {
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
@@ -1788,14 +1186,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final shouldAutoScroll =
         _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
     _terminal.write(bufferedOutput);
-    if (_terminalMode == TerminalMode.history) {
-      _recordHistoryPendingLinesFromTerminalAdvance(
-        beforeAbsoluteCursorY: cursorBeforeWrite,
-      );
-      _paneTerminalViewKey.currentState?.scrollToBottom();
-      return;
-    }
-    _scheduleHistoryCacheRefresh();
+    _recordPendingLiveLinesFromTerminalAdvance(
+      beforeAbsoluteCursorY: cursorBeforeWrite,
+    );
     if (shouldAutoScroll) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
     }
@@ -1808,6 +1201,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       paneId,
       escapeSequences: true,
       preserveTrailingSpaces: true,
+      startLine: _terminalScrollbackLines > 0 ? -_terminalScrollbackLines : null,
     );
     final alternateSnapshotCommand = TmuxCommands.capturePane(
       paneId,
@@ -2103,21 +1497,12 @@ $metadataCommand
     }
     if (_terminalMode == TerminalMode.normal && shouldAutoScroll) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
-    } else if (_terminalMode == TerminalMode.history) {
-      _paneTerminalViewKey.currentState?.scrollToBottom();
     }
 
     // Scroll to bottom on first content received
     if (!_hasInitialScrolled && _pendingViewData.content.isNotEmpty) {
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
-    }
-
-    if (_terminalMode != TerminalMode.history) {
-      final changed = _seedHistoryCacheForActivePane();
-      if (changed) {
-        _keepHistorySurfacePinnedToLiveTail();
-      }
     }
   }
 
@@ -2216,8 +1601,6 @@ $metadataCommand
     _networkSubscription = null;
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
-    _historyCacheRefreshTimer?.cancel();
-    _historyCacheRefreshTimer = null;
     _stopLatencyPolling();
     unawaited(_stopControlClient(resetRestartState: true));
     // Dispose ValueNotifier
@@ -2227,9 +1610,6 @@ $metadataCommand
     _historyPendingLinesNotifier.dispose();
     // Dispose scroll controller
     _terminalScrollController.dispose();
-    _historyVerticalScrollController.removeListener(_handleHistorySurfaceScroll);
-    _historyVerticalScrollController.dispose();
-    _historyHorizontalScrollController.dispose();
     _terminalController.dispose();
     super.dispose();
   }
@@ -2275,11 +1655,9 @@ $metadataCommand
               ),
               Expanded(
                 child: ColoredBox(
-                  color: switch (_terminalMode) {
-                    TerminalMode.select => DesignColors.warning,
-                    TerminalMode.history => DesignColors.primary,
-                    TerminalMode.normal => Colors.transparent,
-                  },
+                  color: _terminalMode == TerminalMode.select
+                      ? DesignColors.warning
+                      : Colors.transparent,
                   child: Padding(
                     padding: const EdgeInsets.all(3),
                     child: Stack(
@@ -2294,121 +1672,33 @@ $metadataCommand
                               final foregroundColor = Theme.of(
                                 context,
                               ).colorScheme.onSurface.withValues(alpha: 0.9);
-                              final historyEntry = _activeHistoryEntry;
-                              final historyContent = historyEntry?.content ?? '';
-                              final canBrowseHistory = !viewData.alternateScreen;
-                              final revealHistorySpace =
-                                  canBrowseHistory &&
-                                  (historyContent.isNotEmpty ||
-                                      _isHistoryLoading ||
-                                      _terminalMode == TerminalMode.history);
-                              final showHistoryBlock =
-                                  revealHistorySpace &&
-                                  _terminalMode == TerminalMode.history;
-
-                              return LayoutBuilder(
-                                builder: (context, constraints) {
-                                  final liveHeight = constraints.maxHeight;
-
-                                  return Scrollbar(
-                                    controller: _historyVerticalScrollController,
-                                    thumbVisibility:
-                                        _terminalMode == TerminalMode.history &&
-                                        canBrowseHistory,
-                                    trackVisibility:
-                                        _terminalMode == TerminalMode.history &&
-                                        canBrowseHistory,
-                                    interactive: true,
-                                    child: SingleChildScrollView(
-                                      controller:
-                                          _historyVerticalScrollController,
-                                      physics: canBrowseHistory
-                                          ? const ClampingScrollPhysics()
-                                          : const NeverScrollableScrollPhysics(),
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.stretch,
-                                        children: [
-                                          if (showHistoryBlock)
-                                            PaneHistoryView(
-                                              content: historyContent,
-                                              paneWidth: viewData.paneWidth,
-                                              backgroundColor: backgroundColor,
-                                              foregroundColor: foregroundColor,
-                                              zoomScale: _zoomScale,
-                                              verticalScrollController:
-                                                  _historyVerticalScrollController,
-                                              horizontalScrollController:
-                                                  _historyHorizontalScrollController,
-                                              isLoading: _isHistoryLoading,
-                                              alternateScreen:
-                                                  historyEntry?.alternateScreen ??
-                                                  false,
-                                              isSeedOnly:
-                                                  historyEntry?.isSeedOnly ?? true,
-                                              reachedHistoryStart:
-                                                  historyEntry
-                                                      ?.reachedHistoryStart ??
-                                                  false,
-                                              loadedLineCount:
-                                                  historyEntry?.loadedLineCount ??
-                                                  0,
-                                              retainedLineLimit:
-                                                  historyEntry
-                                                      ?.retainedLineLimit ??
-                                                  ref
-                                                      .read(settingsProvider)
-                                                      .scrollbackLines,
-                                            ),
-                                          if (revealHistorySpace &&
-                                              _terminalMode !=
-                                                  TerminalMode.history)
-                                            const SizedBox(
-                                              height: _historyRevealOffsetPx,
-                                            ),
-                                          SizedBox(
-                                            height: liveHeight,
-                                            child: PaneTerminalView(
-                                              key: _paneTerminalViewKey,
-                                              terminal: _terminal,
-                                              terminalController:
-                                                  _terminalController,
-                                              paneWidth: viewData.paneWidth,
-                                              paneHeight: viewData.paneHeight,
-                                              backgroundColor: backgroundColor,
-                                              foregroundColor: foregroundColor,
-                                              mode:
-                                                  _terminalMode ==
-                                                      TerminalMode.select
-                                                  ? PaneTerminalMode.select
-                                                  : PaneTerminalMode.normal,
-                                              readOnly:
-                                                  _terminalMode ==
-                                                  TerminalMode.history,
-                                              verticalScrollEnabled:
-                                                  viewData.alternateScreen,
-                                              zoomEnabled: true,
-                                              showCursor: ref
-                                                  .watch(settingsProvider)
-                                                  .showTerminalCursor,
-                                              onZoomChanged: (scale) {
-                                                setState(() {
-                                                  _zoomScale = scale;
-                                                });
-                                              },
-                                              verticalScrollController:
-                                                  _terminalScrollController,
-                                              onTwoFingerSwipe:
-                                                  _handleTwoFingerSwipe,
-                                              navigableDirections:
-                                                  _getNavigableDirections(),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  );
+                              return PaneTerminalView(
+                                key: _paneTerminalViewKey,
+                                terminal: _terminal,
+                                terminalController: _terminalController,
+                                paneWidth: viewData.paneWidth,
+                                paneHeight: viewData.paneHeight,
+                                backgroundColor: backgroundColor,
+                                foregroundColor: foregroundColor,
+                                mode: _terminalMode == TerminalMode.select
+                                    ? PaneTerminalMode.select
+                                    : PaneTerminalMode.normal,
+                                readOnly: false,
+                                verticalScrollEnabled: true,
+                                zoomEnabled: true,
+                                showCursor: ref
+                                    .watch(settingsProvider)
+                                    .showTerminalCursor,
+                                onZoomChanged: (scale) {
+                                  setState(() {
+                                    _zoomScale = scale;
+                                  });
                                 },
+                                verticalScrollController:
+                                    _terminalScrollController,
+                                onTwoFingerSwipe: _handleTwoFingerSwipe,
+                                navigableDirections: _getNavigableDirections(),
+                                onFollowBottomChanged: _handleLiveFollowChanged,
                               );
                             },
                           ),
@@ -2424,15 +1714,15 @@ $metadataCommand
                             },
                           ),
                         ),
-                        if (_terminalMode == TerminalMode.history)
-                          _buildHistoryModeOverlay(),
+                        if (_terminalMode == TerminalMode.normal)
+                          _buildJumpToLiveOverlay(),
                       ],
                     ),
                   ),
                 ),
               ),
               // SpecialKeysBar: only shown when the on-screen keyboard is visible
-              if (keyboardVisible && _terminalMode != TerminalMode.history)
+              if (keyboardVisible)
                 SpecialKeysBar(
                   onLiteralKeyPressed: _sendLiteralKey,
                   onSpecialKeyPressed: _sendSpecialKey,
@@ -2469,126 +1759,66 @@ $metadataCommand
     );
   }
 
-  Widget _buildHistoryModeOverlay() {
+  Widget _buildJumpToLiveOverlay() {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final chipColor = isDark
         ? Colors.black.withValues(alpha: 0.72)
         : Colors.white.withValues(alpha: 0.92);
     final textColor = Theme.of(context).colorScheme.onSurface;
-    final historyEntry = _activeHistoryEntry;
-    final title = _historyModeTitle(historyEntry);
-    final detail = _historyModeDetail(historyEntry);
 
-    return Stack(
-      children: [
-        Positioned(
-          top: 8,
-          left: 8,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: chipColor,
-              borderRadius: BorderRadius.circular(999),
-              border: Border.all(
-                color: DesignColors.primary.withValues(alpha: 0.25),
-              ),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Padding(
-                    padding: EdgeInsets.only(top: 2),
-                    child: Icon(
-                      Icons.history,
+    return Positioned(
+      right: 12,
+      bottom: 12,
+      child: ValueListenableBuilder<int>(
+        valueListenable: _historyPendingLinesNotifier,
+        builder: (context, pendingLines, _) {
+          if (_isFollowingLiveTail && pendingLines <= 0) {
+            return const SizedBox.shrink();
+          }
+
+          return Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: _jumpToLive,
+              borderRadius: BorderRadius.circular(14),
+              child: Ink(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: chipColor,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: DesignColors.primary.withValues(alpha: 0.28),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.arrow_downward,
                       size: 16,
                       color: DesignColors.primary,
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 260),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          title,
-                          style: GoogleFonts.jetBrainsMono(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: textColor,
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          detail,
-                          style: GoogleFonts.jetBrainsMono(
-                            fontSize: 10,
-                            height: 1.3,
-                            fontWeight: FontWeight.w500,
-                            color: textColor.withValues(alpha: 0.76),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        Positioned(
-          right: 12,
-          bottom: 12,
-          child: ValueListenableBuilder<int>(
-            valueListenable: _historyPendingLinesNotifier,
-            builder: (context, pendingLines, _) {
-              return Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: () => _exitHistoryMode(jumpToLive: true),
-                  borderRadius: BorderRadius.circular(14),
-                  child: Ink(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      color: chipColor,
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: DesignColors.primary.withValues(alpha: 0.28),
+                    const SizedBox(width: 8),
+                    Text(
+                      pendingLines > 0
+                          ? 'Jump to live · $pendingLines new'
+                          : 'Jump to live',
+                      style: GoogleFonts.jetBrainsMono(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: textColor,
                       ),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.arrow_downward,
-                          size: 16,
-                          color: DesignColors.primary,
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          pendingLines > 0
-                              ? 'Jump to live · $pendingLines new'
-                              : 'Jump to live',
-                          style: GoogleFonts.jetBrainsMono(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w700,
-                            color: textColor,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                  ],
                 ),
-              );
-            },
-          ),
-        ),
-      ],
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -2744,18 +1974,6 @@ $metadataCommand
   }
 
   void _ensureTerminalViewportAtBottomForInput() {
-    if (_terminalMode == TerminalMode.history) {
-      if (mounted) {
-        setState(() {
-          _terminalMode = TerminalMode.normal;
-        });
-      } else {
-        _terminalMode = TerminalMode.normal;
-      }
-      _historyPendingLinesNotifier.value = 0;
-      _scrollHistorySurfaceToLiveTail();
-    }
-
     final paneView = _paneTerminalViewKey.currentState;
     if (paneView == null) {
       return;
@@ -2771,7 +1989,7 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || _isSwitchingPane) return;
 
-    _leaveHistoryModeBeforeSwitch();
+    _resetTransientTerminalUiBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
     );
@@ -2845,7 +2063,7 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
-    _leaveHistoryModeBeforeSwitch();
+    _resetTransientTerminalUiBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
     );
@@ -2934,7 +2152,7 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
-    _leaveHistoryModeBeforeSwitch();
+    _resetTransientTerminalUiBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
     );
@@ -3682,38 +2900,20 @@ $metadataCommand
                 color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
               ),
               ListTile(
-                leading: Icon(
-                  Icons.history,
-                  color: _terminalMode == TerminalMode.history
-                      ? DesignColors.primary
-                      : inactiveIconColor,
-                ),
+                leading: Icon(Icons.history, color: DesignColors.primary),
                 title: Text(
-                  _terminalMode == TerminalMode.history
-                      ? 'Browsing History'
-                      : 'Browse History',
+                  'Retained Scrollback',
                   style: TextStyle(
-                    color: _terminalMode == TerminalMode.history
-                        ? DesignColors.primary
-                        : textColor,
-                    fontWeight: _terminalMode == TerminalMode.history
-                        ? FontWeight.bold
-                        : FontWeight.normal,
+                    color: textColor,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
                 subtitle: Text(
-                  _terminalMode == TerminalMode.history
-                      ? 'Unified scroll view; live output continues in the slab below'
-                      : 'Scroll upward or tap here to reveal retained output above the live terminal',
+                  'The main tmux buffer is loaded directly into the terminal. Scroll normally to browse retained output.',
                   style: TextStyle(color: mutedTextColor, fontSize: 12),
                 ),
                 onTap: () {
                   Navigator.pop(context);
-                  if (_terminalMode == TerminalMode.history) {
-                    _exitHistoryMode(jumpToLive: true);
-                  } else {
-                    unawaited(_enterHistoryMode());
-                  }
                 },
               ),
               ListTile(
@@ -3739,49 +2939,42 @@ $metadataCommand
                   ),
                 ),
                 subtitle: Text(
-                  _terminalMode == TerminalMode.history
-                      ? 'Unavailable while browsing retained history'
-                      : _terminalMode == TerminalMode.select
+                  _terminalMode == TerminalMode.select
                       ? 'Selection is local and live terminal input is paused'
                       : 'Enable touch selection and local copying',
                   style: TextStyle(color: mutedTextColor, fontSize: 12),
                 ),
                 trailing: Switch(
                   value: _terminalMode == TerminalMode.select,
-                  onChanged: _terminalMode == TerminalMode.history
-                      ? null
-                      : (value) {
-                          setState(() {
-                            _terminalMode = value
-                                ? TerminalMode.select
-                                : TerminalMode.normal;
-                          });
-                          if (value) {
-                            _terminalController.clearSelection();
-                          } else {
-                            _flushDeferredStreamOutput();
-                          }
-                          Navigator.pop(context);
-                        },
+                  onChanged: (value) {
+                    setState(() {
+                      _terminalMode = value
+                          ? TerminalMode.select
+                          : TerminalMode.normal;
+                    });
+                    if (value) {
+                      _terminalController.clearSelection();
+                    } else {
+                      _flushDeferredStreamOutput();
+                    }
+                    Navigator.pop(context);
+                  },
                   activeThumbColor: DesignColors.warning,
                 ),
-                onTap: _terminalMode == TerminalMode.history
-                    ? null
-                    : () {
-                        final enteringSelect =
-                            _terminalMode != TerminalMode.select;
-                        setState(() {
-                          _terminalMode = enteringSelect
-                              ? TerminalMode.select
-                              : TerminalMode.normal;
-                        });
-                        if (enteringSelect) {
-                          _terminalController.clearSelection();
-                        } else {
-                          _flushDeferredStreamOutput();
-                        }
-                        Navigator.pop(context);
-                      },
+                onTap: () {
+                  final enteringSelect = _terminalMode != TerminalMode.select;
+                  setState(() {
+                    _terminalMode = enteringSelect
+                        ? TerminalMode.select
+                        : TerminalMode.normal;
+                  });
+                  if (enteringSelect) {
+                    _terminalController.clearSelection();
+                  } else {
+                    _flushDeferredStreamOutput();
+                  }
+                  Navigator.pop(context);
+                },
               ),
               // Reset zoom
               ListTile(

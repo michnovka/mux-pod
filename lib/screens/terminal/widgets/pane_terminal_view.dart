@@ -44,6 +44,7 @@ class PaneTerminalView extends ConsumerStatefulWidget {
   final bool zoomEnabled;
   final bool showCursor;
   final void Function(double scale)? onZoomChanged;
+  final ValueChanged<bool>? onFollowBottomChanged;
   final ScrollController? verticalScrollController;
   final void Function(SwipeDirection direction)? onTwoFingerSwipe;
   final Map<SwipeDirection, bool>? navigableDirections;
@@ -62,6 +63,7 @@ class PaneTerminalView extends ConsumerStatefulWidget {
     this.zoomEnabled = true,
     this.showCursor = true,
     this.onZoomChanged,
+    this.onFollowBottomChanged,
     this.verticalScrollController,
     this.onTwoFingerSwipe,
     this.navigableDirections,
@@ -149,7 +151,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   }
 
   void scrollToBottom() {
-    _followBottom = true;
+    _setFollowBottom(true);
     _snapToBottom();
   }
 
@@ -192,13 +194,13 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
 
     if (scaleChanged || followBottomChanged) {
       setState(() {
-        _followBottom = effectiveState.followBottom;
+        _setFollowBottom(effectiveState.followBottom, notify: false);
         if (scaleChanged) {
           _currentScale = effectiveState.zoomScale;
         }
       });
     } else {
-      _followBottom = effectiveState.followBottom;
+      _setFollowBottom(effectiveState.followBottom, notify: false);
     }
 
     if (scaleChanged) {
@@ -333,6 +335,16 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
 
   bool get shouldAutoFollow => _followBottom && !_isUserScrollInProgress;
 
+  void _setFollowBottom(bool value, {bool notify = true}) {
+    if (_followBottom == value) {
+      return;
+    }
+    _followBottom = value;
+    if (notify) {
+      widget.onFollowBottomChanged?.call(value);
+    }
+  }
+
   bool _isNearBottomForMetrics(ScrollMetrics metrics) {
     return (metrics.maxScrollExtent - metrics.pixels) <= _autoScrollThresholdPx;
   }
@@ -346,7 +358,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     if (notification is ScrollStartNotification &&
         notification.dragDetails != null) {
       _isUserScrollInProgress = true;
-      _followBottom = false;
+      _setFollowBottom(false);
       return false;
     }
 
@@ -355,12 +367,12 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         (notification is UserScrollNotification &&
             notification.direction == ScrollDirection.idle)) {
       _isUserScrollInProgress = false;
-      _followBottom = isNearBottom;
+      _setFollowBottom(isNearBottom);
       return false;
     }
 
     if (!_isUserScrollInProgress && isNearBottom) {
-      _followBottom = true;
+      _setFollowBottom(true);
     }
 
     return false;

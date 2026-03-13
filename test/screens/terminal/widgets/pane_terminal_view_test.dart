@@ -25,6 +25,7 @@ void main() {
     ScrollController? verticalScrollController,
     bool verticalScrollEnabled = true,
     bool readOnly = false,
+    ValueChanged<bool>? onFollowBottomChanged,
   }) {
     return ProviderScope(
       overrides: [settingsProvider.overrideWith(() => _TestSettingsNotifier())],
@@ -44,6 +45,7 @@ void main() {
               verticalScrollController: verticalScrollController,
               verticalScrollEnabled: verticalScrollEnabled,
               readOnly: readOnly,
+              onFollowBottomChanged: onFollowBottomChanged,
             ),
           ),
         ),
@@ -218,7 +220,7 @@ void main() {
       expect(restoredState.zoomScale, closeTo(1.6, 0.01));
     });
 
-    testWidgets('disables vertical scrolling when embedded in unified history', (
+    testWidgets('disables vertical scrolling when configured off', (
       tester,
     ) async {
       final terminal = Terminal(maxLines: 200, reflowEnabled: false);
@@ -237,6 +239,35 @@ void main() {
       );
 
       expect(terminalView.scrollPhysics, isA<NeverScrollableScrollPhysics>());
+    });
+
+    testWidgets('reports follow-bottom changes to the parent', (tester) async {
+      final terminal = Terminal(maxLines: 200, reflowEnabled: false);
+      final verticalScrollController = ScrollController();
+      final followStates = <bool>[];
+
+      for (var index = 0; index < 80; index += 1) {
+        terminal.write('line $index\r\n');
+      }
+
+      await tester.pumpWidget(
+        buildHarness(
+          paneWidth: 80,
+          paneHeight: 24,
+          terminal: terminal,
+          verticalScrollController: verticalScrollController,
+          onFollowBottomChanged: followStates.add,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.dragFrom(
+        tester.getCenter(find.byType(PaneTerminalView)),
+        const Offset(0, 140),
+      );
+      await tester.pumpAndSettle();
+
+      expect(followStates, contains(false));
     });
   });
 }
