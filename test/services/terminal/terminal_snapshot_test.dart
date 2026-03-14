@@ -142,5 +142,28 @@ void main() {
         expect(terminal.buffer.cursorY, 5);
       },
     );
+
+    test('restores pending wrap state at the cursor', () {
+      final terminal = createTerminalFromSnapshot(
+        frame: const TerminalSnapshotFrame(
+          content: '1234567890',
+          paneWidth: 10,
+          paneHeight: 5,
+          cursorX: 10,
+          cursorY: 0,
+          pendingWrap: true,
+        ),
+        maxLines: 1000,
+        showCursor: true,
+        onOutput: (_) {},
+        controller: TerminalController(),
+      );
+
+      expect(terminal.buffer.cursorX, 9);
+      expect(terminal.buffer.isCursorInWrapState, isTrue);
+      terminal.write('A');
+      expect(terminal.mainBuffer.lines[0].getText().trimRight(), '1234567890');
+      expect(terminal.mainBuffer.lines[1].getText().trimRight(), 'A');
+    });
   });
 }

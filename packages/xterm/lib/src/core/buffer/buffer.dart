@@ -69,6 +69,11 @@ class Buffer {
   /// screen, starting from 0.
   int get cursorX => _cursorX.clamp(0, terminal.viewWidth - 1);
 
+  /// Whether the cursor is currently in the deferred wrap state, one column
+  /// past the visible right edge. The next printable character will first wrap
+  /// to the next line before being written.
+  bool get isCursorInWrapState => _cursorX >= terminal.viewWidth;
+
   /// Vertical position of the cursor relative to the top-left cornor of the
   /// screen, starting from 0.
   int get cursorY => _cursorY;

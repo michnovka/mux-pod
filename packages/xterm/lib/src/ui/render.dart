@@ -224,8 +224,16 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   /// The distance from the top of the terminal to the top of the viewport.
   // double get _scrollOffset => _offset.pixels;
   double get _scrollOffset {
-    // return _offset.pixels ~/ _painter.cellSize.height * _painter.cellSize.height;
-    return _offset.pixels;
+    final lineHeight = _painter.cellSize.height;
+    if (lineHeight <= 0) {
+      return _offset.pixels;
+    }
+
+    // Terminal rows are discrete. Rendering at a fractional vertical offset
+    // can leave the viewport between rows, which shows clipped/duplicated
+    // bottom lines when the scroll position is near the live tail.
+    final wholeRows = (_offset.pixels / lineHeight).floorToDouble();
+    return wholeRows * lineHeight;
   }
 
   /// The height of a terminal line in pixels. This includes the line spacing.

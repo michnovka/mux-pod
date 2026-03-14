@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -22,6 +24,7 @@ import '../../services/ssh/ssh_client.dart'
 import '../../services/terminal/bounded_text_buffer.dart';
 import '../../services/terminal/terminal_image_attachment.dart';
 import '../../services/terminal/terminal_output_normalizer.dart';
+import '../../services/terminal/terminal_scrollback_merge.dart';
 import '../../services/terminal/terminal_snapshot.dart';
 import '../../services/terminal/xterm_input_adapter.dart';
 import '../../services/tmux/pane_navigator.dart';
@@ -64,12 +67,136 @@ class _PaneRenderCacheEntry {
   final Terminal terminal;
   final TerminalSnapshotFrame frame;
   final PaneTerminalViewportState viewportState;
+  final DateTime capturedAt;
 
   const _PaneRenderCacheEntry({
     required this.terminal,
     required this.frame,
     required this.viewportState,
+    required this.capturedAt,
   });
+
+  _PaneRenderCacheEntry copyWith({
+    Terminal? terminal,
+    TerminalSnapshotFrame? frame,
+    PaneTerminalViewportState? viewportState,
+    DateTime? capturedAt,
+  }) {
+    return _PaneRenderCacheEntry(
+      terminal: terminal ?? this.terminal,
+      frame: frame ?? this.frame,
+      viewportState: viewportState ?? this.viewportState,
+      capturedAt: capturedAt ?? this.capturedAt,
+    );
+  }
+}
+
+class _TerminalLoadMetrics {
+  final String reason;
+  final bool refreshTree;
+  final bool restartedControlClient;
+  final int totalMs;
+  final int? treeRefreshMs;
+  final int? controlStartMs;
+  final int? snapshotFetchMs;
+  final int? snapshotParseMs;
+  final int? terminalApplyMs;
+  final int? snapshotPayloadBytes;
+  final int? snapshotPayloadLines;
+  final int? firstLiveOutputMs;
+  final bool snapshotApplied;
+
+  const _TerminalLoadMetrics({
+    required this.reason,
+    required this.refreshTree,
+    required this.restartedControlClient,
+    required this.totalMs,
+    required this.snapshotApplied,
+    this.treeRefreshMs,
+    this.controlStartMs,
+    this.snapshotFetchMs,
+    this.snapshotParseMs,
+    this.terminalApplyMs,
+    this.snapshotPayloadBytes,
+    this.snapshotPayloadLines,
+    this.firstLiveOutputMs,
+  });
+
+  _TerminalLoadMetrics copyWith({
+    int? firstLiveOutputMs,
+  }) {
+    return _TerminalLoadMetrics(
+      reason: reason,
+      refreshTree: refreshTree,
+      restartedControlClient: restartedControlClient,
+      totalMs: totalMs,
+      treeRefreshMs: treeRefreshMs,
+      controlStartMs: controlStartMs,
+      snapshotFetchMs: snapshotFetchMs,
+      snapshotParseMs: snapshotParseMs,
+      terminalApplyMs: terminalApplyMs,
+      snapshotPayloadBytes: snapshotPayloadBytes,
+      snapshotPayloadLines: snapshotPayloadLines,
+      firstLiveOutputMs: firstLiveOutputMs ?? this.firstLiveOutputMs,
+      snapshotApplied: snapshotApplied,
+    );
+  }
+
+  String get summary {
+    final parts = <String>[
+      reason,
+      'total ${totalMs}ms',
+      if (treeRefreshMs != null) 'tree ${treeRefreshMs}ms',
+      if (controlStartMs != null) 'control ${controlStartMs}ms',
+      if (snapshotFetchMs != null) 'fetch ${snapshotFetchMs}ms',
+      if (snapshotParseMs != null) 'parse ${snapshotParseMs}ms',
+      if (terminalApplyMs != null) 'render ${terminalApplyMs}ms',
+      if (firstLiveOutputMs != null) 'first live ${firstLiveOutputMs}ms',
+      if (snapshotPayloadBytes != null)
+        '${(snapshotPayloadBytes! / 1024).toStringAsFixed(1)}KB',
+      if (snapshotPayloadLines != null) '$snapshotPayloadLines lines',
+    ];
+    return parts.join(' · ');
+  }
+}
+
+class _TerminalLoadTrace {
+  final String reason;
+  final bool refreshTree;
+  final bool restartedControlClient;
+  final Stopwatch stopwatch = Stopwatch()..start();
+
+  int? treeRefreshMs;
+  int? controlStartMs;
+  int? snapshotFetchMs;
+  int? snapshotParseMs;
+  int? terminalApplyMs;
+  int? snapshotPayloadBytes;
+  int? snapshotPayloadLines;
+
+  _TerminalLoadTrace({
+    required this.reason,
+    required this.refreshTree,
+    required this.restartedControlClient,
+  });
+
+  _TerminalLoadMetrics finish({required bool snapshotApplied}) {
+    stopwatch.stop();
+    return _TerminalLoadMetrics(
+      reason: reason,
+      refreshTree: refreshTree,
+      restartedControlClient: restartedControlClient,
+      totalMs: stopwatch.elapsedMilliseconds,
+      treeRefreshMs: treeRefreshMs,
+      controlStartMs: controlStartMs,
+      snapshotFetchMs: snapshotFetchMs,
+      snapshotParseMs: snapshotParseMs,
+      terminalApplyMs: terminalApplyMs,
+      snapshotPayloadBytes: snapshotPayloadBytes,
+      snapshotPayloadLines: snapshotPayloadLines,
+      snapshotApplied: snapshotApplied,
+    );
+  }
 }
 
 class _TmuxTargetSelection {
@@ -127,6 +254,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     milliseconds: 250,
   );
   static const Duration _maxControlRestartDelay = Duration(seconds: 4);
+  static const Duration _paneCacheMaxAge = Duration(seconds: 4);
   static const String _snapshotMainMarker = '\x01__MUXPOD_MAIN__\x01';
   static const String _snapshotAltMarker = '\x01__MUXPOD_ALT__\x01';
   static const String _snapshotMetadataMarker = '\x01__MUXPOD_META__\x01';
@@ -170,6 +298,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   double _lastKeyboardInset = 0;
   _ConnectionIndicatorMode _connectionIndicatorMode =
       _ConnectionIndicatorMode.latency;
+  String? _loadingStageLabel;
+  _TerminalLoadMetrics? _lastLoadMetrics;
+  DateTime? _pendingFirstLiveOutputStartedAt;
+  String? _pendingFirstLiveOutputPaneId;
+  int _scrollbackBackfillToken = 0;
   int _lastBandwidthSampleTotalBytes = 0;
   DateTime? _lastBandwidthSampleAt;
   DateTime? _lastLatencySampleAt;
@@ -254,7 +387,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _isInBackground = false;
     _applyKeepScreenOn();
     _startConnectionStatsPolling();
-    unawaited(_restartTerminalStream(restartControlClient: true));
+    unawaited(
+      _restartTerminalStream(
+        restartControlClient: true,
+        reason: 'resume_foreground',
+      ),
+    );
   }
 
   /// Apply keep screen on setting
@@ -303,7 +441,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       if (previous?.scrollbackLines != next.scrollbackLines) {
         _reconfigureTerminal(next);
-        unawaited(_resyncActivePane(refreshTree: false));
+        unawaited(
+          _resyncActivePane(
+            refreshTree: false,
+            reason: 'settings_scrollback_change',
+          ),
+        );
       }
     }, fireImmediately: false);
 
@@ -337,6 +480,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     await _restartTerminalStream(
       restartControlClient: true,
       refreshTree: false,
+      reason: 'reconnect_recover',
     );
     await _flushInputQueue();
     _startConnectionStatsPolling();
@@ -441,6 +585,65 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       ..onOutput = _handleTerminalOutput;
   }
 
+  bool get _shouldCollectTerminalPerfMetrics => kDebugMode || kProfileMode;
+
+  void _setLoadingStage(String? value) {
+    if (_loadingStageLabel == value) {
+      return;
+    }
+
+    if (!mounted || _isDisposed) {
+      _loadingStageLabel = value;
+      return;
+    }
+
+    setState(() {
+      _loadingStageLabel = value;
+    });
+  }
+
+  void _recordLoadMetrics(_TerminalLoadMetrics metrics) {
+    _lastLoadMetrics = metrics;
+    if (_shouldCollectTerminalPerfMetrics) {
+      debugPrint('[TerminalLoad] ${metrics.summary}');
+    }
+
+    if (!mounted || _isDisposed) {
+      return;
+    }
+
+    setState(() {});
+  }
+
+  void _armFirstLiveOutputProbe(String paneId) {
+    _pendingFirstLiveOutputPaneId = paneId;
+    _pendingFirstLiveOutputStartedAt = DateTime.now();
+  }
+
+  void _recordFirstLiveOutputIfNeeded(String paneId) {
+    if (_pendingFirstLiveOutputPaneId != paneId ||
+        _pendingFirstLiveOutputStartedAt == null ||
+        _lastLoadMetrics == null) {
+      return;
+    }
+
+    final firstLiveOutputMs = DateTime.now()
+        .difference(_pendingFirstLiveOutputStartedAt!)
+        .inMilliseconds;
+    _pendingFirstLiveOutputPaneId = null;
+    _pendingFirstLiveOutputStartedAt = null;
+    _recordLoadMetrics(
+      _lastLoadMetrics!.copyWith(firstLiveOutputMs: firstLiveOutputMs),
+    );
+  }
+
+  int _countTextLines(String text) {
+    if (text.isEmpty) {
+      return 0;
+    }
+    return '\n'.allMatches(text).length + 1;
+  }
+
   void _resetTerminalEmulator() {
     _terminal = _createTerminalEmulator();
   }
@@ -473,8 +676,33 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       cursorKeysMode: _terminal.cursorKeysMode,
       appKeypadMode: _terminal.appKeypadMode,
       autoWrapMode: _terminal.autoWrapMode,
+      pendingWrap: buffer.isCursorInWrapState,
       cursorVisible: _terminal.cursorVisibleMode,
       originMode: _terminal.originMode,
+      scrollRegionUpper: buffer.marginTop,
+      scrollRegionLower: buffer.marginBottom,
+    );
+  }
+
+  TerminalSnapshotFrame _cacheFrameForTerminalInstance(
+    Terminal terminal, {
+    TerminalSnapshotFrame? fallbackFrame,
+  }) {
+    final buffer = terminal.buffer;
+    final baseFrame = fallbackFrame ?? _viewNotifier.value;
+    return baseFrame.copyWith(
+      paneWidth: terminal.viewWidth,
+      paneHeight: terminal.viewHeight,
+      alternateScreen: terminal.isUsingAltBuffer,
+      cursorX: buffer.cursorX,
+      cursorY: buffer.cursorY,
+      insertMode: terminal.insertMode,
+      cursorKeysMode: terminal.cursorKeysMode,
+      appKeypadMode: terminal.appKeypadMode,
+      autoWrapMode: terminal.autoWrapMode,
+      pendingWrap: buffer.isCursorInWrapState,
+      cursorVisible: terminal.cursorVisibleMode,
+      originMode: terminal.originMode,
       scrollRegionUpper: buffer.marginTop,
       scrollRegionLower: buffer.marginBottom,
     );
@@ -499,10 +727,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       terminal: _terminal..onOutput = _handleTerminalOutput,
       frame: _cacheFrameForTerminal(),
       viewportState: resolvedViewportState,
+      capturedAt: DateTime.now(),
     );
   }
 
-  bool _restorePaneRenderState(String? paneId) {
+  bool _restorePaneRenderState(
+    String? paneId, {
+    Duration? maxAge = _paneCacheMaxAge,
+  }) {
     if (paneId == null) {
       return false;
     }
@@ -511,12 +743,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (cacheEntry == null) {
       return false;
     }
+    if (maxAge != null &&
+        DateTime.now().difference(cacheEntry.capturedAt) > maxAge) {
+      _paneRenderCache.remove(paneId);
+      return false;
+    }
 
     _terminalController.clearSelection();
     cacheEntry.terminal.onOutput = _handleTerminalOutput;
     _terminal = cacheEntry.terminal;
-    _pendingViewData = cacheEntry.frame;
-    _viewNotifier.value = cacheEntry.frame;
+    final activePane = ref.read(tmuxProvider).activePane;
+    final restoredFrame = cacheEntry.frame.copyWith(
+      paneWidth: activePane?.width ?? cacheEntry.frame.paneWidth,
+      paneHeight: activePane?.height ?? cacheEntry.frame.paneHeight,
+      cursorX: activePane?.cursorX ?? cacheEntry.frame.cursorX,
+      cursorY: activePane?.cursorY ?? cacheEntry.frame.cursorY,
+    );
+    _pendingViewData = restoredFrame;
+    _viewNotifier.value = restoredFrame;
     _hasInitialScrolled = true;
     _isFollowingLiveTail = cacheEntry.viewportState.followBottom;
     _paneTerminalViewKey.currentState?.restoreViewportState(
@@ -528,6 +772,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   void _showPlaceholderPane(TmuxPane? pane) {
     _terminalController.clearSelection();
     _resetTerminalEmulator();
+    _pendingFirstLiveOutputPaneId = null;
+    _pendingFirstLiveOutputStartedAt = null;
+    _scrollbackBackfillToken += 1;
     final emptyView = _viewNotifier.value.copyWith(
       content: '',
       mainContent: '',
@@ -546,10 +793,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _historyPendingLinesNotifier.value = 0;
   }
 
-  bool _showActivePaneFromCacheOrPlaceholder() {
+  bool _showActivePaneFromCacheOrPlaceholder({
+    Duration? maxAge = _paneCacheMaxAge,
+  }) {
     final tmuxState = ref.read(tmuxProvider);
     final activePane = tmuxState.activePane;
-    final restored = _restorePaneRenderState(activePane?.id);
+    final restored = _restorePaneRenderState(activePane?.id, maxAge: maxAge);
     if (!restored) {
       _showPlaceholderPane(activePane);
     }
@@ -602,6 +851,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         await _restartTerminalStream(
           restartControlClient: true,
           refreshTree: false,
+          reason: 'switch_recovery',
         );
       }
 
@@ -853,9 +1103,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         );
       }
 
+      // Clear any previously rendered body before the first resync of this
+      // connect cycle so a stale pane cannot remain visible under the loading
+      // overlay while the fresh snapshot is fetched.
+      _showPlaceholderPane(activePane);
+
       await _restartTerminalStream(
         restartControlClient: true,
         refreshTree: false,
+        reason: 'initial_connect',
       );
       _startConnectionStatsPolling();
 
@@ -889,7 +1145,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   /// Fetch and update the entire session tree.
-  Future<void> _refreshSessionTree({bool syncActive = false}) async {
+  Future<void> _refreshSessionTree({
+    bool syncActive = false,
+    _TerminalLoadTrace? trace,
+  }) async {
     if (_isDisposed) {
       return;
     }
@@ -900,7 +1159,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     try {
       final cmd = TmuxCommands.listAllPanes();
+      final refreshStopwatch = trace == null ? null : (Stopwatch()..start());
       final output = await sshClient.execPersistent(cmd);
+      refreshStopwatch?.stop();
+      trace?.treeRefreshMs = refreshStopwatch?.elapsedMilliseconds;
       if (!mounted || _isDisposed) return;
       ref.read(tmuxProvider.notifier).parseAndUpdateFullTree(output);
       _prunePaneRenderCache();
@@ -945,6 +1207,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         return;
       }
 
+      final previousActivePane = ref.read(tmuxProvider).activePane;
       final shouldRefreshTree = _shouldRefreshTreeAfterControlSync;
       final shouldResync = _shouldResyncAfterControlRefresh;
       _shouldRefreshTreeAfterControlSync = false;
@@ -952,10 +1215,37 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       if (shouldRefreshTree) {
         await _refreshSessionTree(syncActive: true);
       }
-      if (shouldResync) {
-        await _resyncActivePane(refreshTree: false);
+      final nextActivePane = ref.read(tmuxProvider).activePane;
+      final shouldApplyResync =
+          shouldResync &&
+          _shouldResyncPaneAfterControlSync(
+            previousActivePane: previousActivePane,
+            nextActivePane: nextActivePane,
+          );
+      if (shouldApplyResync) {
+        await _resyncActivePane(
+          refreshTree: false,
+          reason: 'control_notification',
+        );
       }
     });
+  }
+
+  bool _shouldResyncPaneAfterControlSync({
+    required TmuxPane? previousActivePane,
+    required TmuxPane? nextActivePane,
+  }) {
+    if (nextActivePane == null) {
+      return false;
+    }
+
+    if (previousActivePane == null) {
+      return true;
+    }
+
+    return previousActivePane.id != nextActivePane.id ||
+        previousActivePane.width != nextActivePane.width ||
+        previousActivePane.height != nextActivePane.height;
   }
 
   void _cancelControlClientRestart({bool resetAttempts = false}) {
@@ -998,7 +1288,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       if (!mounted || _isDisposed || _isInBackground) {
         return;
       }
-      await _restartTerminalStream(restartControlClient: true);
+      await _restartTerminalStream(
+        restartControlClient: true,
+        reason: 'control_restart',
+      );
     });
   }
 
@@ -1054,6 +1347,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _controlSyncTimer = null;
     _shouldRefreshTreeAfterControlSync = false;
     _shouldResyncAfterControlRefresh = false;
+    _pendingFirstLiveOutputPaneId = null;
+    _pendingFirstLiveOutputStartedAt = null;
+    _scrollbackBackfillToken += 1;
     _cancelControlClientRestart(resetAttempts: resetRestartState);
     final controlClient = _controlClient;
     _controlClient = null;
@@ -1064,6 +1360,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Future<void> _restartTerminalStream({
     bool restartControlClient = false,
     bool refreshTree = true,
+    String reason = 'resync',
   }) async {
     if (_isDisposed || _isInBackground) {
       return;
@@ -1080,6 +1377,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _controlClientSessionName != sessionName ||
         _controlClient == null ||
         !_controlClient!.isStarted;
+    final trace = _shouldCollectTerminalPerfMetrics
+        ? _TerminalLoadTrace(
+            reason: reason,
+            refreshTree: refreshTree,
+            restartedControlClient: shouldRestartControlClient,
+          )
+        : null;
 
     if (shouldRestartControlClient) {
       await _stopControlClient();
@@ -1088,18 +1392,29 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     try {
       if (shouldRestartControlClient) {
         _pauseControlOutputUntilResyncComplete = true;
+        _setLoadingStage('Starting tmux live stream…');
+        final controlStartStopwatch = trace == null
+            ? null
+            : (Stopwatch()..start());
         await _startControlClient(sessionName);
+        controlStartStopwatch?.stop();
+        trace?.controlStartMs = controlStartStopwatch?.elapsedMilliseconds;
         if (!mounted || _isDisposed) {
           return;
         }
       }
 
-      await _resyncActivePane(refreshTree: refreshTree);
+      await _resyncActivePane(
+        refreshTree: refreshTree,
+        reason: reason,
+        trace: trace,
+      );
     } finally {
       if (shouldRestartControlClient) {
         _pauseControlOutputUntilResyncComplete = false;
         _flushDeferredStreamOutput();
       }
+      _setLoadingStage(null);
     }
   }
 
@@ -1120,6 +1435,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    _recordFirstLiveOutputIfNeeded(paneId);
     final cursorBeforeWrite = _terminal.buffer.absoluteCursorY;
     final shouldAutoScroll =
         _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
@@ -1140,8 +1456,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     switch (notification.name) {
       case 'layout-change':
+        _scheduleControlSync(refreshTree: true, resyncPane: true);
+        break;
       case 'pane-mode-changed':
-        _scheduleControlSync(refreshTree: false, resyncPane: true);
+        // For interactive TUIs, tmux often emits enough live output for the
+        // screen to converge naturally. A snapshot-based resync here tends to
+        // create duplicate bottom rows more often than it helps.
         break;
       case 'session-changed':
       case 'window-close':
@@ -1184,6 +1504,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     final bufferedOutput = _deferredStreamOutput.takeAll();
+    final activePaneId = ref.read(tmuxProvider).activePaneId;
+    if (activePaneId != null) {
+      _recordFirstLiveOutputIfNeeded(activePaneId);
+    }
     final cursorBeforeWrite = _terminal.buffer.absoluteCursorY;
     final shouldAutoScroll =
         _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
@@ -1196,14 +1520,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  String _buildPaneSnapshotCommand(String paneId) {
+  String _buildPaneSnapshotCommand(
+    String paneId, {
+    bool includeScrollback = true,
+  }) {
     final alternateOnCommand = TmuxCommands.getPaneAlternateOn(paneId);
     final metadataCommand = TmuxCommands.getPaneSnapshotMetadata(paneId);
     final mainSnapshotCommand = TmuxCommands.capturePane(
       paneId,
       escapeSequences: true,
       preserveTrailingSpaces: true,
-      startLine: _terminalScrollbackLines > 0
+      joinWrappedLines: true,
+      startLine: includeScrollback && _terminalScrollbackLines > 0
           ? -_terminalScrollbackLines
           : null,
     );
@@ -1228,6 +1556,18 @@ fi;
 printf '\\001__MUXPOD_META__\\001';
 $metadataCommand
 ''';
+  }
+
+  String _buildPaneScrollbackBackfillCommand(String paneId) {
+    return TmuxCommands.capturePane(
+      paneId,
+      escapeSequences: true,
+      preserveTrailingSpaces: true,
+      joinWrappedLines: true,
+      startLine: _terminalScrollbackLines > 0
+          ? -_terminalScrollbackLines
+          : null,
+    );
   }
 
   _PaneSnapshotPayload _parseSnapshotPayload(String combinedOutput) {
@@ -1283,6 +1623,107 @@ $metadataCommand
     return value;
   }
 
+  Future<void> _scheduleScrollbackBackfill({
+    required String paneId,
+    required TerminalSnapshotFrame visibleFrame,
+    required Terminal targetTerminal,
+  }) async {
+    if (visibleFrame.alternateScreen ||
+        _terminalScrollbackLines <= visibleFrame.paneHeight) {
+      return;
+    }
+
+    final sshClient = ref.read(sshProvider.notifier).client;
+    if (sshClient == null || !sshClient.isConnected) {
+      return;
+    }
+
+    final token = ++_scrollbackBackfillToken;
+    final fetchStopwatch = _shouldCollectTerminalPerfMetrics
+        ? (Stopwatch()..start())
+        : null;
+
+    try {
+      final fullMainContent = _trimSingleTrailingNewline(
+        await sshClient.execDirect(
+          _buildPaneScrollbackBackfillCommand(paneId),
+          timeout: const Duration(seconds: 2),
+        ),
+      );
+      fetchStopwatch?.stop();
+
+      if (!mounted || _isDisposed || token != _scrollbackBackfillToken) {
+        return;
+      }
+
+      final activePaneId = ref.read(tmuxProvider).activePaneId;
+      final cacheEntry = _paneRenderCache[paneId];
+      final targetStillRelevant =
+          activePaneId == paneId ||
+          (cacheEntry != null && identical(cacheEntry.terminal, targetTerminal));
+      if (!targetStillRelevant) {
+        return;
+      }
+
+      final scratchFrame = visibleFrame.copyWith(
+        content: fullMainContent,
+        mainContent: fullMainContent,
+        alternateScreen: false,
+      );
+      final scratchTerminal = createTerminalFromSnapshot(
+        frame: scratchFrame,
+        maxLines: _terminalScrollbackLines,
+        showCursor: ref.read(settingsProvider).showTerminalCursor,
+        onOutput: (_) {},
+        controller: TerminalController(),
+      );
+
+      final applied = prependTerminalScrollback(
+        terminal: targetTerminal,
+        fullSnapshotLines: scratchTerminal.mainBuffer.lines.toList(),
+      );
+      if (!applied) {
+        return;
+      }
+
+      final currentViewportState =
+          activePaneId == paneId
+          ? (_paneTerminalViewKey.currentState?.captureViewportState() ??
+                const PaneTerminalViewportState())
+          : (cacheEntry?.viewportState ?? const PaneTerminalViewportState());
+      final updatedFrame = _cacheFrameForTerminalInstance(
+        targetTerminal,
+        fallbackFrame: visibleFrame.copyWith(mainContent: fullMainContent),
+      );
+      if (activePaneId == paneId) {
+        _paneRenderCache[paneId] = _PaneRenderCacheEntry(
+          terminal: targetTerminal..onOutput = _handleTerminalOutput,
+          frame: updatedFrame,
+          viewportState: currentViewportState,
+          capturedAt: DateTime.now(),
+        );
+        if (_paneTerminalViewKey.currentState?.shouldAutoFollow ?? false) {
+          _paneTerminalViewKey.currentState?.scrollToBottom();
+        }
+      } else if (cacheEntry != null) {
+        _paneRenderCache[paneId] = cacheEntry.copyWith(
+          frame: updatedFrame,
+          capturedAt: DateTime.now(),
+        );
+      }
+
+      if (_shouldCollectTerminalPerfMetrics) {
+        debugPrint(
+          '[TerminalBackfill] pane=$paneId fetch ${fetchStopwatch?.elapsedMilliseconds ?? 0}ms · '
+          '${(utf8.encode(fullMainContent).length / 1024).toStringAsFixed(1)}KB · '
+          '${_countTextLines(fullMainContent)} lines',
+        );
+      }
+    } catch (_) {
+      fetchStopwatch?.stop();
+    }
+  }
+
   bool _parseTmuxFlag(String? value, {required bool fallback}) {
     if (value == null) {
       return fallback;
@@ -1298,7 +1739,11 @@ $metadataCommand
     }
   }
 
-  Future<void> _resyncActivePane({bool refreshTree = true}) async {
+  Future<void> _resyncActivePane({
+    bool refreshTree = true,
+    String reason = 'resync',
+    _TerminalLoadTrace? trace,
+  }) async {
     if (_isDisposed || _isResyncingPane) {
       return;
     }
@@ -1308,11 +1753,27 @@ $metadataCommand
       return;
     }
 
+    final activeTrace =
+        trace ??
+        (_shouldCollectTerminalPerfMetrics
+            ? _TerminalLoadTrace(
+                reason: reason,
+                refreshTree: refreshTree,
+                restartedControlClient: false,
+              )
+            : null);
+    var snapshotApplied = false;
+    TerminalSnapshotFrame? visibleFrameForBackfill;
+    String? visiblePaneIdForBackfill;
+    Terminal? targetTerminalForBackfill;
+
     try {
       _isResyncingPane = true;
+      _scrollbackBackfillToken += 1;
 
       if (refreshTree) {
-        await _refreshSessionTree(syncActive: true);
+        _setLoadingStage('Refreshing tmux state…');
+        await _refreshSessionTree(syncActive: true, trace: activeTrace);
       }
       if (!mounted || _isDisposed) {
         return;
@@ -1331,14 +1792,19 @@ $metadataCommand
         return;
       }
 
-      final snapshotCommand = _buildPaneSnapshotCommand(activePane.id);
+      final snapshotCommand = _buildPaneSnapshotCommand(
+        activePane.id,
+        includeScrollback: false,
+      );
 
+      _setLoadingStage('Capturing pane…');
       final startTime = DateTime.now();
-      final combinedOutput = await sshClient.execPersistent(
+      final combinedOutput = await sshClient.execDirect(
         snapshotCommand,
         timeout: const Duration(seconds: 2),
       );
       final latency = DateTime.now().difference(startTime).inMilliseconds;
+      activeTrace?.snapshotFetchMs = latency;
       if (!_isDisposed) {
         _recordLatencySample(latency);
       }
@@ -1347,7 +1813,15 @@ $metadataCommand
         return;
       }
 
+      if (activeTrace != null) {
+        activeTrace.snapshotPayloadBytes = utf8.encode(combinedOutput).length;
+        activeTrace.snapshotPayloadLines = _countTextLines(combinedOutput);
+      }
+
+      final parseStopwatch = activeTrace == null ? null : (Stopwatch()..start());
       final snapshotPayload = _parseSnapshotPayload(combinedOutput);
+      parseStopwatch?.stop();
+      activeTrace?.snapshotParseMs = parseStopwatch?.elapsedMilliseconds;
 
       var nextView = _viewNotifier.value.copyWith(
         content: snapshotPayload.activeContent,
@@ -1378,9 +1852,9 @@ $metadataCommand
           metadataParts.length > 7 ? metadataParts[7] : null,
           fallback: nextView.appKeypadMode,
         );
-        final autoWrapMode = _parseTmuxFlag(
+        final pendingWrap = _parseTmuxFlag(
           metadataParts.length > 8 ? metadataParts[8] : null,
-          fallback: nextView.autoWrapMode,
+          fallback: nextView.pendingWrap,
         );
         final cursorVisible = _parseTmuxFlag(
           metadataParts.length > 9 ? metadataParts[9] : null,
@@ -1402,7 +1876,8 @@ $metadataCommand
           insertMode: insertMode,
           cursorKeysMode: cursorKeysMode,
           appKeypadMode: appKeypadMode,
-          autoWrapMode: autoWrapMode,
+          autoWrapMode: nextView.autoWrapMode,
+          pendingWrap: pendingWrap,
           cursorVisible: cursorVisible,
           originMode: originMode,
           scrollRegionUpper: scrollRegionUpper,
@@ -1424,7 +1899,16 @@ $metadataCommand
         }
       }
 
+      _setLoadingStage('Rendering terminal…');
+      final applyStopwatch = activeTrace == null ? null : (Stopwatch()..start());
       _applyResyncUpdate(nextView);
+      applyStopwatch?.stop();
+      activeTrace?.terminalApplyMs = applyStopwatch?.elapsedMilliseconds;
+      snapshotApplied = true;
+      _armFirstLiveOutputProbe(activePane.id);
+      visibleFrameForBackfill = nextView;
+      visiblePaneIdForBackfill = activePane.id;
+      targetTerminalForBackfill = _terminal;
 
       // Post-snapshot ordering fence: send a no-op through the control
       // mode channel (same stream as %output).  We awaited the snapshot
@@ -1465,6 +1949,10 @@ $metadataCommand
       }
     } finally {
       _isResyncingPane = false;
+      if (activeTrace != null) {
+        _recordLoadMetrics(activeTrace.finish(snapshotApplied: snapshotApplied));
+      }
+      _setLoadingStage(null);
       // Flush any remaining deferred output.  Three scenarios:
       //  1. Snapshot applied + fence succeeded: buffer was cleared after
       //     the fence, so only genuinely post-snapshot output remains.
@@ -1474,6 +1962,19 @@ $metadataCommand
       //     start is still in the buffer and must be flushed to avoid
       //     silent data loss.
       _flushDeferredStreamOutput();
+    }
+
+    if (snapshotApplied &&
+        visibleFrameForBackfill != null &&
+        visiblePaneIdForBackfill != null &&
+        targetTerminalForBackfill != null) {
+      unawaited(
+        _scheduleScrollbackBackfill(
+          paneId: visiblePaneIdForBackfill,
+          visibleFrame: visibleFrameForBackfill,
+          targetTerminal: targetTerminalForBackfill,
+        ),
+      );
     }
   }
 
@@ -1903,20 +2404,7 @@ $metadataCommand
           // visible and only use a transparent barrier so input cannot race the
           // in-flight remote pane/window/session switch.
           if (_isConnecting || _isSwitchingPane || sshState.isConnecting)
-            Container(
-              color:
-                  (_isConnecting ||
-                      sshState.isConnecting ||
-                      _showSwitchingOverlay)
-                  ? (isDark ? Colors.black54 : Colors.white70)
-                  : Colors.transparent,
-              child:
-                  (_isConnecting ||
-                      sshState.isConnecting ||
-                      _showSwitchingOverlay)
-                  ? const Center(child: CircularProgressIndicator())
-                  : null,
-            ),
+            _buildLoadingOverlay(isDark: isDark, sshState: sshState),
           // Error overlay
           if (_connectionError != null || sshState.hasError)
             _buildErrorOverlay(sshState.error ?? _connectionError),
@@ -1985,6 +2473,65 @@ $metadataCommand
           );
         },
       ),
+    );
+  }
+
+  Widget _buildLoadingOverlay({
+    required bool isDark,
+    required SshState sshState,
+  }) {
+    final showDimBackground =
+        _isConnecting || sshState.isConnecting || _showSwitchingOverlay;
+    final stageLabel = _loadingStageLabel;
+
+    return Container(
+      color: showDimBackground
+          ? (isDark ? Colors.black54 : Colors.white70)
+          : Colors.transparent,
+      alignment: Alignment.center,
+      child:
+          (_isConnecting || sshState.isConnecting || _showSwitchingOverlay)
+          ? DecoratedBox(
+              decoration: BoxDecoration(
+                color: isDark
+                    ? Colors.black.withValues(alpha: 0.72)
+                    : Colors.white.withValues(alpha: 0.96),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.outline.withValues(alpha: 0.18),
+                ),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 18,
+                  vertical: 16,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: CircularProgressIndicator(strokeWidth: 2.6),
+                    ),
+                    if (stageLabel != null && stageLabel.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        stageLabel,
+                        style: GoogleFonts.jetBrainsMono(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: Theme.of(context).colorScheme.onSurface,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            )
+          : null,
     );
   }
 
@@ -2167,7 +2714,9 @@ $metadataCommand
     ref.read(tmuxProvider.notifier).setActiveSession(sessionName);
 
     final nextPane = ref.read(tmuxProvider).activePane;
-    final restoredFromCache = _showActivePaneFromCacheOrPlaceholder();
+    final restoredFromCache = _showActivePaneFromCacheOrPlaceholder(
+      maxAge: Duration.zero,
+    );
     setState(() {
       _isSwitchingPane = true;
       _showSwitchingOverlay = !restoredFromCache;
@@ -2199,6 +2748,7 @@ $metadataCommand
       await _restartTerminalStream(
         restartControlClient: true,
         refreshTree: false,
+        reason: 'switch_session',
       );
       switchConfirmed = true;
       await sshClient.execPersistentInput(
@@ -2246,7 +2796,9 @@ $metadataCommand
     ref.read(tmuxProvider.notifier).setActiveWindow(windowIndex);
 
     final activePane = ref.read(tmuxProvider).activePane;
-    final restoredFromCache = _showActivePaneFromCacheOrPlaceholder();
+    final restoredFromCache = _showActivePaneFromCacheOrPlaceholder(
+      maxAge: currentSession == sessionName ? _paneCacheMaxAge : Duration.zero,
+    );
     setState(() {
       _isSwitchingPane = true;
       _showSwitchingOverlay = !restoredFromCache;
@@ -2283,6 +2835,7 @@ $metadataCommand
       await _restartTerminalStream(
         restartControlClient: currentSession != sessionName,
         refreshTree: false,
+        reason: 'switch_window',
       );
       switchConfirmed = true;
       try {
@@ -2354,7 +2907,10 @@ $metadataCommand
 
       await sshClient.execPersistent(TmuxCommands.selectPane(paneId));
       remoteSelectionChanged = true;
-      await _restartTerminalStream(refreshTree: false);
+      await _restartTerminalStream(
+        refreshTree: false,
+        reason: 'switch_pane',
+      );
       switchConfirmed = true;
 
       // Send focus-in to the new pane (so apps like Claude Code can detect focus)
