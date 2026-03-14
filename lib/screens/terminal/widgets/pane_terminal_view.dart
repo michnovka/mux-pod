@@ -87,6 +87,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   double _baseScale = 1.0;
   bool _isUserScrollInProgress = false;
   bool _followBottom = true;
+  bool _bottomSnapPending = false;
 
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
   Offset _twoFingerPanStart = Offset.zero;
@@ -186,8 +187,8 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
             horizontalOffset: state.horizontalOffset,
             zoomScale: state.zoomScale,
           );
-    final scaleChanged = (_currentScale - effectiveState.zoomScale).abs() >
-        0.001;
+    final scaleChanged =
+        (_currentScale - effectiveState.zoomScale).abs() > 0.001;
     final followBottomChanged = _followBottom != effectiveState.followBottom;
     _isUserScrollInProgress = false;
     _baseScale = effectiveState.zoomScale;
@@ -220,8 +221,29 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   }
 
   void _snapToBottom([int remainingAttempts = 3]) {
+    if (_bottomSnapPending) {
+      return;
+    }
+    _bottomSnapPending = true;
+    _scheduleBottomSnapAttempt(remainingAttempts);
+  }
+
+  @visibleForTesting
+  bool get hasPendingBottomSnap => _bottomSnapPending;
+
+  void _scheduleBottomSnapAttempt(int remainingAttempts) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_verticalScrollController.hasClients) {
+      if (!mounted) {
+        _bottomSnapPending = false;
+        return;
+      }
+
+      if (!_verticalScrollController.hasClients) {
+        if (remainingAttempts > 0) {
+          _scheduleBottomSnapAttempt(remainingAttempts - 1);
+        } else {
+          _bottomSnapPending = false;
+        }
         return;
       }
 
@@ -231,13 +253,12 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         position.jumpTo(target);
       }
 
-      if (remainingAttempts <= 0) {
+      if (remainingAttempts > 0 && !_isNearBottomForMetrics(position)) {
+        _scheduleBottomSnapAttempt(remainingAttempts - 1);
         return;
       }
 
-      if (!_isNearBottomForMetrics(position)) {
-        _snapToBottom(remainingAttempts - 1);
-      }
+      _bottomSnapPending = false;
     });
   }
 
@@ -846,7 +867,8 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
               autoResize: false,
               autofocus: true,
               deleteDetection: true,
-              readOnly: widget.readOnly || widget.mode == PaneTerminalMode.select,
+              readOnly:
+                  widget.readOnly || widget.mode == PaneTerminalMode.select,
               simulateScroll:
                   widget.mode == PaneTerminalMode.normal &&
                   widget.verticalScrollEnabled,

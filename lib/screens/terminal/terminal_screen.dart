@@ -159,18 +159,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   String? _controlClientSessionName;
   Timer? _controlSyncTimer;
   Timer? _controlRestartTimer;
-  Timer? _latencyTimer;
   Timer? _bandwidthTimer;
   int _controlRestartAttempt = 0;
-  bool _isLatencyProbeInFlight = false;
   bool _isResyncingPane = false;
+  bool _pauseControlOutputUntilResyncComplete = false;
   bool _isFollowingLiveTail = true;
   double _lastKeyboardInset = 0;
   _ConnectionIndicatorMode _connectionIndicatorMode =
       _ConnectionIndicatorMode.latency;
   int _lastBandwidthSampleTotalBytes = 0;
   DateTime? _lastBandwidthSampleAt;
+  DateTime? _lastLatencySampleAt;
 
+  bool _shouldRefreshTreeAfterControlSync = false;
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
 
@@ -239,7 +240,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _isInBackground = true;
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
-    _stopLatencyPolling(resetValue: true);
+    _stopConnectionStatsPolling(resetValue: true);
     unawaited(_stopControlClient(resetRestartState: true));
     WakelockPlus.disable();
   }
@@ -249,7 +250,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (!_isInBackground || _isDisposed) return;
     _isInBackground = false;
     _applyKeepScreenOn();
-    _startLatencyPolling();
+    _startConnectionStatsPolling();
     unawaited(_restartTerminalStream(restartControlClient: true));
   }
 
@@ -335,37 +336,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       refreshTree: false,
     );
     await _flushInputQueue();
-    _startLatencyPolling();
+    _startConnectionStatsPolling();
 
     // Update UI
     if (mounted) setState(() {});
   }
 
-  void _startLatencyPolling() {
-    _stopLatencyPolling();
-    if (_isDisposed || _isInBackground) {
-      return;
-    }
-
-    _startBandwidthPolling();
-    unawaited(_refreshLatency());
-    _latencyTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      unawaited(_refreshLatency());
-    });
-  }
-
-  void _stopLatencyPolling({bool resetValue = false}) {
-    _latencyTimer?.cancel();
-    _latencyTimer = null;
-    _isLatencyProbeInFlight = false;
-    _stopBandwidthPolling(resetValue: resetValue);
-    if (resetValue && !_isDisposed) {
-      _latencyNotifier.value = 0;
-    }
-  }
-
-  void _startBandwidthPolling() {
-    _stopBandwidthPolling();
+  void _startConnectionStatsPolling() {
+    _stopConnectionStatsPolling();
     if (_isDisposed || _isInBackground) {
       return;
     }
@@ -373,23 +351,25 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sshClient = _sshNotifier?.client;
     _lastBandwidthSampleTotalBytes = sshClient?.totalPayloadBytes ?? 0;
     _lastBandwidthSampleAt = DateTime.now();
-
+    _refreshConnectionStats(resetBandwidthSample: true);
     _bandwidthTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _refreshBandwidth();
+      _refreshConnectionStats();
     });
   }
 
-  void _stopBandwidthPolling({bool resetValue = false}) {
+  void _stopConnectionStatsPolling({bool resetValue = false}) {
     _bandwidthTimer?.cancel();
     _bandwidthTimer = null;
     _lastBandwidthSampleTotalBytes = 0;
     _lastBandwidthSampleAt = null;
+    _lastLatencySampleAt = null;
     if (resetValue && !_isDisposed) {
+      _latencyNotifier.value = 0;
       _bandwidthNotifier.value = 0;
     }
   }
 
-  void _refreshBandwidth() {
+  void _refreshConnectionStats({bool resetBandwidthSample = false}) {
     if (_isDisposed || _isInBackground || !mounted) {
       return;
     }
@@ -399,14 +379,23 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
+    final sampledLatencyAt = sshClient.lastKeepAliveLatencyAt;
+    if (sampledLatencyAt != null) {
+      _recordLatencySample(
+        sshClient.lastKeepAliveLatencyMs,
+        sampledAt: sampledLatencyAt,
+      );
+    }
+
     final now = DateTime.now();
-    final lastSampleAt = _lastBandwidthSampleAt;
-    if (lastSampleAt == null) {
+    if (resetBandwidthSample || _lastBandwidthSampleAt == null) {
       _lastBandwidthSampleAt = now;
       _lastBandwidthSampleTotalBytes = sshClient.totalPayloadBytes;
+      _bandwidthNotifier.value = 0;
       return;
     }
 
+    final lastSampleAt = _lastBandwidthSampleAt!;
     final elapsedMs = now.difference(lastSampleAt).inMilliseconds;
     if (elapsedMs <= 0) {
       return;
@@ -421,32 +410,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _bandwidthNotifier.value = bitsPerSecond;
   }
 
-  Future<void> _refreshLatency() async {
-    if (_isDisposed || _isInBackground || _isLatencyProbeInFlight || !mounted) {
+  void _recordLatencySample(int latencyMs, {DateTime? sampledAt}) {
+    if (_isDisposed) {
       return;
     }
-
-    final sshClient = _sshNotifier?.client;
-    if (sshClient == null || !sshClient.isConnected) {
+    final effectiveSampleAt = sampledAt ?? DateTime.now();
+    if (_lastLatencySampleAt != null &&
+        effectiveSampleAt.isBefore(_lastLatencySampleAt!)) {
       return;
     }
-
-    _isLatencyProbeInFlight = true;
-    final startTime = DateTime.now();
-
-    try {
-      await sshClient.exec('true', timeout: const Duration(seconds: 3));
-      if (!_isDisposed && mounted) {
-        _latencyNotifier.value = DateTime.now()
-            .difference(startTime)
-            .inMilliseconds;
-      }
-    } catch (_) {
-      // Ignore latency probe failures. Connection keep-alive and reconnect
-      // paths already own transport error handling.
-    } finally {
-      _isLatencyProbeInFlight = false;
-    }
+    _lastLatencySampleAt = effectiveSampleAt;
+    _latencyNotifier.value = latencyMs;
   }
 
   /// Send queued input
@@ -880,7 +854,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         restartControlClient: true,
         refreshTree: false,
       );
-      _startLatencyPolling();
+      _startConnectionStatsPolling();
 
       if (activePane != null) {
         // Send focus-in to pane (so apps like Claude Code can detect focus).
@@ -894,14 +868,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _isConnecting = false;
       });
     } on SshHostKeyError catch (e) {
-      _stopLatencyPolling(resetValue: true);
+      _stopConnectionStatsPolling(resetValue: true);
       if (!mounted) return;
       setState(() {
         _isConnecting = false;
         _connectionError = e.message;
       });
     } catch (e) {
-      _stopLatencyPolling(resetValue: true);
+      _stopConnectionStatsPolling(resetValue: true);
       if (!mounted) return;
       setState(() {
         _isConnecting = false;
@@ -954,7 +928,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
   }
 
-  void _scheduleControlSync({bool resyncPane = false}) {
+  void _scheduleControlSync({
+    bool refreshTree = true,
+    bool resyncPane = false,
+  }) {
+    _shouldRefreshTreeAfterControlSync =
+        _shouldRefreshTreeAfterControlSync || refreshTree;
     _shouldResyncAfterControlRefresh =
         _shouldResyncAfterControlRefresh || resyncPane;
     _controlSyncTimer?.cancel();
@@ -963,9 +942,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         return;
       }
 
+      final shouldRefreshTree = _shouldRefreshTreeAfterControlSync;
       final shouldResync = _shouldResyncAfterControlRefresh;
+      _shouldRefreshTreeAfterControlSync = false;
       _shouldResyncAfterControlRefresh = false;
-      await _refreshSessionTree(syncActive: true);
+      if (shouldRefreshTree) {
+        await _refreshSessionTree(syncActive: true);
+      }
       if (shouldResync) {
         await _resyncActivePane(refreshTree: false);
       }
@@ -1066,6 +1049,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Future<void> _stopControlClient({bool resetRestartState = false}) async {
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
+    _shouldRefreshTreeAfterControlSync = false;
+    _shouldResyncAfterControlRefresh = false;
     _cancelControlClientRestart(resetAttempts: resetRestartState);
     final controlClient = _controlClient;
     _controlClient = null;
@@ -1097,14 +1082,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       await _stopControlClient();
     }
 
-    await _resyncActivePane(refreshTree: refreshTree);
-
-    if (shouldRestartControlClient) {
-      await _startControlClient(sessionName);
-      if (!mounted || _isDisposed) {
-        return;
+    try {
+      if (shouldRestartControlClient) {
+        _pauseControlOutputUntilResyncComplete = true;
+        await _startControlClient(sessionName);
+        if (!mounted || _isDisposed) {
+          return;
+        }
       }
-      await _resyncActivePane(refreshTree: false);
+
+      await _resyncActivePane(refreshTree: refreshTree);
+    } finally {
+      if (shouldRestartControlClient) {
+        _pauseControlOutputUntilResyncComplete = false;
+        _flushDeferredStreamOutput();
+      }
     }
   }
 
@@ -1118,7 +1110,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    if (_terminalMode == TerminalMode.select || _isResyncingPane) {
+    if (_terminalMode == TerminalMode.select ||
+        _isResyncingPane ||
+        _pauseControlOutputUntilResyncComplete) {
       _deferredStreamOutput.write(data);
       return;
     }
@@ -1144,15 +1138,19 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     switch (notification.name) {
       case 'layout-change':
       case 'pane-mode-changed':
+        _scheduleControlSync(refreshTree: false, resyncPane: true);
+        break;
       case 'session-changed':
+      case 'window-close':
+      case 'window-pane-changed':
+        _scheduleControlSync(refreshTree: true, resyncPane: true);
+        break;
       case 'sessions-changed':
       case 'unlinked-window-add':
       case 'unlinked-window-close':
       case 'window-add':
-      case 'window-close':
-      case 'window-pane-changed':
       case 'window-renamed':
-        _scheduleControlSync(resyncPane: true);
+        _scheduleControlSync(refreshTree: true);
         break;
       case 'exit':
         _handleControlClientClosed();
@@ -1177,7 +1175,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   void _flushDeferredStreamOutput() {
     if (_deferredStreamOutput.isEmpty ||
         _terminalMode == TerminalMode.select ||
-        _isResyncingPane) {
+        _isResyncingPane ||
+        _pauseControlOutputUntilResyncComplete) {
       return;
     }
 
@@ -1201,7 +1200,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       paneId,
       escapeSequences: true,
       preserveTrailingSpaces: true,
-      startLine: _terminalScrollbackLines > 0 ? -_terminalScrollbackLines : null,
+      startLine: _terminalScrollbackLines > 0
+          ? -_terminalScrollbackLines
+          : null,
     );
     final alternateSnapshotCommand = TmuxCommands.capturePane(
       paneId,
@@ -1336,7 +1337,7 @@ $metadataCommand
       );
       final latency = DateTime.now().difference(startTime).inMilliseconds;
       if (!_isDisposed) {
-        _latencyNotifier.value = latency;
+        _recordLatencySample(latency);
       }
 
       if (!mounted || _isDisposed) {
@@ -1601,7 +1602,7 @@ $metadataCommand
     _networkSubscription = null;
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
-    _stopLatencyPolling();
+    _stopConnectionStatsPolling();
     unawaited(_stopControlClient(resetRestartState: true));
     // Dispose ValueNotifier
     _viewNotifier.dispose();
@@ -3141,8 +3142,9 @@ $metadataCommand
                 _ConnectionIndicatorMode.latency => _buildLatencyIndicator(
                   latency,
                 ),
-                _ConnectionIndicatorMode.bandwidth =>
-                  _buildBandwidthIndicator(bandwidthBitsPerSecond),
+                _ConnectionIndicatorMode.bandwidth => _buildBandwidthIndicator(
+                  bandwidthBitsPerSecond,
+                ),
               },
             ),
     );
