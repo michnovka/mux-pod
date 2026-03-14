@@ -269,5 +269,51 @@ void main() {
 
       expect(followStates, contains(false));
     });
+
+    testWidgets('coalesces repeated bottom snaps into one pending callback', (
+      tester,
+    ) async {
+      final terminal = Terminal(maxLines: 200, reflowEnabled: false);
+      final paneKey = GlobalKey<PaneTerminalViewState>();
+      final verticalScrollController = ScrollController();
+
+      for (var index = 0; index < 80; index += 1) {
+        terminal.write('line $index\r\n');
+      }
+
+      await tester.pumpWidget(
+        buildHarness(
+          paneWidth: 80,
+          paneHeight: 24,
+          terminal: terminal,
+          paneKey: paneKey,
+          verticalScrollController: verticalScrollController,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.dragFrom(
+        tester.getCenter(find.byType(PaneTerminalView)),
+        const Offset(0, 140),
+      );
+      await tester.pumpAndSettle();
+
+      expect(paneKey.currentState?.hasPendingBottomSnap, isFalse);
+
+      paneKey.currentState!.scrollToBottom();
+      final callbackCountAfterFirstSnap = tester.binding.transientCallbackCount;
+      paneKey.currentState!.scrollToBottom();
+      paneKey.currentState!.scrollToBottom();
+
+      expect(paneKey.currentState?.hasPendingBottomSnap, isTrue);
+      expect(
+        tester.binding.transientCallbackCount,
+        callbackCountAfterFirstSnap,
+      );
+
+      await tester.pumpAndSettle();
+
+      expect(paneKey.currentState?.shouldAutoFollow, isTrue);
+    });
   });
 }

@@ -28,4 +28,18 @@ void main() {
       expect(client.totalPayloadBytes, 2240);
     });
   });
+
+  group('SshClient keep-alive latency', () {
+    test('tracks the latest keep-alive latency sample', () {
+      final client = SshClient();
+
+      expect(client.lastKeepAliveLatencyMs, 0);
+      expect(client.lastKeepAliveLatencyAt, isNull);
+
+      client.debugRecordKeepAliveLatency(87);
+
+      expect(client.lastKeepAliveLatencyMs, 87);
+      expect(client.lastKeepAliveLatencyAt, isNotNull);
+    });
+  });
 }

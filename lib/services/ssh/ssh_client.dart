@@ -42,10 +42,8 @@ class SshHostKeyError implements Exception {
 }
 
 /// Callback type for SSH host key verification (matches dartssh2 signature).
-typedef HostKeyVerifyCallback = FutureOr<bool> Function(
-  String type,
-  Uint8List fingerprint,
-);
+typedef HostKeyVerifyCallback =
+    FutureOr<bool> Function(String type, Uint8List fingerprint);
 
 /// SSH connection options
 class SshConnectOptions {
@@ -179,6 +177,8 @@ class SshClient {
 
   int _receivedPayloadBytes = 0;
   int _sentPayloadBytes = 0;
+  int _lastKeepAliveLatencyMs = 0;
+  DateTime? _lastKeepAliveLatencyAt;
 
   /// Lock for exclusive access to exec channel
   Completer<void>? _execLock;
@@ -191,6 +191,10 @@ class SshClient {
   int get sentPayloadBytes => _sentPayloadBytes;
 
   int get totalPayloadBytes => _receivedPayloadBytes + _sentPayloadBytes;
+
+  int get lastKeepAliveLatencyMs => _lastKeepAliveLatencyMs;
+
+  DateTime? get lastKeepAliveLatencyAt => _lastKeepAliveLatencyAt;
 
   /// Keep-alive timer
   Timer? _keepAliveTimer;
@@ -251,7 +255,7 @@ class SshClient {
 
     _state = SshConnectionState.connecting;
     _lastError = null;
-    _resetPayloadCounters();
+    _resetConnectionStats();
 
     try {
       // Socket connection
@@ -416,6 +420,7 @@ class SshClient {
   Future<void> _cleanup() async {
     // Stop keep-alive
     _stopKeepAlive();
+    _resetConnectionStats();
 
     // Release persistent shell
     await _controlShell?.dispose();
@@ -671,10 +676,14 @@ class SshClient {
     }
 
     try {
+      final startTime = DateTime.now();
       // Keep-alive via persistent shell (fast)
       await execPersistent(
         'echo ping',
         timeout: Duration(seconds: _keepAliveTimeoutSeconds),
+      );
+      _recordKeepAliveLatency(
+        DateTime.now().difference(startTime).inMilliseconds,
       );
       _adjustKeepAliveInterval(success: true);
     } catch (e) {
@@ -717,13 +726,10 @@ class SshClient {
         onDone: _handleDone,
       );
 
-      _stderrSubscription = _session!.stderr.listen(
-        (data) {
-          _recordReceivedBytes(data.length);
-          _handleData(data);
-        },
-        onError: _handleError,
-      );
+      _stderrSubscription = _session!.stderr.listen((data) {
+        _recordReceivedBytes(data.length);
+        _handleData(data);
+      }, onError: _handleError);
     } catch (e) {
       // Clean up any partially created subscriptions
       await _stdoutSubscription?.cancel();
@@ -1151,9 +1157,23 @@ class SshClient {
     await _connectionStateController.close();
   }
 
+  void _resetConnectionStats() {
+    _lastKeepAliveLatencyMs = 0;
+    _lastKeepAliveLatencyAt = null;
+    _resetPayloadCounters();
+  }
+
   void _resetPayloadCounters() {
     _receivedPayloadBytes = 0;
     _sentPayloadBytes = 0;
+  }
+
+  void _recordKeepAliveLatency(int milliseconds) {
+    if (milliseconds < 0) {
+      return;
+    }
+    _lastKeepAliveLatencyMs = milliseconds;
+    _lastKeepAliveLatencyAt = DateTime.now();
   }
 
   void _recordReceivedBytes(int bytes) {
@@ -1174,6 +1194,11 @@ class SshClient {
   void debugRecordPayloadBytes({int received = 0, int sent = 0}) {
     _recordReceivedBytes(received);
     _recordSentBytes(sent);
+  }
+
+  @visibleForTesting
+  void debugRecordKeepAliveLatency(int milliseconds) {
+    _recordKeepAliveLatency(milliseconds);
   }
 }
 
