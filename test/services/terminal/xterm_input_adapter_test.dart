@@ -26,6 +26,20 @@ void main() {
       expect(output, ['abc']);
     });
 
+    test(
+      'sendPaste wraps pasted text when bracketed paste mode is enabled',
+      () {
+        final output = <String>[];
+        final terminal = Terminal(onOutput: output.add);
+
+        terminal.write('\x1b[?2004h');
+        final handled = XtermInputAdapter.sendPaste(terminal, '/tmp/image.png');
+
+        expect(handled, isTrue);
+        expect(output, ['\x1b[200~/tmp/image.png\x1b[201~']);
+      },
+    );
+
     test('sendTmuxKey Enter emits carriage return', () {
       final output = <String>[];
       final terminal = Terminal(onOutput: output.add);

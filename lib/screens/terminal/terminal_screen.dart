@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -18,6 +20,7 @@ import '../../services/ssh/input_queue.dart';
 import '../../services/ssh/ssh_client.dart'
     show SshConnectOptions, SshHostKeyError;
 import '../../services/terminal/bounded_text_buffer.dart';
+import '../../services/terminal/terminal_image_attachment.dart';
 import '../../services/terminal/terminal_output_normalizer.dart';
 import '../../services/terminal/terminal_snapshot.dart';
 import '../../services/terminal/xterm_input_adapter.dart';
@@ -1566,19 +1569,181 @@ $metadataCommand
     }
   }
 
-  /// Show error SnackBar
-  void _showErrorSnackBar(String message) {
+  void _showTerminalSnackBar(
+    String message, {
+    Color? backgroundColor,
+    SnackBarAction? action,
+  }) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
-        backgroundColor: Colors.red,
-        action: SnackBarAction(
-          label: 'Retry',
-          textColor: Colors.white,
-          onPressed: _connectAndSetup,
-        ),
+        backgroundColor: backgroundColor,
+        action: action,
       ),
     );
+  }
+
+  /// Show error SnackBar
+  void _showErrorSnackBar(String message) {
+    _showTerminalSnackBar(
+      message,
+      backgroundColor: Colors.red,
+      action: SnackBarAction(
+        label: 'Retry',
+        textColor: Colors.white,
+        onPressed: _connectAndSetup,
+      ),
+    );
+  }
+
+  Future<T> _runWithTerminalProgressDialog<T>({
+    required String title,
+    required String message,
+    required Future<T> Function() task,
+  }) async {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: isDark
+              ? DesignColors.surfaceDark
+              : DesignColors.surfaceLight,
+          title: Text(
+            title,
+            style: TextStyle(color: isDark ? Colors.white : Colors.black87),
+          ),
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Text(
+                  message,
+                  style: TextStyle(
+                    color: isDark ? Colors.white70 : Colors.black54,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    try {
+      return await task();
+    } finally {
+      if (mounted) {
+        unawaited(Navigator.of(context, rootNavigator: true).maybePop());
+      }
+    }
+  }
+
+  Future<void> _attachImageFromDevice() async {
+    final sshClient = ref.read(sshProvider.notifier).client;
+    final target = ref.read(tmuxProvider.notifier).currentTarget;
+
+    if (sshClient == null || !sshClient.isConnected || target == null) {
+      _showTerminalSnackBar(
+        'Connect to a pane before attaching an image.',
+        backgroundColor: Colors.orange.shade700,
+      );
+      return;
+    }
+
+    FilePickerResult? result;
+    try {
+      result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        allowMultiple: false,
+        withData: true,
+      );
+    } catch (error) {
+      if (mounted) {
+        _showTerminalSnackBar(
+          'Failed to open image picker: $error',
+          backgroundColor: Colors.red,
+        );
+      }
+      return;
+    }
+
+    if (result == null || result.files.isEmpty) {
+      return;
+    }
+
+    final pickedFile = result.files.single;
+    if (pickedFile.size <= 0) {
+      _showTerminalSnackBar(
+        'Selected image is empty.',
+        backgroundColor: Colors.orange.shade700,
+      );
+      return;
+    }
+    if (pickedFile.size > terminalImageAttachmentMaxBytes) {
+      final maxMiB = terminalImageAttachmentMaxBytes ~/ (1024 * 1024);
+      _showTerminalSnackBar(
+        'Selected image is larger than $maxMiB MB.',
+        backgroundColor: Colors.orange.shade700,
+      );
+      return;
+    }
+
+    try {
+      final imageBytes =
+          pickedFile.bytes ??
+          (pickedFile.path != null
+              ? await File(pickedFile.path!).readAsBytes()
+              : null);
+      if (imageBytes == null || imageBytes.isEmpty) {
+        _showTerminalSnackBar(
+          'Could not read the selected image.',
+          backgroundColor: Colors.orange.shade700,
+        );
+        return;
+      }
+
+      final remotePath = await _runWithTerminalProgressDialog(
+        title: 'Uploading Image',
+        message: 'Sending ${pickedFile.name} to the remote host…',
+        task: () => sshClient.uploadTerminalImageAttachment(
+          imageBytes,
+          originalFilename: pickedFile.name,
+        ),
+      );
+
+      if (!mounted || _isDisposed) {
+        return;
+      }
+
+      if (_terminalMode != TerminalMode.normal) {
+        setState(() {
+          _terminalMode = TerminalMode.normal;
+        });
+        _terminalController.clearSelection();
+        _flushDeferredStreamOutput();
+      }
+
+      _ensureTerminalViewportAtBottomForInput();
+      XtermInputAdapter.sendPaste(_terminal, remotePath);
+      _showTerminalSnackBar(
+        'Image uploaded. Remote path pasted into the terminal.',
+        backgroundColor: Colors.green.shade700,
+      );
+    } catch (error) {
+      if (mounted) {
+        _showTerminalSnackBar(
+          'Failed to attach image: $error',
+          backgroundColor: Colors.red,
+        );
+      }
+    }
   }
 
   @override
@@ -2865,6 +3030,9 @@ $metadataCommand
     final textColor = isDark ? Colors.white : Colors.black87;
     final mutedTextColor = isDark ? Colors.white38 : Colors.black38;
     final inactiveIconColor = isDark ? Colors.white60 : Colors.black45;
+    final canAttachImage =
+        ref.read(sshProvider).isConnected &&
+        ref.read(tmuxProvider.notifier).currentTarget != null;
 
     showModalBottomSheet(
       context: context,
@@ -2916,6 +3084,34 @@ $metadataCommand
                 onTap: () {
                   Navigator.pop(context);
                 },
+              ),
+              ListTile(
+                leading: Icon(
+                  Icons.image_outlined,
+                  color: canAttachImage
+                      ? DesignColors.primary
+                      : inactiveIconColor,
+                ),
+                title: Text(
+                  'Attach Image',
+                  style: TextStyle(
+                    color: canAttachImage ? textColor : mutedTextColor,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                subtitle: Text(
+                  canAttachImage
+                      ? 'Pick an image, upload it to the remote host, and paste its path into the terminal.'
+                      : 'Connect to a live pane to attach an image.',
+                  style: TextStyle(color: mutedTextColor, fontSize: 12),
+                ),
+                enabled: canAttachImage,
+                onTap: canAttachImage
+                    ? () {
+                        Navigator.pop(context);
+                        unawaited(_attachImageFromDevice());
+                      }
+                    : null,
               ),
               ListTile(
                 leading: Icon(

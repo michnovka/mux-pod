@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 
+import '../terminal/terminal_image_attachment.dart';
 import 'persistent_shell.dart';
 
 /// SSH connection error
@@ -1063,6 +1064,72 @@ class SshClient {
     }
   }
 
+  /// Resolve the remote home directory for the connected SSH user.
+  Future<String> resolveRemoteHomeDirectory() async {
+    if (_isDisposed || !isConnected || _client == null) {
+      throw SshConnectionError('Not connected');
+    }
+
+    try {
+      return await _withSftpClient((sftp) async {
+        final resolved = (await sftp.absolute('.')).trim();
+        if (resolved.isEmpty) {
+          throw SshConnectionError('Failed to resolve remote home directory');
+        }
+        return resolved;
+      });
+    } catch (_) {
+      final resolved = await execPersistent(
+        r'printf %s "$HOME"',
+        timeout: const Duration(seconds: 2),
+      );
+      final trimmed = resolved.trim();
+      if (trimmed.isEmpty) {
+        throw SshConnectionError('Failed to resolve remote home directory');
+      }
+      return trimmed;
+    }
+  }
+
+  /// Upload an image attachment to a stable remote location and return its
+  /// absolute remote path.
+  Future<String> uploadTerminalImageAttachment(
+    Uint8List bytes, {
+    String? originalFilename,
+  }) async {
+    if (_isDisposed || !isConnected || _client == null) {
+      throw SshConnectionError('Not connected');
+    }
+    if (bytes.isEmpty) {
+      throw SshConnectionError('Image payload is empty');
+    }
+
+    final remoteHomeDirectory = await resolveRemoteHomeDirectory();
+    final uploadTarget = TerminalImageUploadTarget.forHomeDirectory(
+      remoteHomeDirectory,
+      originalFilename: originalFilename,
+    );
+
+    await _withSftpClient((sftp) async {
+      await _ensureSftpDirectory(sftp, uploadTarget.remoteDirectory);
+      final file = await sftp.open(
+        uploadTarget.remotePath,
+        mode:
+            SftpFileOpenMode.write |
+            SftpFileOpenMode.create |
+            SftpFileOpenMode.truncate,
+      );
+      try {
+        await file.writeBytes(bytes);
+      } finally {
+        await file.close();
+      }
+    });
+
+    _recordSentBytes(bytes.length);
+    return uploadTarget.remotePath;
+  }
+
   /// Execute a command and get the exit code
   ///
   /// [command] Command to execute
@@ -1128,6 +1195,51 @@ class SshClient {
       throw SshConnectionError('Command execution timed out');
     } catch (e) {
       throw SshConnectionError('Failed to execute command: $e', e);
+    }
+  }
+
+  Future<T> _withSftpClient<T>(
+    Future<T> Function(SftpClient sftp) action,
+  ) async {
+    if (_isDisposed || !isConnected || _client == null) {
+      throw SshConnectionError('Not connected');
+    }
+
+    final sftp = await _client!.sftp();
+    try {
+      return await action(sftp);
+    } finally {
+      sftp.close();
+    }
+  }
+
+  Future<void> _ensureSftpDirectory(SftpClient sftp, String path) async {
+    if (path.isEmpty || path == '/') {
+      return;
+    }
+
+    final isAbsolute = path.startsWith('/');
+    var currentPath = isAbsolute ? '/' : '';
+    final segments = path.split('/').where((segment) => segment.isNotEmpty);
+
+    for (final segment in segments) {
+      currentPath = currentPath == '/'
+          ? '/$segment'
+          : (currentPath.isEmpty ? segment : '$currentPath/$segment');
+
+      try {
+        final attrs = await sftp.stat(currentPath);
+        if (!attrs.isDirectory) {
+          throw SshConnectionError(
+            'Remote upload directory is not a directory: $currentPath',
+          );
+        }
+      } on SftpStatusError catch (error) {
+        if (error.code != SftpStatusCode.noSuchFile) {
+          rethrow;
+        }
+        await sftp.mkdir(currentPath);
+      }
     }
   }
 
