@@ -1620,11 +1620,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         // create duplicate bottom rows more often than it helps.
         break;
       case 'session-changed':
+      case 'session-window-changed':
       case 'window-close':
       case 'window-pane-changed':
         _scheduleControlSync(refreshTree: true, resyncPane: true);
         break;
-      case 'session-window-changed':
       case 'sessions-changed':
       case 'unlinked-window-add':
       case 'unlinked-window-close':
