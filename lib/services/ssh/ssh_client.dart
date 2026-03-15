@@ -6,6 +6,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 
 import '../terminal/terminal_image_attachment.dart';
+import 'ssh_lifecycle.dart';
 import 'persistent_shell.dart';
 
 /// SSH connection error
@@ -199,6 +200,8 @@ class SshClient {
 
   /// Keep-alive timer
   Timer? _keepAliveTimer;
+
+  final _cleanupCoordinator = AsyncCleanupCoordinator();
 
   /// StreamController for connection monitoring
   final _connectionStateController =
@@ -419,59 +422,45 @@ class SshClient {
 
   /// Clean up resources
   Future<void> _cleanup() async {
-    // Stop keep-alive
-    _stopKeepAlive();
-    _resetConnectionStats();
+    await _cleanupCoordinator.run(() async {
+      // Stop keep-alive
+      _stopKeepAlive();
+      _resetConnectionStats();
 
-    // Release persistent shell
-    await _controlShell?.dispose();
-    _controlShell = null;
-    await _inputShell?.dispose();
-    _inputShell = null;
-    await stopStreamingShell();
+      final controlShell = _controlShell;
+      final inputShell = _inputShell;
+      final stdoutSubscription = _stdoutSubscription;
+      final stderrSubscription = _stderrSubscription;
+      final session = _session;
+      final client = _client;
+      final socket = _socket;
 
-    await _stdoutSubscription?.cancel();
-    await _stderrSubscription?.cancel();
-    _stdoutSubscription = null;
-    _stderrSubscription = null;
+      _controlShell = null;
+      _inputShell = null;
+      _stdoutSubscription = null;
+      _stderrSubscription = null;
+      _session = null;
+      _client = null;
+      _socket = null;
+      _tmuxPath = null;
 
-    _session?.close();
-    _session = null;
-
-    _client?.close();
-    _client = null;
-
-    _socket?.close();
-    _socket = null;
+      await _disposeQuietly(controlShell?.dispose);
+      await _disposeQuietly(inputShell?.dispose);
+      await _disposeQuietly(stopStreamingShell);
+      await _disposeQuietly(stdoutSubscription?.cancel);
+      await _disposeQuietly(stderrSubscription?.cancel);
+      _closeQuietly(session?.close);
+      _closeQuietly(client?.close);
+      _closeQuietly(socket?.close);
+    });
   }
 
   /// Start persistent shell
   Future<void> _startPersistentShell() async {
     if (_client == null) return;
 
-    try {
-      _controlShell = PersistentShell(
-        _client!,
-        onBytesReceived: _recordReceivedBytes,
-        onBytesSent: _recordSentBytes,
-      );
-      await _controlShell!.start();
-    } catch (e) {
-      // Even if persistent shell fails to start, the connection itself continues
-      // Falls back to the traditional exec() method
-      _controlShell = null;
-    }
-
-    try {
-      _inputShell = PersistentShell(
-        _client!,
-        onBytesReceived: _recordReceivedBytes,
-        onBytesSent: _recordSentBytes,
-      );
-      await _inputShell!.start();
-    } catch (e) {
-      _inputShell = null;
-    }
+    _controlShell = await _startPersistentShellInstance();
+    _inputShell = await _startPersistentShellInstance();
   }
 
   /// Restart persistent shell
@@ -497,18 +486,8 @@ class SshClient {
       return null;
     }
 
-    try {
-      await shell?.dispose();
-      final nextShell = PersistentShell(
-        _client!,
-        onBytesReceived: _recordReceivedBytes,
-        onBytesSent: _recordSentBytes,
-      );
-      await nextShell.start();
-      return nextShell;
-    } catch (_) {
-      return null;
-    }
+    await _disposeQuietly(shell?.dispose);
+    return _startPersistentShellInstance();
   }
 
   /// Use the exec channel exclusively
@@ -624,10 +603,52 @@ class SshClient {
   /// Immediately transitions to error state if the connection is lost.
   /// The interval is dynamically adjusted (extended on success, shortened on failure).
   void _startKeepAlive() {
+    if (_isDisposed || !isConnected || _client == null) {
+      return;
+    }
     _stopKeepAlive();
     _currentKeepAliveIntervalSeconds = 10; // Initial value: 10 seconds
     _keepAliveSuccessCount = 0;
     _scheduleNextKeepAlive();
+  }
+
+  Future<PersistentShell?> _startPersistentShellInstance() async {
+    final client = _client;
+    if (client == null) {
+      return null;
+    }
+
+    return startOptionalAsyncResource(
+      create: () => PersistentShell(
+        client,
+        onBytesReceived: _recordReceivedBytes,
+        onBytesSent: _recordSentBytes,
+      ),
+      start: (shell) => shell.start(),
+      disposeOnFailure: (shell) => shell.dispose(),
+    );
+  }
+
+  Future<void> _disposeQuietly(Future<void> Function()? cleanup) async {
+    if (cleanup == null) {
+      return;
+    }
+    try {
+      await cleanup();
+    } catch (_) {
+      // Ignore cleanup races for partially-initialized resources.
+    }
+  }
+
+  void _closeQuietly(void Function()? close) {
+    if (close == null) {
+      return;
+    }
+    try {
+      close();
+    } catch (_) {
+      // Ignore cleanup races for partially-initialized resources.
+    }
   }
 
   /// Schedule the next keep-alive
