@@ -31,7 +31,7 @@ import '../../services/tmux/pane_navigator.dart';
 import '../../services/tmux/tmux_commands.dart';
 import '../../services/tmux/tmux_control_client.dart';
 import '../../services/tmux/tmux_parser.dart'
-    show TmuxPane, TmuxWindow, TmuxWindowFlag;
+    show TmuxPane, TmuxParser, TmuxWindow, TmuxWindowFlag;
 import '../../theme/design_colors.dart';
 import 'widgets/tmux_management_dialogs.dart';
 import '../../widgets/special_keys_bar.dart';
@@ -1613,6 +1613,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _scheduleControlSync(refreshTree: true, resyncPane: true);
         break;
       case 'alert':
+      case 'session-window-changed':
       case 'sessions-changed':
       case 'unlinked-window-add':
       case 'unlinked-window-close':
@@ -3340,12 +3341,58 @@ $metadataCommand
   }
 
   /// Execute a tmux management command with error handling and tree refresh.
+  ///
+  /// Returns `true` only when the remote command succeeds (no tmux error in
+  /// the output and no thrown exception). Callers can trust that `true` means
+  /// the mutation was applied on the server.
   Future<bool> _execTmuxManagement(String command) async {
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected) return false;
     try {
-      await sshClient.execPersistent(command);
+      final output = await sshClient.execPersistent(command);
+      final error = TmuxParser.extractError(output);
+      if (error != null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(error)),
+          );
+        }
+        return false;
+      }
       _scheduleControlSync(refreshTree: true);
+      return true;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Command failed: $e')),
+        );
+      }
+      return false;
+    }
+  }
+
+  /// Execute a tmux command, immediately refresh the tree, and return success.
+  ///
+  /// Unlike [_execTmuxManagement], this awaits the tree refresh so callers
+  /// can read the updated [TmuxState] right after the call returns.
+  Future<bool> _execTmuxAndRefreshTree(String command) async {
+    final sshClient = ref.read(sshProvider.notifier).client;
+    if (sshClient == null || !sshClient.isConnected) return false;
+    try {
+      final output = await sshClient.execPersistent(command);
+      final error = TmuxParser.extractError(output);
+      if (error != null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(error)),
+          );
+        }
+        return false;
+      }
+      final treeOutput =
+          await sshClient.execPersistent(TmuxCommands.listAllPanes());
+      if (!mounted || _isDisposed) return false;
+      ref.read(tmuxProvider.notifier).parseAndUpdateFullTree(treeOutput);
       return true;
     } catch (e) {
       if (mounted) {
@@ -3412,9 +3459,12 @@ $metadataCommand
                             ),
                           );
                           if (name != null) {
-                            await _execTmuxManagement(
+                            final ok = await _execTmuxAndRefreshTree(
                               TmuxCommands.newSession(name: name),
                             );
+                            if (ok && mounted) {
+                              _selectSession(name);
+                            }
                           }
                         },
                       ),
@@ -3484,10 +3534,19 @@ $metadataCommand
                                       newName,
                                     ),
                                   );
-                                  if (ok && isActive) {
+                                  if (ok) {
+                                    if (isActive) {
+                                      ref
+                                          .read(tmuxProvider.notifier)
+                                          .setActive(sessionName: newName);
+                                    }
                                     ref
-                                        .read(tmuxProvider.notifier)
-                                        .setActive(sessionName: newName);
+                                        .read(activeSessionsProvider.notifier)
+                                        .renameSession(
+                                          widget.connectionId,
+                                          session.name,
+                                          newName,
+                                        );
                                   }
                                 }
                               case 'delete':
@@ -3499,9 +3558,32 @@ $metadataCommand
                                   ),
                                 );
                                 if (confirmed == true) {
-                                  await _execTmuxManagement(
+                                  final ok = await _execTmuxManagement(
                                     TmuxCommands.killSession(session.name),
                                   );
+                                  if (ok) {
+                                    ref
+                                        .read(activeSessionsProvider.notifier)
+                                        .removeSession(
+                                          widget.connectionId,
+                                          session.name,
+                                        );
+                                    if (isActive) {
+                                      // Switch to first remaining session
+                                      final remaining = ref
+                                          .read(tmuxProvider)
+                                          .sessions
+                                          .where(
+                                            (s) => s.name != session.name,
+                                          )
+                                          .firstOrNull;
+                                      if (remaining != null && mounted) {
+                                        _selectSession(remaining.name);
+                                      } else if (mounted) {
+                                        Navigator.of(this.context).pop();
+                                      }
+                                    }
+                                  }
                                 }
                             }
                           },
@@ -3678,13 +3760,29 @@ $metadataCommand
                             ),
                           );
                           if (name != null) {
-                            await _execTmuxManagement(
+                            final ok = await _execTmuxAndRefreshTree(
                               TmuxCommands.newWindow(
                                 sessionName: session.name,
                                 windowName: name,
                                 background: true,
                               ),
                             );
+                            if (ok && mounted) {
+                              final updated = ref
+                                  .read(tmuxProvider)
+                                  .sessions
+                                  .where((s) => s.name == session.name)
+                                  .firstOrNull;
+                              final newWindow = updated?.windows
+                                  .where((w) => w.name == name)
+                                  .lastOrNull;
+                              if (newWindow != null) {
+                                _selectWindow(
+                                  session.name,
+                                  newWindow.index,
+                                );
+                              }
+                            }
                           }
                         },
                       ),
@@ -3894,19 +3992,45 @@ $metadataCommand
                           switch (action) {
                             case 'split_h':
                               if (activePaneId != null) {
-                                await _execTmuxManagement(
+                                final ok = await _execTmuxAndRefreshTree(
                                   TmuxCommands.splitWindowHorizontal(
                                     target: activePaneId,
                                   ),
                                 );
+                                if (ok && mounted) {
+                                  final w = ref
+                                      .read(tmuxProvider)
+                                      .activeWindow;
+                                  final newPane = w?.panes
+                                      .where((p) =>
+                                          p.active &&
+                                          p.id != activePaneId)
+                                      .firstOrNull;
+                                  if (newPane != null) {
+                                    _selectPane(newPane.id);
+                                  }
+                                }
                               }
                             case 'split_v':
                               if (activePaneId != null) {
-                                await _execTmuxManagement(
+                                final ok = await _execTmuxAndRefreshTree(
                                   TmuxCommands.splitWindowVertical(
                                     target: activePaneId,
                                   ),
                                 );
+                                if (ok && mounted) {
+                                  final w = ref
+                                      .read(tmuxProvider)
+                                      .activeWindow;
+                                  final newPane = w?.panes
+                                      .where((p) =>
+                                          p.active &&
+                                          p.id != activePaneId)
+                                      .firstOrNull;
+                                  if (newPane != null) {
+                                    _selectPane(newPane.id);
+                                  }
+                                }
                               }
                             case 'layout_even_h':
                               await _execTmuxManagement(
