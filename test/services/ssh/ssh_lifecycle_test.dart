@@ -40,6 +40,32 @@ void main() {
 
       expect(cleanupRuns, 2);
     });
+
+    test('shares cleanup errors across overlapping callers and resets after failure', () async {
+      final coordinator = AsyncCleanupCoordinator();
+      final completer = Completer<void>();
+      var cleanupRuns = 0;
+
+      final first = coordinator.run(() async {
+        cleanupRuns++;
+        await completer.future;
+      });
+      final second = coordinator.run(() async {
+        cleanupRuns++;
+      });
+
+      completer.completeError(StateError('cleanup failed'));
+
+      await expectLater(first, throwsA(isA<StateError>()));
+      await expectLater(second, throwsA(isA<StateError>()));
+      expect(cleanupRuns, 1);
+
+      await coordinator.run(() async {
+        cleanupRuns++;
+      });
+
+      expect(cleanupRuns, 2);
+    });
   });
 
   group('startOptionalAsyncResource', () {
