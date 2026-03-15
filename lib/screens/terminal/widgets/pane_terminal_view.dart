@@ -362,7 +362,9 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     if (_followBottom == value) {
       return;
     }
-    _followBottom = value;
+    setState(() {
+      _followBottom = value;
+    });
     if (notify) {
       widget.onFollowBottomChanged?.call(value);
     }
@@ -873,6 +875,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
               autoResize: false,
               autofocus: true,
               deleteDetection: true,
+              hardwareKeyboardOnly: !_followBottom,
               readOnly:
                   widget.readOnly || widget.mode == PaneTerminalMode.select,
               simulateScroll:
