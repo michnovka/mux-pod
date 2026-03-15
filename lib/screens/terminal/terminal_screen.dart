@@ -1612,6 +1612,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       case 'window-pane-changed':
         _scheduleControlSync(refreshTree: true, resyncPane: true);
         break;
+      case 'alert':
       case 'sessions-changed':
       case 'unlinked-window-add':
       case 'unlinked-window-close':
