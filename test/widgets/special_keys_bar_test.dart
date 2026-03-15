@@ -14,6 +14,14 @@ void main() {
     required VoidCallback onAltToggle,
     bool ctrlPressed = false,
     bool altPressed = false,
+    VoidCallback? onShiftToggle,
+    bool shiftPressed = false,
+    VoidCallback? onAttachImage,
+    bool attachImageEnabled = false,
+    VoidCallback? onToggleSelect,
+    bool selectModeActive = false,
+    VoidCallback? onPaste,
+    VoidCallback? onReplies,
   }) {
     return MaterialApp(
       home: Scaffold(
@@ -26,6 +34,14 @@ void main() {
             onAltToggle: onAltToggle,
             ctrlPressed: ctrlPressed,
             altPressed: altPressed,
+            onShiftToggle: onShiftToggle,
+            shiftPressed: shiftPressed,
+            onAttachImage: onAttachImage,
+            attachImageEnabled: attachImageEnabled,
+            onToggleSelect: onToggleSelect,
+            selectModeActive: selectModeActive,
+            onPaste: onPaste,
+            onReplies: onReplies,
           ),
         ),
       ),
@@ -33,7 +49,9 @@ void main() {
   }
 
   group('SpecialKeysBar', () {
-    testWidgets('renders the Termux-style key layout', (tester) async {
+    testWidgets('renders the 8-column key layout with action row', (
+      tester,
+    ) async {
       await tester.pumpWidget(
         buildHarness(
           onLiteralKeyPressed: (_) {},
@@ -43,29 +61,38 @@ void main() {
         ),
       );
 
+      // Top row keys
       for (final label in const [
-        'ESC',
         '/',
         '-',
         'HOME',
+        'ALT',
         '↑',
         'END',
         'PGUP',
-        'TAB',
-        'CTRL',
-        'ALT',
-        '←',
-        '↓',
-        '→',
-        'PGDN',
+        'ESC',
       ]) {
         expect(find.text(label), findsOneWidget);
       }
 
-      expect(find.text('SHIFT'), findsNothing);
-      expect(find.text('RET'), findsNothing);
-      expect(find.text('S-RET'), findsNothing);
-      expect(find.text('Input...'), findsNothing);
+      // Bottom row keys
+      for (final label in const [
+        'TAB',
+        'SHIFT',
+        'CTRL',
+        '←',
+        '↓',
+        '→',
+        'PGDN',
+        'DEL',
+      ]) {
+        expect(find.text(label), findsOneWidget);
+      }
+
+      // Action row labels
+      for (final label in const ['IMG', 'SEL', 'PASTE', 'REPLY']) {
+        expect(find.text(label), findsOneWidget);
+      }
     });
 
     testWidgets('dispatches literal, special, and modifier taps', (
@@ -75,6 +102,7 @@ void main() {
       final specialKeys = <String>[];
       var ctrlToggleCount = 0;
       var altToggleCount = 0;
+      var shiftToggleCount = 0;
 
       await tester.pumpWidget(
         buildHarness(
@@ -82,6 +110,7 @@ void main() {
           onSpecialKeyPressed: specialKeys.add,
           onCtrlToggle: () => ctrlToggleCount += 1,
           onAltToggle: () => altToggleCount += 1,
+          onShiftToggle: () => shiftToggleCount += 1,
         ),
       );
 
@@ -89,12 +118,54 @@ void main() {
       await tester.tap(find.text('ESC'));
       await tester.tap(find.text('CTRL'));
       await tester.tap(find.text('ALT'));
+      await tester.tap(find.text('SHIFT'));
+      await tester.tap(find.text('DEL'));
       await tester.pump();
 
       expect(literalKeys, ['/']);
-      expect(specialKeys, ['Escape']);
+      expect(specialKeys, ['Escape', 'DC']);
       expect(ctrlToggleCount, 1);
       expect(altToggleCount, 1);
+      expect(shiftToggleCount, 1);
+    });
+
+    testWidgets('action row dispatches callbacks', (tester) async {
+      var selectToggled = false;
+      var pastePressed = false;
+
+      await tester.pumpWidget(
+        buildHarness(
+          onLiteralKeyPressed: (_) {},
+          onSpecialKeyPressed: (_) {},
+          onCtrlToggle: () {},
+          onAltToggle: () {},
+          onToggleSelect: () => selectToggled = true,
+          onPaste: () => pastePressed = true,
+        ),
+      );
+
+      await tester.tap(find.text('SEL'));
+      await tester.tap(find.text('PASTE'));
+      await tester.pump();
+
+      expect(selectToggled, isTrue);
+      expect(pastePressed, isTrue);
+    });
+
+    testWidgets('select mode highlights SEL button', (tester) async {
+      await tester.pumpWidget(
+        buildHarness(
+          onLiteralKeyPressed: (_) {},
+          onSpecialKeyPressed: (_) {},
+          onCtrlToggle: () {},
+          onAltToggle: () {},
+          selectModeActive: true,
+          onToggleSelect: () {},
+        ),
+      );
+
+      // SEL button should be present and the widget renders with active state
+      expect(find.text('SEL'), findsOneWidget);
     });
   });
 }

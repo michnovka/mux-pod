@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -62,10 +63,15 @@ class _PaneSnapshotPayload {
 class _PendingKeyboardModifiers {
   final bool ctrl;
   final bool alt;
+  final bool shift;
 
-  const _PendingKeyboardModifiers({required this.ctrl, required this.alt});
+  const _PendingKeyboardModifiers({
+    required this.ctrl,
+    required this.alt,
+    required this.shift,
+  });
 
-  bool get isEmpty => !ctrl && !alt;
+  bool get isEmpty => !ctrl && !alt && !shift;
 }
 
 class _PaneRenderCacheEntry {
@@ -363,6 +369,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   // Sticky extra-key modifiers applied to the next keyboard action.
   bool _ctrlModifierPressed = false;
   bool _altModifierPressed = false;
+  bool _shiftModifierPressed = false;
   SshNotifier? _sshNotifier;
 
   // Riverpod listeners
@@ -2261,6 +2268,7 @@ $metadataCommand
         ? data
         : XtermInputAdapter.encodeOutputWithModifiers(
                 data,
+                shift: modifiers.shift,
                 ctrl: modifiers.ctrl,
                 alt: modifiers.alt,
               ) ??
@@ -2626,6 +2634,15 @@ $metadataCommand
                   onAltToggle: _toggleAltModifier,
                   ctrlPressed: _ctrlModifierPressed,
                   altPressed: _altModifierPressed,
+                  onShiftToggle: _toggleShiftModifier,
+                  shiftPressed: _shiftModifierPressed,
+                  onAttachImage: _attachImageFromDevice,
+                  attachImageEnabled:
+                      ref.read(sshProvider).isConnected &&
+                      ref.read(tmuxProvider.notifier).currentTarget != null,
+                  onToggleSelect: _toggleSelectMode,
+                  selectModeActive: _terminalMode == TerminalMode.select,
+                  onPaste: _pasteFromClipboard,
                 ),
             ],
           ),
@@ -2866,6 +2883,7 @@ $metadataCommand
       _terminal,
       XtermInputAdapter.applyModifiersToTmuxKey(
         key,
+        shift: modifiers.shift,
         ctrl: modifiers.ctrl,
         alt: modifiers.alt,
       ),
@@ -2882,6 +2900,7 @@ $metadataCommand
         ? tmuxKey
         : XtermInputAdapter.applyModifiersToTmuxKey(
             tmuxKey,
+            shift: modifiers.shift,
             ctrl: modifiers.ctrl,
             alt: modifiers.alt,
           );
@@ -2900,23 +2919,52 @@ $metadataCommand
     });
   }
 
+  void _toggleShiftModifier() {
+    setState(() {
+      _shiftModifierPressed = !_shiftModifierPressed;
+    });
+  }
+
+  void _toggleSelectMode() {
+    final enteringSelect = _terminalMode != TerminalMode.select;
+    setState(() {
+      _terminalMode =
+          enteringSelect ? TerminalMode.select : TerminalMode.normal;
+    });
+    if (enteringSelect) {
+      _terminalController.clearSelection();
+    } else {
+      _flushDeferredStreamOutput();
+    }
+  }
+
+  void _pasteFromClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (data?.text != null && data!.text!.isNotEmpty) {
+      XtermInputAdapter.sendPaste(_terminal, data.text!);
+    }
+  }
+
   _PendingKeyboardModifiers? _consumePendingKeyboardModifiers() {
-    if (!_ctrlModifierPressed && !_altModifierPressed) {
+    if (!_ctrlModifierPressed && !_altModifierPressed && !_shiftModifierPressed) {
       return null;
     }
 
     final modifiers = _PendingKeyboardModifiers(
       ctrl: _ctrlModifierPressed,
       alt: _altModifierPressed,
+      shift: _shiftModifierPressed,
     );
     if (mounted && !_isDisposed) {
       setState(() {
         _ctrlModifierPressed = false;
         _altModifierPressed = false;
+        _shiftModifierPressed = false;
       });
     } else {
       _ctrlModifierPressed = false;
       _altModifierPressed = false;
+      _shiftModifierPressed = false;
     }
     return modifiers;
   }
@@ -4486,15 +4534,16 @@ $metadataCommand
     final textColor = isDark ? Colors.white : Colors.black87;
     final mutedTextColor = isDark ? Colors.white38 : Colors.black38;
     final inactiveIconColor = isDark ? Colors.white60 : Colors.black45;
-    final canAttachImage =
-        ref.read(sshProvider).isConnected &&
-        ref.read(tmuxProvider.notifier).currentTarget != null;
 
     showModalBottomSheet(
       context: context,
       backgroundColor: menuBgColor,
       isDismissible: true,
       enableDrag: true,
+      isScrollControlled: true,
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.7,
+      ),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -4524,191 +4573,110 @@ $metadataCommand
                 height: 1,
                 color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
               ),
-              ListTile(
-                leading: Icon(Icons.history, color: DesignColors.primary),
-                title: Text(
-                  'Retained Scrollback',
-                  style: TextStyle(
-                    color: textColor,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                subtitle: Text(
-                  'The main tmux buffer is loaded directly into the terminal. Scroll normally to browse retained output.',
-                  style: TextStyle(color: mutedTextColor, fontSize: 12),
-                ),
-                onTap: () {
-                  Navigator.pop(context);
-                },
-              ),
-              ListTile(
-                leading: Icon(
-                  Icons.image_outlined,
-                  color: canAttachImage
-                      ? DesignColors.primary
-                      : inactiveIconColor,
-                ),
-                title: Text(
-                  'Attach Image',
-                  style: TextStyle(
-                    color: canAttachImage ? textColor : mutedTextColor,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                subtitle: Text(
-                  canAttachImage
-                      ? 'Pick an image, upload it to the remote host, and paste its path into the terminal.'
-                      : 'Connect to a live pane to attach an image.',
-                  style: TextStyle(color: mutedTextColor, fontSize: 12),
-                ),
-                enabled: canAttachImage,
-                onTap: canAttachImage
-                    ? () {
+              Flexible(
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    ListTile(
+                      leading: Icon(Icons.history, color: DesignColors.primary),
+                      title: Text(
+                        'Retained Scrollback',
+                        style: TextStyle(
+                          color: textColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'The main tmux buffer is loaded directly into the terminal. Scroll normally to browse retained output.',
+                        style: TextStyle(color: mutedTextColor, fontSize: 12),
+                      ),
+                      onTap: () {
                         Navigator.pop(context);
-                        unawaited(_attachImageFromDevice());
-                      }
-                    : null,
-              ),
-              ListTile(
-                leading: Icon(
-                  _terminalMode == TerminalMode.select
-                      ? Icons.content_copy
-                      : Icons.keyboard,
-                  color: _terminalMode == TerminalMode.select
-                      ? DesignColors.warning
-                      : inactiveIconColor,
-                ),
-                title: Text(
-                  _terminalMode == TerminalMode.select
-                      ? 'Select Mode'
-                      : 'Touch Selection',
-                  style: TextStyle(
-                    color: _terminalMode == TerminalMode.select
-                        ? DesignColors.warning
-                        : textColor,
-                    fontWeight: _terminalMode == TerminalMode.select
-                        ? FontWeight.bold
-                        : FontWeight.normal,
-                  ),
-                ),
-                subtitle: Text(
-                  _terminalMode == TerminalMode.select
-                      ? 'Selection is local and live terminal input is paused'
-                      : 'Enable touch selection and local copying',
-                  style: TextStyle(color: mutedTextColor, fontSize: 12),
-                ),
-                trailing: Switch(
-                  value: _terminalMode == TerminalMode.select,
-                  onChanged: (value) {
-                    setState(() {
-                      _terminalMode = value
-                          ? TerminalMode.select
-                          : TerminalMode.normal;
-                    });
-                    if (value) {
-                      _terminalController.clearSelection();
-                    } else {
-                      _flushDeferredStreamOutput();
-                    }
-                    Navigator.pop(context);
-                  },
-                  activeThumbColor: DesignColors.warning,
-                ),
-                onTap: () {
-                  final enteringSelect = _terminalMode != TerminalMode.select;
-                  setState(() {
-                    _terminalMode = enteringSelect
-                        ? TerminalMode.select
-                        : TerminalMode.normal;
-                  });
-                  if (enteringSelect) {
-                    _terminalController.clearSelection();
-                  } else {
-                    _flushDeferredStreamOutput();
-                  }
-                  Navigator.pop(context);
-                },
-              ),
-              // Reset zoom
-              ListTile(
-                leading: Icon(
-                  Icons.zoom_out_map,
-                  color: _zoomScale != 1.0
-                      ? DesignColors.warning
-                      : inactiveIconColor,
-                ),
-                title: Text(
-                  'Reset Zoom',
-                  style: TextStyle(
-                    color: _zoomScale != 1.0 ? textColor : mutedTextColor,
-                  ),
-                ),
-                subtitle: Text(
-                  _zoomScale != 1.0
-                      ? 'Current: ${(_zoomScale * 100).toStringAsFixed(0)}%'
-                      : 'Pinch to zoom in/out',
-                  style: TextStyle(color: mutedTextColor, fontSize: 12),
-                ),
-                enabled: _zoomScale != 1.0,
-                onTap: _zoomScale != 1.0
-                    ? () {
-                        _paneTerminalViewKey.currentState?.resetZoom();
-                        setState(() {
-                          _zoomScale = 1.0;
-                        });
-                        Navigator.pop(context);
-                      }
-                    : null,
-              ),
-              Divider(
-                height: 1,
-                color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
-              ),
-              // Go to settings screen
-              ListTile(
-                leading: Icon(Icons.settings, color: inactiveIconColor),
-                title: Text('Settings', style: TextStyle(color: textColor)),
-                subtitle: Text(
-                  'Font, theme, and other options',
-                  style: TextStyle(color: mutedTextColor, fontSize: 12),
-                ),
-                onTap: () {
-                  Navigator.pop(context);
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => const SettingsScreen(),
+                      },
                     ),
-                  );
-                },
-              ),
-              Divider(
-                height: 1,
-                color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
-              ),
-              // Disconnect button
-              ListTile(
-                leading: Icon(
-                  Icons.power_settings_new,
-                  color: DesignColors.error,
+                    // Reset zoom
+                    ListTile(
+                      leading: Icon(
+                        Icons.zoom_out_map,
+                        color: _zoomScale != 1.0
+                            ? DesignColors.warning
+                            : inactiveIconColor,
+                      ),
+                      title: Text(
+                        'Reset Zoom',
+                        style: TextStyle(
+                          color: _zoomScale != 1.0 ? textColor : mutedTextColor,
+                        ),
+                      ),
+                      subtitle: Text(
+                        _zoomScale != 1.0
+                            ? 'Current: ${(_zoomScale * 100).toStringAsFixed(0)}%'
+                            : 'Pinch to zoom in/out',
+                        style: TextStyle(color: mutedTextColor, fontSize: 12),
+                      ),
+                      enabled: _zoomScale != 1.0,
+                      onTap: _zoomScale != 1.0
+                          ? () {
+                              _paneTerminalViewKey.currentState?.resetZoom();
+                              setState(() {
+                                _zoomScale = 1.0;
+                              });
+                              Navigator.pop(context);
+                            }
+                          : null,
+                    ),
+                    Divider(
+                      height: 1,
+                      color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
+                    ),
+                    // Go to settings screen
+                    ListTile(
+                      leading: Icon(Icons.settings, color: inactiveIconColor),
+                      title: Text('Settings', style: TextStyle(color: textColor)),
+                      subtitle: Text(
+                        'Font, theme, and other options',
+                        style: TextStyle(color: mutedTextColor, fontSize: 12),
+                      ),
+                      onTap: () {
+                        Navigator.pop(context);
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => const SettingsScreen(),
+                          ),
+                        );
+                      },
+                    ),
+                    Divider(
+                      height: 1,
+                      color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
+                    ),
+                    // Disconnect button
+                    ListTile(
+                      leading: Icon(
+                        Icons.power_settings_new,
+                        color: DesignColors.error,
+                      ),
+                      title: Text(
+                        'Disconnect',
+                        style: TextStyle(
+                          color: DesignColors.error,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Close SSH connection',
+                        style: TextStyle(color: mutedTextColor, fontSize: 12),
+                      ),
+                      onTap: () {
+                        Navigator.pop(context);
+                        _showDisconnectConfirmation();
+                      },
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                 ),
-                title: Text(
-                  'Disconnect',
-                  style: TextStyle(
-                    color: DesignColors.error,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                subtitle: Text(
-                  'Close SSH connection',
-                  style: TextStyle(color: mutedTextColor, fontSize: 12),
-                ),
-                onTap: () {
-                  Navigator.pop(context);
-                  _showDisconnectConfirmation();
-                },
               ),
-              const SizedBox(height: 16),
             ],
           ),
         );
