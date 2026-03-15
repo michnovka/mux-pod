@@ -259,7 +259,9 @@ class Buffer {
   void index() {
     if (isInVerticalMargin) {
       if (_cursorY == _marginBottom) {
-        if (marginTop == 0 && !isAltBuffer) {
+        final usesFullViewportScrollRegion =
+            marginTop == 0 && marginBottom == viewHeight - 1;
+        if (usesFullViewportScrollRegion && !isAltBuffer) {
           lines.insert(absoluteMarginBottom + 1, _newEmptyLine());
         } else {
           scrollUp(1);

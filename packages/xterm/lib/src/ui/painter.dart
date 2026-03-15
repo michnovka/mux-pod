@@ -144,6 +144,14 @@ class TerminalPainter {
     Offset offset,
     BufferLine line,
   ) {
+    // Clear the full row first. Many TUIs redraw only changed glyphs while
+    // leaving untouched cells as default-background blanks. If we skip painting
+    // those blank cells, stale pixels from the previous frame remain visible.
+    canvas.drawRect(
+      offset & Size(_cellSize.width * line.length + 1, _cellSize.height),
+      Paint()..color = _theme.background,
+    );
+
     final cellData = CellData.empty();
     final cellWidth = _cellSize.width;
 
@@ -185,7 +193,7 @@ class TerminalPainter {
           : resolveBackgroundColor(cellData.background);
 
       if (cellData.flags & CellFlags.faint != 0) {
-        color = color.withOpacity(0.5);
+        color = color.withValues(alpha: 0.5);
       }
 
       final style = _textStyle.toTextStyle(

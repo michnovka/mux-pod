@@ -306,7 +306,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int _lastBandwidthSampleTotalBytes = 0;
   DateTime? _lastBandwidthSampleAt;
   DateTime? _lastLatencySampleAt;
-
   bool _shouldRefreshTreeAfterControlSync = false;
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
@@ -1443,7 +1442,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _recordPendingLiveLinesFromTerminalAdvance(
       beforeAbsoluteCursorY: cursorBeforeWrite,
     );
-    if (shouldAutoScroll || !_hasInitialScrolled) {
+    if ((shouldAutoScroll || !_hasInitialScrolled) &&
+        !_terminal.isInSynchronizedUpdate) {
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
     }
@@ -1515,7 +1515,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _recordPendingLiveLinesFromTerminalAdvance(
       beforeAbsoluteCursorY: cursorBeforeWrite,
     );
-    if (shouldAutoScroll) {
+    if (shouldAutoScroll && !_terminal.isInSynchronizedUpdate) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
     }
   }
@@ -1530,7 +1530,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       paneId,
       escapeSequences: true,
       preserveTrailingSpaces: true,
-      joinWrappedLines: true,
+      // Preserve physical rows exactly as tmux displays them. Joining wrapped
+      // lines loses row boundaries in TUIs with long bottom prompts, and later
+      // incremental redraws then target the wrong rows.
+      joinWrappedLines: false,
       startLine: includeScrollback && _terminalScrollbackLines > 0
           ? -_terminalScrollbackLines
           : null,
@@ -1563,7 +1566,7 @@ $metadataCommand
       paneId,
       escapeSequences: true,
       preserveTrailingSpaces: true,
-      joinWrappedLines: true,
+      joinWrappedLines: false,
       startLine: _terminalScrollbackLines > 0
           ? -_terminalScrollbackLines
           : null,

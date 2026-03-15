@@ -36,6 +36,8 @@ class TmuxControlClient {
   Completer<String>? _pendingCommand;
   _CommandResponseBuffer? _commandResponseBuffer;
   final List<int> _pendingLineBytes = <int>[];
+  final Map<String, _PaneOutputDecoder> _paneOutputDecoders =
+      <String, _PaneOutputDecoder>{};
   bool _isStarted = false;
   bool _isStopped = false;
 
@@ -109,6 +111,10 @@ class TmuxControlClient {
     }
     _pendingCommand = null;
     _commandResponseBuffer = null;
+    for (final decoder in _paneOutputDecoders.values) {
+      decoder.dispose();
+    }
+    _paneOutputDecoders.clear();
     _resetDecoder();
     await _sshClient.stopStreamingShell();
   }
@@ -190,8 +196,82 @@ class TmuxControlClient {
   void _handleLineBytes(Uint8List bytes) {
     final length =
         bytes.isNotEmpty && bytes.last == 0x0D ? bytes.length - 1 : bytes.length;
-    final line = utf8.decode(bytes.sublist(0, length), allowMalformed: true);
+    final lineBytes = Uint8List.sublistView(bytes, 0, length);
+
+    if (_commandResponseBuffer == null) {
+      if (_handlePaneOutputLineBytes(lineBytes)) {
+        return;
+      }
+
+      if (_handleExtendedPaneOutputLineBytes(lineBytes)) {
+        return;
+      }
+    }
+
+    final line = utf8.decode(lineBytes, allowMalformed: true);
     _handleLine(line);
+  }
+
+  bool _handlePaneOutputLineBytes(Uint8List lineBytes) {
+    const prefix = '%output ';
+    if (!_startsWithAscii(lineBytes, prefix)) {
+      return false;
+    }
+
+    final prefixLength = prefix.length;
+    final separatorIndex = _indexOfByte(lineBytes, 0x20, start: prefixLength);
+    if (separatorIndex <= prefixLength) {
+      return true;
+    }
+
+    final paneId = ascii.decode(lineBytes.sublist(prefixLength, separatorIndex));
+    final payloadBytes = lineBytes.sublist(separatorIndex + 1);
+    final payload = _decodePanePayloadBytes(paneId, payloadBytes);
+    if (payload.isNotEmpty) {
+      onPaneOutput?.call(paneId, payload);
+    }
+    return true;
+  }
+
+  bool _handleExtendedPaneOutputLineBytes(Uint8List lineBytes) {
+    const prefix = '%extended-output ';
+    if (!_startsWithAscii(lineBytes, prefix)) {
+      return false;
+    }
+
+    final prefixLength = prefix.length;
+    final paneSeparatorIndex = _indexOfByte(lineBytes, 0x20, start: prefixLength);
+    if (paneSeparatorIndex <= prefixLength) {
+      return true;
+    }
+
+    final paneId = ascii.decode(
+      lineBytes.sublist(prefixLength, paneSeparatorIndex),
+    );
+    final metadataSeparatorIndex = _indexOfSequence(
+      lineBytes,
+      const [0x3A, 0x20], // ': '
+      start: paneSeparatorIndex + 1,
+    );
+    if (metadataSeparatorIndex == -1) {
+      return true;
+    }
+
+    final payloadBytes = lineBytes.sublist(metadataSeparatorIndex + 2);
+    final payload = _decodePanePayloadBytes(paneId, payloadBytes);
+    if (payload.isNotEmpty) {
+      onPaneOutput?.call(paneId, payload);
+    }
+    return true;
+  }
+
+  String _decodePanePayloadBytes(String paneId, Uint8List payloadBytes) {
+    final unescaped = _unescapeControlPayloadBytes(payloadBytes);
+    final decoder = _paneOutputDecoders.putIfAbsent(
+      paneId,
+      _PaneOutputDecoder.new,
+    );
+    return decoder.add(unescaped);
   }
 
   void _handleLine(String line) {
@@ -354,6 +434,32 @@ class TmuxControlClient {
     );
   }
 
+  static Uint8List _unescapeControlPayloadBytes(Uint8List escaped) {
+    var readPos = 0;
+    var writePos = 0;
+    final bytes = Uint8List(escaped.length);
+
+    while (readPos < escaped.length) {
+      final byte = escaped[readPos];
+      if (byte == 0x5C &&
+          readPos + 3 < escaped.length &&
+          _isOctalDigitByte(escaped[readPos + 1]) &&
+          _isOctalDigitByte(escaped[readPos + 2]) &&
+          _isOctalDigitByte(escaped[readPos + 3])) {
+        bytes[writePos++] = ((escaped[readPos + 1] - 0x30) << 6) |
+            ((escaped[readPos + 2] - 0x30) << 3) |
+            (escaped[readPos + 3] - 0x30);
+        readPos += 4;
+        continue;
+      }
+
+      bytes[writePos++] = byte;
+      readPos++;
+    }
+
+    return Uint8List.sublistView(bytes, 0, writePos);
+  }
+
   static String _unescapeControlPayload(String escaped) {
     // Fast path: no backslash means nothing to unescape.
     if (!escaped.contains(r'\')) return escaped;
@@ -422,6 +528,53 @@ class TmuxControlClient {
 
   static bool _isOctalDigit(int codeUnit) =>
       codeUnit >= 0x30 && codeUnit <= 0x37;
+
+  static bool _isOctalDigitByte(int byte) => byte >= 0x30 && byte <= 0x37;
+
+  static bool _startsWithAscii(Uint8List bytes, String prefix) {
+    if (bytes.length < prefix.length) {
+      return false;
+    }
+    for (var index = 0; index < prefix.length; index++) {
+      if (bytes[index] != prefix.codeUnitAt(index)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  static int _indexOfByte(Uint8List bytes, int value, {int start = 0}) {
+    for (var index = start; index < bytes.length; index++) {
+      if (bytes[index] == value) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  static int _indexOfSequence(
+    Uint8List bytes,
+    List<int> sequence, {
+    int start = 0,
+  }) {
+    if (sequence.isEmpty) {
+      return start.clamp(0, bytes.length);
+    }
+    final lastStart = bytes.length - sequence.length;
+    for (var index = start; index <= lastStart; index++) {
+      var matches = true;
+      for (var offset = 0; offset < sequence.length; offset++) {
+        if (bytes[index + offset] != sequence[offset]) {
+          matches = false;
+          break;
+        }
+      }
+      if (matches) {
+        return index;
+      }
+    }
+    return -1;
+  }
 }
 
 class _CommandResponseBuffer {
@@ -429,6 +582,46 @@ class _CommandResponseBuffer {
   final List<String> lines = [];
 
   _CommandResponseBuffer({required this.completer});
+}
+
+class _PaneOutputDecoder {
+  final _sink = _CollectingStringSink();
+  late final ByteConversionSink _decoder = const Utf8Decoder(
+    allowMalformed: true,
+  ).startChunkedConversion(StringConversionSink.fromStringSink(_sink));
+
+  String add(Uint8List bytes) {
+    _decoder.add(bytes);
+    return _sink.take();
+  }
+
+  void dispose() {
+    _decoder.close();
+    _sink.take();
+  }
+}
+
+class _CollectingStringSink implements StringSink {
+  final StringBuffer _buffer = StringBuffer();
+
+  @override
+  void write(Object? obj) => _buffer.write(obj);
+
+  @override
+  void writeAll(Iterable<dynamic> objects, [String separator = '']) =>
+      _buffer.writeAll(objects, separator);
+
+  @override
+  void writeCharCode(int charCode) => _buffer.writeCharCode(charCode);
+
+  @override
+  void writeln([Object? obj = '']) => _buffer.writeln(obj);
+
+  String take() {
+    final value = _buffer.toString();
+    _buffer.clear();
+    return value;
+  }
 }
 
 class _ParsedPaneOutput {

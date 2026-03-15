@@ -222,19 +222,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       _terminal.buffer.lines.length * _painter.cellSize.height;
 
   /// The distance from the top of the terminal to the top of the viewport.
-  // double get _scrollOffset => _offset.pixels;
-  double get _scrollOffset {
-    final lineHeight = _painter.cellSize.height;
-    if (lineHeight <= 0) {
-      return _offset.pixels;
-    }
-
-    // Terminal rows are discrete. Rendering at a fractional vertical offset
-    // can leave the viewport between rows, which shows clipped/duplicated
-    // bottom lines when the scroll position is near the live tail.
-    final wholeRows = (_offset.pixels / lineHeight).floorToDouble();
-    return wholeRows * lineHeight;
-  }
+  double get _scrollOffset => _offset.pixels;
 
   /// The height of a terminal line in pixels. This includes the line spacing.
   /// Height of the entire terminal is expected to be a multiple of this value.
@@ -408,6 +396,10 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
 
   void _paint(PaintingContext context, Offset offset) {
     final canvas = context.canvas;
+    canvas.drawRect(
+      offset & size,
+      Paint()..color = _painter.theme.background,
+    );
 
     final lines = _terminal.buffer.lines;
     final charHeight = _painter.cellSize.height;
@@ -424,7 +416,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     for (var i = effectFirstLine; i <= effectLastLine; i++) {
       _painter.paintLine(
         canvas,
-        offset.translate(0, (i * charHeight + _lineOffset).truncateToDouble()),
+        offset.translate(0, i * charHeight + _lineOffset),
         lines[i],
       );
     }

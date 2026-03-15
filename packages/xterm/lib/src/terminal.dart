@@ -147,6 +147,10 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   bool _bracketedPasteMode = false;
 
+  int _synchronizedUpdateDepth = 0;
+  int _writeDepth = 0;
+  bool _renderDirty = false;
+
   /* State getters */
 
   /// Number of cells in a terminal row.
@@ -202,6 +206,8 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   @override
   bool get bracketedPasteMode => _bracketedPasteMode;
 
+  bool get isInSynchronizedUpdate => _synchronizedUpdateDepth > 0;
+
   /// Current active buffer of the terminal. This is initially [mainBuffer] and
   /// can be switched back and forth from [altBuffer] to [mainBuffer] when
   /// the underlying program requests it.
@@ -225,8 +231,14 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
   /// updates the states of the terminal and emits events such as [onBell] or
   /// [onTitleChange] when the escape sequences in [data] request it.
   void write(String data) {
-    _parser.write(data);
-    notifyListeners();
+    _writeDepth++;
+    try {
+      _parser.write(data);
+      _renderDirty = true;
+    } finally {
+      _writeDepth--;
+      _flushPendingRender();
+    }
   }
 
   /// Sends a key event to the underlying program.
@@ -752,7 +764,23 @@ class Terminal with Observable implements TerminalState, EscapeHandler {
 
   @override
   void setUnknownDecMode(int mode, bool enabled) {
-    // no-op
+    if (mode == 2026) {
+      if (enabled) {
+        _synchronizedUpdateDepth++;
+      } else if (_synchronizedUpdateDepth > 0) {
+        _synchronizedUpdateDepth--;
+      }
+      _flushPendingRender();
+    }
+  }
+
+  void _flushPendingRender() {
+    if (_writeDepth != 0 || _synchronizedUpdateDepth != 0 || !_renderDirty) {
+      return;
+    }
+
+    _renderDirty = false;
+    notifyListeners();
   }
 
   /* Select Graphic Rendition (SGR) */
