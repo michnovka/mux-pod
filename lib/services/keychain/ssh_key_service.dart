@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -28,6 +29,14 @@ class SshKeyPair {
 
 /// SSH key service
 class SshKeyService {
+  SshKeyService({
+    Future<SshKeyPair> Function({required int bits, String? comment})?
+    rsaGenerator,
+  }) : _rsaGenerator = rsaGenerator ?? _generateRsaOnIsolate;
+
+  final Future<SshKeyPair> Function({required int bits, String? comment})
+  _rsaGenerator;
+
   /// Generate an Ed25519 key pair
   Future<SshKeyPair> generateEd25519({String? comment}) async {
     final algorithm = crypto.Ed25519();
@@ -59,6 +68,13 @@ class SshKeyService {
     required int bits,
     String? comment,
   }) async {
+    return _rsaGenerator(bits: bits, comment: comment);
+  }
+
+  SshKeyPair _generateRsaSync({
+    required int bits,
+    String? comment,
+  }) {
     assert(bits == 2048 || bits == 3072 || bits == 4096);
 
     final secureRandom = pc.FortunaRandom();
@@ -395,4 +411,13 @@ class SshKeyService {
     buffer.add(bytes);
     return buffer.toBytes();
   }
+}
+
+Future<SshKeyPair> _generateRsaOnIsolate({
+  required int bits,
+  String? comment,
+}) {
+  return Isolate.run(
+    () => SshKeyService()._generateRsaSync(bits: bits, comment: comment),
+  );
 }
