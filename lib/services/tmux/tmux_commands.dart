@@ -231,6 +231,26 @@ class TmuxCommands {
     return 'tmux resize-pane -t ${_escapeArg(paneId)} ${zoom ? '-Z' : '-z'}';
   }
 
+  /// Resize a pane to specific column width
+  static String resizePaneColumns(String paneId, int columns) {
+    return 'tmux resize-pane -t ${_escapeArg(paneId)} -x $columns';
+  }
+
+  /// Resize a pane to specific row height
+  static String resizePaneRows(String paneId, int rows) {
+    return 'tmux resize-pane -t ${_escapeArg(paneId)} -y $rows';
+  }
+
+  /// Resize a window to specific column width
+  static String resizeWindowColumns(String target, int columns) {
+    return 'tmux resize-window -t ${_escapeArg(target)} -x $columns';
+  }
+
+  /// Resize a window to specific row height
+  static String resizeWindowRows(String target, int rows) {
+    return 'tmux resize-window -t ${_escapeArg(target)} -y $rows';
+  }
+
   // ===== Input and key sending =====
 
   /// Send keys
