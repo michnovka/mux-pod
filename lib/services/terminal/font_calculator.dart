@@ -148,6 +148,23 @@ class FontCalculator {
     return paneCharWidth * charWidthRatio * fontSize;
   }
 
+  /// Calculate the ideal column count to fit the available screen width.
+  ///
+  /// [availableWidth] Available screen width (pixels)
+  /// [fontSize] The font size to use for measurement
+  /// [fontFamily] Font family
+  ///
+  /// Returns the number of columns that fit, clamped to [20, 500].
+  static int calculateFitColumns({
+    required double availableWidth,
+    required double fontSize,
+    required String fontFamily,
+  }) {
+    final charWidth = measureCharWidth(fontFamily, fontSize);
+    if (charWidth <= 0) return 80; // fallback
+    return (availableWidth / charWidth).floor().clamp(20, 500);
+  }
+
   /// Measure exact character width at the specified font size
   ///
   /// Accounts for non-linear scaling due to hinting and pixel alignment

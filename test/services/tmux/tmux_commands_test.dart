@@ -49,6 +49,46 @@ void main() {
     });
   });
 
+  group('TmuxCommands.resizePaneColumns', () {
+    test('generates correct resize-pane -x command', () {
+      final command = TmuxCommands.resizePaneColumns('%1', 120);
+      expect(command, equals('tmux resize-pane -t %1 -x 120'));
+    });
+
+    test('escapes special characters in pane id', () {
+      final command = TmuxCommands.resizePaneColumns('my pane', 80);
+      expect(command, contains('"my pane"'));
+      expect(command, contains('-x 80'));
+    });
+  });
+
+  group('TmuxCommands.resizePaneRows', () {
+    test('generates correct resize-pane -y command', () {
+      final command = TmuxCommands.resizePaneRows('%1', 50);
+      expect(command, equals('tmux resize-pane -t %1 -y 50'));
+    });
+
+    test('escapes special characters in pane id', () {
+      final command = TmuxCommands.resizePaneRows('my pane', 24);
+      expect(command, contains('"my pane"'));
+      expect(command, contains('-y 24'));
+    });
+  });
+
+  group('TmuxCommands.resizeWindowColumns', () {
+    test('generates correct resize-window -x command', () {
+      final command = TmuxCommands.resizeWindowColumns('main:0', 200);
+      expect(command, equals('tmux resize-window -t main:0 -x 200'));
+    });
+
+    test('escapes special characters in target', () {
+      final command =
+          TmuxCommands.resizeWindowColumns('my session:0', 132);
+      expect(command, contains('"my session:0"'));
+      expect(command, contains('-x 132'));
+    });
+  });
+
   group('TmuxCommands.capturePane', () {
     test('can join wrapped lines for snapshot replay', () {
       final command = TmuxCommands.capturePane(

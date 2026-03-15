@@ -34,6 +34,7 @@ import '../../services/tmux/tmux_control_client.dart';
 import '../../services/tmux/tmux_parser.dart'
     show TmuxPane, TmuxParser, TmuxWindow, TmuxWindowFlag;
 import '../../theme/design_colors.dart';
+import '../../widgets/dialogs/viewport_resize_dialog.dart';
 import 'widgets/tmux_management_dialogs.dart';
 import '../../widgets/special_keys_bar.dart';
 import '../../providers/terminal_display_provider.dart';
@@ -4388,6 +4389,44 @@ $metadataCommand
                                 await _execTmuxManagement(
                                   TmuxCommands.resizePane(pane.id),
                                 );
+                              case 'resize':
+                                final settings = ref.read(settingsProvider);
+                                final displayState =
+                                    ref.read(terminalDisplayProvider);
+                                final result =
+                                    await showDialog<ViewportResizeResult>(
+                                  context: context,
+                                  builder: (_) => ViewportResizeDialog(
+                                    currentColumns: pane.width,
+                                    currentRows: pane.height,
+                                    availableWidth: displayState.screenWidth,
+                                    fontSize: displayState.effectiveFontSize,
+                                    fontFamily: settings.fontFamily,
+                                  ),
+                                );
+                                if (result != null && mounted) {
+                                  // Use resize-window for single-pane windows,
+                                  // resize-pane for multi-pane windows.
+                                  final isSinglePane = window.panes.length == 1;
+                                  final colCmd = isSinglePane
+                                      ? TmuxCommands.resizeWindowColumns(
+                                          '${tmuxState.activeSessionName}:${window.index}',
+                                          result.columns,
+                                        )
+                                      : TmuxCommands.resizePaneColumns(
+                                          pane.id,
+                                          result.columns,
+                                        );
+                                  await _execTmuxManagement(colCmd);
+                                  if (result.rows != null && mounted) {
+                                    final rowCmd =
+                                        TmuxCommands.resizePaneRows(
+                                      pane.id,
+                                      result.rows!,
+                                    );
+                                    await _execTmuxManagement(rowCmd);
+                                  }
+                                }
                               case 'delete':
                                 final confirmed = await showDialog<bool>(
                                   context: context,
@@ -4409,6 +4448,15 @@ $metadataCommand
                               child: ListTile(
                                 leading: Icon(Icons.fullscreen),
                                 title: Text('Toggle Zoom'),
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: 'resize',
+                              child: ListTile(
+                                leading: Icon(Icons.aspect_ratio),
+                                title: Text('Resize'),
                                 dense: true,
                                 contentPadding: EdgeInsets.zero,
                               ),
