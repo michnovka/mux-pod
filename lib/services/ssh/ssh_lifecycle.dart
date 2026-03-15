@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+
 /// Runs async cleanup at most once at a time.
 class AsyncCleanupCoordinator {
   Future<void>? _pendingCleanup;
@@ -31,11 +33,14 @@ Future<T?> startOptionalAsyncResource<T>({
   try {
     await start(resource);
     return resource;
-  } catch (_) {
+  } catch (e) {
+    if (kDebugMode) {
+      debugPrint('[startOptionalAsyncResource] startup failed: $e');
+    }
     try {
       await disposeOnFailure(resource);
-    } catch (_) {
-      // Ignore disposal races after failed startup.
+    } catch (e) {
+      assert(() { debugPrint('startOptionalAsyncResource dispose after failure: $e'); return true; }());
     }
     return null;
   }

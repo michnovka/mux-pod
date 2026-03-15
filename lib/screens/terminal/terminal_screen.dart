@@ -900,8 +900,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           TmuxCommands.sendKeys(paneId, '\x1b[I', literal: true),
         );
       }
-    } catch (_) {
+    } catch (e) {
       // Best-effort recovery only. The local selection has already been restored.
+      assert(() { debugPrint('_recoverFromFailedSwitch: $e'); return true; }());
     }
   }
 
@@ -1315,8 +1316,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       if (syncActive) {
         _syncActiveTmuxStateFromTree();
       }
-    } catch (_) {
-      // Silently ignore tree update errors.
+    } catch (e) {
+      assert(() { debugPrint('_refreshTmuxTree: $e'); return true; }());
     }
   }
 
@@ -1480,7 +1481,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _controlClient = controlClient;
       _controlClientSessionName = sessionName;
       _cancelControlClientRestart(resetAttempts: true);
-    } catch (_) {
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[TerminalScreen] control client start failed: $e');
+      }
       await controlClient.dispose();
       _controlClient = null;
       _controlClientSessionName = null;
@@ -1955,8 +1959,11 @@ $metadataCommand
           '${_countTextLines(fullMainContent)} lines',
         );
       }
-    } catch (_) {
+    } catch (e) {
       fetchStopwatch?.stop();
+      if (kDebugMode) {
+        debugPrint('[TerminalScreen] backfill failed: $e');
+      }
     }
   }
 
@@ -2174,11 +2181,15 @@ $metadataCommand
           );
           // Fence succeeded — all pre-Tf output delivered; safe to clear.
           _deferredStreamOutput.clear();
-        } catch (_) {
+        } catch (e) {
           // Fence failed — skip clear to avoid losing post-snapshot output.
+          assert(() { debugPrint('_resyncPane fence: $e'); return true; }());
         }
       }
-    } catch (_) {
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[TerminalScreen] resync failed: $e');
+      }
       final currentState = ref.read(sshProvider);
       if (!currentState.isReconnecting) {
         unawaited(_attemptReconnect());
@@ -2863,8 +2874,8 @@ $metadataCommand
           timeout: const Duration(seconds: 2),
         );
       }
-    } catch (_) {
-      // Silently ignore key send errors.
+    } catch (e) {
+      assert(() { debugPrint('_sendLiteralInput: $e'); return true; }());
     }
   }
 
@@ -3042,7 +3053,10 @@ $metadataCommand
       await sshClient.execPersistentInput(
         TmuxCommands.sendKeys(nextPane.id, '\x1b[I', literal: true),
       );
-    } catch (_) {
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[TerminalScreen] session switch failed: $e');
+      }
       if (!switchConfirmed) {
         await _recoverFromFailedSwitch(
           previousSelection,
@@ -3131,10 +3145,14 @@ $metadataCommand
         await sshClient.execPersistentInput(
           TmuxCommands.sendKeys(activePane.id, '\x1b[I', literal: true),
         );
-      } catch (_) {
+      } catch (e) {
         // The tmux target is already switched and the stream is live again.
+        assert(() { debugPrint('switchWindow focus-in: $e'); return true; }());
       }
-    } catch (_) {
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[TerminalScreen] window switch failed: $e');
+      }
       if (!switchConfirmed) {
         await _recoverFromFailedSwitch(
           previousSelection,
@@ -3207,10 +3225,14 @@ $metadataCommand
         await sshClient.execPersistentInput(
           TmuxCommands.sendKeys(paneId, '\x1b[I', literal: true),
         );
-      } catch (_) {
+      } catch (e) {
         // The tmux target is already switched and the stream is live again.
+        assert(() { debugPrint('switchPane focus-in: $e'); return true; }());
       }
-    } catch (_) {
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[TerminalScreen] pane switch failed: $e');
+      }
       if (!switchConfirmed) {
         await _recoverFromFailedSwitch(
           previousSelection,
@@ -3856,7 +3878,9 @@ $metadataCommand
         if (mounted && !_isDisposed) {
           ref.read(tmuxProvider.notifier).parseAndUpdateFullTree(output);
         }
-      } catch (_) {}
+      } catch (e) {
+        assert(() { debugPrint('_showWindowSelector tree refresh: $e'); return true; }());
+      }
     }
     if (!mounted || _isDisposed) return;
 

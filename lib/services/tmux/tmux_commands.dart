@@ -5,6 +5,8 @@ import 'dart:convert';
 /// Utility class for generating tmux commands.
 /// Uses format strings corresponding to TmuxParser.
 class TmuxCommands {
+  static final RegExp _shellSpecialCharsPattern = RegExp(r'[\s"' "'" r'\\$`!{}\[\]<>|&;()]');
+
   /// Default delimiter (uses ||| because tabs may be converted via SSH)
   static const String delimiter = '|||';
 
@@ -429,13 +431,7 @@ class TmuxCommands {
   static String _escapeArg(String arg) {
     // Escape shell special characters
     // Special characters: space, quotes, backslash, variable expansion, backtick, etc.
-    if (arg.contains(
-      RegExp(
-        r'[\s"'
-        "'"
-        r'\\$`!{}\[\]<>|&;()]',
-      ),
-    )) {
+    if (arg.contains(_shellSpecialCharsPattern)) {
       // Wrap in double quotes and escape internal special characters
       final escaped = arg
           .replaceAll(r'\', r'\\')

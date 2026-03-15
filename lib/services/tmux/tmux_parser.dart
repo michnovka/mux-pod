@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 /// Parses tmux command output and converts it into objects.
 /// Provides parsers corresponding to format strings.
 class TmuxParser {
+  static final RegExp _ansiEscapePattern = RegExp(r'\x1b\[[0-9;]*[a-zA-Z]');
+
   /// Default field delimiter (uses ||| because tabs may be converted over SSH)
   static const String defaultDelimiter = '|||';
 
@@ -255,7 +257,7 @@ class TmuxParser {
   /// Extract plain text from capture-pane output
   static String stripAnsiCodes(String text) {
     // Remove ANSI escape sequences
-    return text.replaceAll(RegExp(r'\x1b\[[0-9;]*[a-zA-Z]'), '');
+    return text.replaceAll(_ansiEscapePattern, '');
   }
 
   // ===== Full Session Tree =====

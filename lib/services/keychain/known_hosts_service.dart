@@ -1,6 +1,6 @@
 import 'dart:async';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../storage/versioned_json_storage.dart';
@@ -131,7 +131,10 @@ class KnownHostsService {
         unawaited(_saveEntries(loaded.value));
       }
       return loaded.value;
-    } catch (_) {
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[KnownHostsService] failed to decode known hosts: $e');
+      }
       return {};
     }
   }

@@ -29,6 +29,69 @@ void main() {
     });
   });
 
+  group('SshClient.resolveForTesting (tmux path resolution)', () {
+    const tmuxPath = '/opt/homebrew/bin/tmux';
+
+    test('resolves simple tmux command', () {
+      expect(
+        SshClient.resolveForTesting('tmux list-sessions', tmuxPath),
+        equals('/opt/homebrew/bin/tmux list-sessions'),
+      );
+    });
+
+    test('resolves tmux after newline+whitespace (multiline script)', () {
+      const command = 'echo hello\n  tmux list-sessions';
+      expect(
+        SshClient.resolveForTesting(command, tmuxPath),
+        equals('echo hello\n  /opt/homebrew/bin/tmux list-sessions'),
+      );
+    });
+
+    test(r'resolves tmux inside $(...) subshell', () {
+      const command = r'echo $(tmux display-message -p "#{session_name}")';
+      expect(
+        SshClient.resolveForTesting(command, tmuxPath),
+        equals(
+          r'echo $(/opt/homebrew/bin/tmux display-message -p "#{session_name}")',
+        ),
+      );
+    });
+
+    test('does not double-replace already-resolved absolute path', () {
+      const command = '/usr/bin/tmux list-sessions';
+      // '/usr/bin/tmux' does not match because 'tmux' is not preceded by
+      // start-of-line/whitespace/;/|/&/( — it's preceded by '/'.
+      expect(
+        SshClient.resolveForTesting(command, tmuxPath),
+        equals('/usr/bin/tmux list-sessions'),
+      );
+    });
+
+    test('resolves tmux after semicolon', () {
+      const command = 'echo start; tmux list-sessions';
+      expect(
+        SshClient.resolveForTesting(command, tmuxPath),
+        equals('echo start; /opt/homebrew/bin/tmux list-sessions'),
+      );
+    });
+
+    test('resolves tmux after pipe', () {
+      const command = 'echo x | tmux load-buffer -';
+      expect(
+        SshClient.resolveForTesting(command, tmuxPath),
+        equals('echo x | /opt/homebrew/bin/tmux load-buffer -'),
+      );
+    });
+
+    test('resolves tmux after &&', () {
+      const command = 'true && tmux list-sessions';
+      expect(
+        SshClient.resolveForTesting(command, tmuxPath),
+        equals('true && /opt/homebrew/bin/tmux list-sessions'),
+      );
+    });
+  });
+
   group('SshClient keep-alive latency', () {
     test('tracks the latest keep-alive latency sample', () {
       final client = SshClient();
