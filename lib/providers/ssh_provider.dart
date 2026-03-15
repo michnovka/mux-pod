@@ -606,6 +606,12 @@ class SshNotifier extends Notifier<SshState> {
       }
 
       _client = nextClient;
+      // Re-apply the latest keep-alive timeout. The settings listener uses
+      // `_client?.keepAliveTimeoutSeconds = ...` which is a no-op while
+      // `_client` is null during the reconnect handshake. Any change that
+      // arrived in that window would have been lost.
+      _client!.keepAliveTimeoutSeconds =
+          ref.read(settingsProvider).keepAliveTimeoutSeconds;
       _connectionStateSubscription = _client!.connectionStateStream.listen(
         _onConnectionStateChanged,
       );
