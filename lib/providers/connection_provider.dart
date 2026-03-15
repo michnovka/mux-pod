@@ -164,6 +164,9 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
         legacyReader: (legacy) => _decodeConnectionsList(legacy),
       );
       final connections = loaded.value;
+      if (loaded.usedLegacyFormat) {
+        unawaited(_persistConnectionList(prefs, connections));
+      }
       developer.log(
         loaded.usedLegacyFormat
             ? 'Loaded ${connections.length} legacy connections from storage'
@@ -180,7 +183,7 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
     final jsonList = data as List<dynamic>;
     return jsonList
         .map((json) => Connection.fromJson(json as Map<String, dynamic>))
-          .toList();
+        .toList();
   }
 
   Future<SharedPreferences> _getPrefs() async {
@@ -220,8 +223,14 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
   Future<void> _waitForInitialLoad() => _initialLoadCompleter.future;
 
   Future<void> _saveConnections() async {
-    final prefs = await _getPrefs();
-    final jsonList = state.connections.map((c) => c.toJson()).toList();
+    await _persistConnectionList(await _getPrefs(), state.connections);
+  }
+
+  Future<void> _persistConnectionList(
+    SharedPreferences prefs,
+    List<Connection> connections,
+  ) async {
+    final jsonList = connections.map((c) => c.toJson()).toList();
     await prefs.setString(_storageKey, encodeVersionedJsonEnvelope(jsonList));
   }
 

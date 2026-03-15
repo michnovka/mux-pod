@@ -148,8 +148,10 @@ class KeysNotifier extends Notifier<KeysState> {
         },
         legacyReader: (legacy) => _decodeKeysList(legacy),
       );
-      final keys = loaded.value
-          .toList();
+      final keys = loaded.value;
+      if (loaded.usedLegacyFormat) {
+        unawaited(_persistKeys(prefs, keys));
+      }
 
       keys.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       return KeysState(keys: keys);
@@ -191,8 +193,14 @@ class KeysNotifier extends Notifier<KeysState> {
   Future<void> _waitForInitialLoad() => _initialLoadCompleter.future;
 
   Future<void> _saveKeys() async {
-    final prefs = await _getPrefs();
-    final jsonList = state.keys.map((k) => k.toJson()).toList();
+    await _persistKeys(await _getPrefs(), state.keys);
+  }
+
+  Future<void> _persistKeys(
+    SharedPreferences prefs,
+    List<SshKeyMeta> keys,
+  ) async {
+    final jsonList = keys.map((k) => k.toJson()).toList();
     await prefs.setString(_storageKey, encodeVersionedJsonEnvelope(jsonList));
   }
 

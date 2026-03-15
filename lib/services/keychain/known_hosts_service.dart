@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:shared_preferences/shared_preferences.dart';
@@ -20,10 +21,10 @@ class KnownHostEntry {
   });
 
   Map<String, dynamic> toJson() => {
-        'keyType': keyType,
-        'fingerprint': fingerprint,
-        'addedAt': addedAt.toIso8601String(),
-      };
+    'keyType': keyType,
+    'fingerprint': fingerprint,
+    'addedAt': addedAt.toIso8601String(),
+  };
 
   factory KnownHostEntry.fromJson(Map<String, dynamic> json) {
     return KnownHostEntry(
@@ -47,9 +48,7 @@ class KnownHostsService {
 
   /// Convert raw MD5 bytes to colon-separated hex string.
   static String formatFingerprint(Uint8List rawBytes) {
-    return rawBytes
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join(':');
+    return rawBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':');
   }
 
   /// Build a normalized storage key for a host:port pair.
@@ -118,15 +117,20 @@ class KnownHostsService {
     if (raw == null) return {};
 
     try {
-      return decodeVersionedJsonEnvelope<Map<String, KnownHostEntry>>(
+      final loaded = decodeVersionedJsonEnvelope<Map<String, KnownHostEntry>>(
         raw: raw,
         storageKey: _storageKey,
         versionReaders: {
           sharedPreferencesSchemaVersion1: (data) =>
               _decodeEntries(data as Map<String, dynamic>),
         },
-        legacyReader: (legacy) => _decodeEntries(legacy as Map<String, dynamic>),
-      ).value;
+        legacyReader: (legacy) =>
+            _decodeEntries(legacy as Map<String, dynamic>),
+      );
+      if (loaded.usedLegacyFormat) {
+        unawaited(_saveEntries(loaded.value));
+      }
+      return loaded.value;
     } catch (_) {
       return {};
     }
@@ -141,10 +145,8 @@ class KnownHostsService {
 
   Map<String, KnownHostEntry> _decodeEntries(Map<String, dynamic> decoded) {
     return decoded.map(
-      (key, value) => MapEntry(
-        key,
-        KnownHostEntry.fromJson(value as Map<String, dynamic>),
-      ),
+      (key, value) =>
+          MapEntry(key, KnownHostEntry.fromJson(value as Map<String, dynamic>)),
     );
   }
 }

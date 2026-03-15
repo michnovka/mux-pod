@@ -13,6 +13,34 @@ void main() {
   String encodeEnvelope(Object? data) =>
       jsonEncode({'version': sharedPreferencesSchemaVersion1, 'data': data});
 
+  bool isVersionedEnvelopeString(String? raw) {
+    if (raw == null) {
+      return false;
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map<String, dynamic> &&
+          decoded['version'] == sharedPreferencesSchemaVersion1 &&
+          decoded.containsKey('data');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> waitForCondition(
+    bool Function() predicate, {
+    Duration timeout = const Duration(seconds: 5),
+    Duration pollInterval = const Duration(milliseconds: 10),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (!predicate() && DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(pollInterval);
+    }
+
+    expect(predicate(), isTrue);
+  }
+
   setUp(() {
     SharedPreferences.setMockInitialValues({});
   });
@@ -134,31 +162,38 @@ void main() {
       final state = container.read(connectionsProvider);
       expect(state.isLoading, isFalse);
       expect(state.connections.single.id, connection.id);
+
+      await waitForCondition(
+        () => isVersionedEnvelopeString(prefs.getString('connections')),
+      );
     },
   );
 
-  test('loads versioned connections JSON when shared preferences are preloaded', () async {
-    final connection = Connection(
-      id: 'conn-1',
-      name: 'Test',
-      host: 'example.com',
-      port: 22,
-      username: 'user',
-      createdAt: DateTime.utc(2025, 1, 1),
-    );
+  test(
+    'loads versioned connections JSON when shared preferences are preloaded',
+    () async {
+      final connection = Connection(
+        id: 'conn-1',
+        name: 'Test',
+        host: 'example.com',
+        port: 22,
+        username: 'user',
+        createdAt: DateTime.utc(2025, 1, 1),
+      );
 
-    SharedPreferences.setMockInitialValues({
-      'connections': encodeEnvelope([connection.toJson()]),
-    });
-    final prefs = await SharedPreferences.getInstance();
+      SharedPreferences.setMockInitialValues({
+        'connections': encodeEnvelope([connection.toJson()]),
+      });
+      final prefs = await SharedPreferences.getInstance();
 
-    final container = ProviderContainer(
-      overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
-    );
-    addTearDown(container.dispose);
+      final container = ProviderContainer(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      );
+      addTearDown(container.dispose);
 
-    final state = container.read(connectionsProvider);
-    expect(state.isLoading, isFalse);
-    expect(state.connections.single.id, connection.id);
-  });
+      final state = container.read(connectionsProvider);
+      expect(state.isLoading, isFalse);
+      expect(state.connections.single.id, connection.id);
+    },
+  );
 }

@@ -29,6 +29,21 @@ void main() {
   String encodeEnvelope(Object? data) =>
       jsonEncode({'version': sharedPreferencesSchemaVersion1, 'data': data});
 
+  bool isVersionedEnvelopeString(String? raw) {
+    if (raw == null) {
+      return false;
+    }
+
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map<String, dynamic> &&
+          decoded['version'] == sharedPreferencesSchemaVersion1 &&
+          decoded.containsKey('data');
+    } catch (_) {
+      return false;
+    }
+  }
+
   setUp(() {
     SharedPreferences.setMockInitialValues({});
   });
@@ -200,6 +215,10 @@ void main() {
       final state = container.read(connectionsProvider);
       expect(state.isLoading, isFalse);
       expect(state.connections.map((item) => item.id), [connection.id]);
+
+      await _waitForCondition(
+        () => isVersionedEnvelopeString(prefs.getString('connections')),
+      );
     },
   );
 
@@ -238,6 +257,35 @@ void main() {
   );
 
   test(
+    'settings build migrates legacy keys to the versioned settings blob',
+    () async {
+      SharedPreferences.setMockInitialValues({
+        'settings_dark_mode': false,
+        'settings_font_size': 18.0,
+        'settings_direct_input_enabled': true,
+      });
+      final prefs = await SharedPreferences.getInstance();
+
+      final container = ProviderContainer(
+        overrides: [sharedPreferencesProvider.overrideWithValue(prefs)],
+      );
+      addTearDown(container.dispose);
+
+      final settings = container.read(settingsProvider);
+      expect(settings.darkMode, isFalse);
+      expect(settings.fontSize, 18.0);
+      expect(settings.directInputEnabled, isTrue);
+
+      await _waitForCondition(
+        () => isVersionedEnvelopeString(prefs.getString('settings')),
+      );
+      expect(prefs.containsKey('settings_dark_mode'), isFalse);
+      expect(prefs.containsKey('settings_font_size'), isFalse);
+      expect(prefs.containsKey('settings_direct_input_enabled'), isFalse);
+    },
+  );
+
+  test(
     'key build loads synchronously when shared preferences are preloaded',
     () async {
       final existingKey = SshKeyMeta(
@@ -262,6 +310,10 @@ void main() {
       final state = container.read(keysProvider);
       expect(state.isLoading, isFalse);
       expect(state.keys.single.id, existingKey.id);
+
+      await _waitForCondition(
+        () => isVersionedEnvelopeString(prefs.getString('ssh_keys_meta')),
+      );
     },
   );
 
@@ -292,6 +344,10 @@ void main() {
       expect(state.sessions.map((session) => session.key), [
         existingSession.key,
       ]);
+
+      await _waitForCondition(
+        () => isVersionedEnvelopeString(prefs.getString('active_sessions')),
+      );
     },
   );
 
@@ -310,13 +366,15 @@ void main() {
       container.read(activeSessionsProvider);
 
       // Fire-and-forget, just like widget code does.
-      container.read(activeSessionsProvider.notifier).addOrUpdateSession(
-        connectionId: 'conn-1',
-        connectionName: 'Inline test',
-        host: 'inline.example.com',
-        sessionName: 'inline-session',
-        windowCount: 1,
-      );
+      container
+          .read(activeSessionsProvider.notifier)
+          .addOrUpdateSession(
+            connectionId: 'conn-1',
+            connectionName: 'Inline test',
+            host: 'inline.example.com',
+            sessionName: 'inline-session',
+            windowCount: 1,
+          );
 
       // State must be updated synchronously — no microtask hop.
       final state = container.read(activeSessionsProvider);

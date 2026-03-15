@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -129,6 +130,21 @@ class SettingsNotifier extends Notifier<AppSettings> {
   static const String _directInputEnabledKey = 'settings_direct_input_enabled';
   static const String _showTerminalCursorKey = 'settings_show_terminal_cursor';
   static const String _invertPaneNavKey = 'settings_invert_pane_nav';
+  static const List<String> _legacySettingsKeys = [
+    _darkModeKey,
+    _fontSizeKey,
+    _fontFamilyKey,
+    _biometricKey,
+    _notificationsKey,
+    _vibrationKey,
+    _keepScreenOnKey,
+    _scrollbackKey,
+    _minFontSizeKey,
+    _autoFitEnabledKey,
+    _directInputEnabledKey,
+    _showTerminalCursorKey,
+    _invertPaneNavKey,
+  ];
   final Completer<void> _initialLoadCompleter = Completer<void>();
   SharedPreferences? _sharedPreferences;
 
@@ -139,7 +155,13 @@ class SettingsNotifier extends Notifier<AppSettings> {
       AppSettings settings;
       try {
         settings = _loadSettingsSync(prefs);
-      } catch (_) {
+      } catch (e, stackTrace) {
+        developer.log(
+          'Failed to load settings, using defaults: $e',
+          name: 'SettingsProvider',
+          error: e,
+          stackTrace: stackTrace,
+        );
         settings = const AppSettings();
       }
       if (!_initialLoadCompleter.isCompleted) {
@@ -172,7 +194,11 @@ class SettingsNotifier extends Notifier<AppSettings> {
       }
     }
 
-    return _loadLegacySettings(prefs);
+    final settings = _loadLegacySettings(prefs);
+    if (_hasLegacySettingsKeys(prefs)) {
+      unawaited(_persistSettingsValue(prefs, settings));
+    }
+    return settings;
   }
 
   AppSettings _loadLegacySettings(SharedPreferences prefs) {
@@ -207,7 +233,13 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> _loadSettings() async {
     try {
       state = _loadSettingsSync(await _getPrefs());
-    } catch (_) {
+    } catch (e, stackTrace) {
+      developer.log(
+        'Failed to async-load settings, using defaults: $e',
+        name: 'SettingsProvider',
+        error: e,
+        stackTrace: stackTrace,
+      );
       state = const AppSettings();
     } finally {
       if (!_initialLoadCompleter.isCompleted) {
@@ -228,18 +260,22 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> _waitForInitialLoad() => _initialLoadCompleter.future;
 
   Future<void> _saveSettings() async {
-    final prefs = await _getPrefs();
+    await _persistSettingsValue(await _getPrefs(), state);
+  }
+
+  Future<void> _persistSettingsValue(
+    SharedPreferences prefs,
+    AppSettings settings,
+  ) async {
     await prefs.setString(
       _storageKey,
-      encodeVersionedJsonEnvelope(state.toJson()),
+      encodeVersionedJsonEnvelope(settings.toJson()),
     );
     await _removeLegacySettingsKeys(prefs);
   }
 
   Future<void> _removeLegacySettingsKeys(SharedPreferences prefs) async {
-    for (final key in _legacySettingsKeys) {
-      await prefs.remove(key);
-    }
+    await Future.wait(_legacySettingsKeys.map(prefs.remove));
   }
 
   /// Set dark mode
@@ -353,19 +389,3 @@ final settingsProvider = NotifierProvider<SettingsNotifier, AppSettings>(() {
 final darkModeProvider = Provider<bool>((ref) {
   return ref.watch(settingsProvider).darkMode;
 });
-
-const List<String> _legacySettingsKeys = [
-  SettingsNotifier._darkModeKey,
-  SettingsNotifier._fontSizeKey,
-  SettingsNotifier._fontFamilyKey,
-  SettingsNotifier._biometricKey,
-  SettingsNotifier._notificationsKey,
-  SettingsNotifier._vibrationKey,
-  SettingsNotifier._keepScreenOnKey,
-  SettingsNotifier._scrollbackKey,
-  SettingsNotifier._minFontSizeKey,
-  SettingsNotifier._autoFitEnabledKey,
-  SettingsNotifier._directInputEnabledKey,
-  SettingsNotifier._showTerminalCursorKey,
-  SettingsNotifier._invertPaneNavKey,
-];

@@ -180,8 +180,10 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
         },
         legacyReader: (legacy) => _decodeActiveSessionsList(legacy),
       );
-      final sessions = loaded.value
-          .toList();
+      final sessions = loaded.value;
+      if (loaded.usedLegacyFormat) {
+        unawaited(_persistSessions(prefs, sessions));
+      }
       return ActiveSessionsState(sessions: sessions);
     } catch (e) {
       return const ActiveSessionsState();
@@ -224,12 +226,18 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
   /// Save session information to storage
   Future<void> _saveToStorage() async {
     try {
-      final prefs = await _getPrefs();
-      final jsonList = state.sessions.map((s) => s.toJson()).toList();
-      await prefs.setString(_storageKey, encodeVersionedJsonEnvelope(jsonList));
+      await _persistSessions(await _getPrefs(), state.sessions);
     } catch (e) {
       // Ignore save errors
     }
+  }
+
+  Future<void> _persistSessions(
+    SharedPreferences prefs,
+    List<ActiveSession> sessions,
+  ) async {
+    final jsonList = sessions.map((s) => s.toJson()).toList();
+    await prefs.setString(_storageKey, encodeVersionedJsonEnvelope(jsonList));
   }
 
   /// Add or update a session
@@ -392,8 +400,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     final sessions = state.sessions
         .where(
           (s) =>
-              !(s.connectionId == connectionId &&
-                  s.sessionName == sessionName),
+              !(s.connectionId == connectionId && s.sessionName == sessionName),
         )
         .toList();
     state = state.copyWith(sessions: sessions);
