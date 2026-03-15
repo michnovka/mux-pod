@@ -4541,9 +4541,6 @@ $metadataCommand
     final textColor = isDark ? Colors.white : Colors.black87;
     final mutedTextColor = isDark ? Colors.white38 : Colors.black38;
     final inactiveIconColor = isDark ? Colors.white60 : Colors.black45;
-    final canAttachImage =
-        ref.read(sshProvider).isConnected &&
-        ref.read(tmuxProvider.notifier).currentTarget != null;
 
     showModalBottomSheet(
       context: context,
@@ -4587,23 +4584,6 @@ $metadataCommand
                 child: ListView(
                   shrinkWrap: true,
                   children: [
-                    ListTile(
-                      leading: Icon(Icons.history, color: DesignColors.primary),
-                      title: Text(
-                        'Retained Scrollback',
-                        style: TextStyle(
-                          color: textColor,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      subtitle: Text(
-                        'The main tmux buffer is loaded directly into the terminal. Scroll normally to browse retained output.',
-                        style: TextStyle(color: mutedTextColor, fontSize: 12),
-                      ),
-                      onTap: () {
-                        Navigator.pop(context);
-                      },
-                    ),
                     // Reset zoom
                     ListTile(
                       leading: Icon(
@@ -4634,65 +4614,6 @@ $metadataCommand
                               Navigator.pop(context);
                             }
                           : null,
-                    ),
-                    // Attach Image
-                    ListTile(
-                      leading: Icon(
-                        Icons.image_outlined,
-                        color: canAttachImage
-                            ? DesignColors.primary
-                            : inactiveIconColor,
-                      ),
-                      title: Text(
-                        'Attach Image',
-                        style: TextStyle(
-                          color: canAttachImage ? textColor : mutedTextColor,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      subtitle: Text(
-                        canAttachImage
-                            ? 'Upload an image and paste its path into the terminal'
-                            : 'Connect to a live pane to attach an image',
-                        style: TextStyle(color: mutedTextColor, fontSize: 12),
-                      ),
-                      enabled: canAttachImage,
-                      onTap: canAttachImage
-                          ? () {
-                              Navigator.pop(context);
-                              unawaited(_attachImageFromDevice());
-                            }
-                          : null,
-                    ),
-                    // Touch Selection
-                    ListTile(
-                      leading: Icon(
-                        Icons.touch_app,
-                        color: _terminalMode == TerminalMode.select
-                            ? DesignColors.warning
-                            : inactiveIconColor,
-                      ),
-                      title: Text(
-                        'Touch Selection',
-                        style: TextStyle(
-                          color: _terminalMode == TerminalMode.select
-                              ? DesignColors.warning
-                              : textColor,
-                          fontWeight: _terminalMode == TerminalMode.select
-                              ? FontWeight.bold
-                              : FontWeight.normal,
-                        ),
-                      ),
-                      subtitle: Text(
-                        _terminalMode == TerminalMode.select
-                            ? 'Selection is active — tap to exit'
-                            : 'Enable touch selection and local copying',
-                        style: TextStyle(color: mutedTextColor, fontSize: 12),
-                      ),
-                      onTap: () {
-                        _toggleSelectMode();
-                        Navigator.pop(context);
-                      },
                     ),
                     Divider(
                       height: 1,
