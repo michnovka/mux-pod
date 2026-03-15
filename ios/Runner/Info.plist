@@ -45,8 +45,6 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
-	<key>NSFaceIDUsageDescription</key>
-	<string>SSH接続情報への安全なアクセスのためにFace IDを使用します</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>SSH鍵ファイルのインポートに使用します</string>
 </dict>
