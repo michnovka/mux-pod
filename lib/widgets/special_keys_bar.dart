@@ -173,7 +173,8 @@ class SpecialKeysBar extends StatelessWidget {
             : DesignColors.textPrimary.withValues(alpha: 0.92);
 
     return Semantics(
-      button: true,
+      button: !disabled,
+      enabled: !disabled,
       selected: isActive,
       label: label,
       child: GestureDetector(

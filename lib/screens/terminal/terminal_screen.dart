@@ -2941,6 +2941,10 @@ $metadataCommand
   void _pasteFromClipboard() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data?.text != null && data!.text!.isNotEmpty) {
+      // Exit select mode so the pasted text reaches tmux.
+      if (_terminalMode == TerminalMode.select) {
+        _toggleSelectMode();
+      }
       XtermInputAdapter.sendPaste(_terminal, data.text!);
     }
   }
@@ -3392,36 +3396,39 @@ $metadataCommand
                 ),
               ),
             ),
-            // Select mode indicator
+            // Select mode indicator — tappable to exit select mode
             if (_terminalMode == TerminalMode.select)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                margin: const EdgeInsets.only(right: 8),
-                decoration: BoxDecoration(
-                  color: DesignColors.warning.withValues(alpha: 0.2),
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(
-                    color: DesignColors.warning.withValues(alpha: 0.5),
+              GestureDetector(
+                onTap: _toggleSelectMode,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: DesignColors.warning.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: DesignColors.warning.withValues(alpha: 0.5),
+                    ),
                   ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.content_copy,
-                      size: 12,
-                      color: DesignColors.warning,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Select',
-                      style: GoogleFonts.jetBrainsMono(
-                        fontSize: 10,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.close,
+                        size: 12,
                         color: DesignColors.warning,
-                        fontWeight: FontWeight.w600,
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 4),
+                      Text(
+                        'Select',
+                        style: GoogleFonts.jetBrainsMono(
+                          fontSize: 10,
+                          color: DesignColors.warning,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             // Zoom indicator
@@ -4534,6 +4541,9 @@ $metadataCommand
     final textColor = isDark ? Colors.white : Colors.black87;
     final mutedTextColor = isDark ? Colors.white38 : Colors.black38;
     final inactiveIconColor = isDark ? Colors.white60 : Colors.black45;
+    final canAttachImage =
+        ref.read(sshProvider).isConnected &&
+        ref.read(tmuxProvider.notifier).currentTarget != null;
 
     showModalBottomSheet(
       context: context,
@@ -4624,6 +4634,65 @@ $metadataCommand
                               Navigator.pop(context);
                             }
                           : null,
+                    ),
+                    // Attach Image
+                    ListTile(
+                      leading: Icon(
+                        Icons.image_outlined,
+                        color: canAttachImage
+                            ? DesignColors.primary
+                            : inactiveIconColor,
+                      ),
+                      title: Text(
+                        'Attach Image',
+                        style: TextStyle(
+                          color: canAttachImage ? textColor : mutedTextColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      subtitle: Text(
+                        canAttachImage
+                            ? 'Upload an image and paste its path into the terminal'
+                            : 'Connect to a live pane to attach an image',
+                        style: TextStyle(color: mutedTextColor, fontSize: 12),
+                      ),
+                      enabled: canAttachImage,
+                      onTap: canAttachImage
+                          ? () {
+                              Navigator.pop(context);
+                              unawaited(_attachImageFromDevice());
+                            }
+                          : null,
+                    ),
+                    // Touch Selection
+                    ListTile(
+                      leading: Icon(
+                        Icons.touch_app,
+                        color: _terminalMode == TerminalMode.select
+                            ? DesignColors.warning
+                            : inactiveIconColor,
+                      ),
+                      title: Text(
+                        'Touch Selection',
+                        style: TextStyle(
+                          color: _terminalMode == TerminalMode.select
+                              ? DesignColors.warning
+                              : textColor,
+                          fontWeight: _terminalMode == TerminalMode.select
+                              ? FontWeight.bold
+                              : FontWeight.normal,
+                        ),
+                      ),
+                      subtitle: Text(
+                        _terminalMode == TerminalMode.select
+                            ? 'Selection is active — tap to exit'
+                            : 'Enable touch selection and local copying',
+                        style: TextStyle(color: mutedTextColor, fontSize: 12),
+                      ),
+                      onTap: () {
+                        _toggleSelectMode();
+                        Navigator.pop(context);
+                      },
                     ),
                     Divider(
                       height: 1,
