@@ -407,6 +407,36 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     await _saveToStorage();
   }
 
+  /// Rename a session in the active sessions list
+  Future<void> renameSession(
+    String connectionId,
+    String oldName,
+    String newName,
+  ) async {
+    if (!_hasLoadedInitialState) {
+      await _initialLoadCompleter.future;
+    }
+    final key = '$connectionId:$oldName';
+    final existingIndex = state.sessions.indexWhere((s) => s.key == key);
+    if (existingIndex < 0) return;
+
+    final sessions = [...state.sessions];
+    sessions[existingIndex] = sessions[existingIndex].copyWith(
+      sessionName: newName,
+    );
+
+    // If the current session was the renamed one, update the key
+    final currentKey = state.currentSessionKey;
+    final newCurrentKey =
+        currentKey == key ? '$connectionId:$newName' : currentKey;
+
+    state = state.copyWith(
+      sessions: sessions,
+      currentSessionKey: newCurrentKey,
+    );
+    await _saveToStorage();
+  }
+
   /// Remove a session (alias for closeSession)
   Future<void> removeSession(String connectionId, String sessionName) {
     return closeSession(connectionId, sessionName);
