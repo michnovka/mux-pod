@@ -1565,8 +1565,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final tmuxState = ref.read(tmuxProvider);
     final activePaneId = tmuxState.activePaneId;
     if (activePaneId != paneId) {
-      // Check for bell character in output from non-active panes
-      if (data.contains('\x07')) {
+      // Check for bell character in output from non-active panes,
+      // but not during pane/window switches or resyncs (which replay
+      // buffered output that may contain stale bell characters).
+      if (!_isSwitchingPane &&
+          !_isResyncingPane &&
+          !_pauseControlOutputUntilResyncComplete &&
+          data.contains('\x07')) {
         _handleBellFromPane(paneId, tmuxState);
       }
       return;
@@ -3308,20 +3313,20 @@ $metadataCommand
                     ),
                     _buildBreadcrumbSeparator(),
                     // Window name (tap to switch)
-                    // Check if any non-active window has alert flags
+                    // Check if any non-active window has a bell flag
                     Builder(builder: (_) {
                       final session = tmuxState.activeSession;
-                      final hasAlerts = session != null &&
+                      final hasBell = session != null &&
                           session.windows.any((w) =>
                               w.index != tmuxState.activeWindowIndex &&
-                              (w.hasBell || w.hasActivity));
+                              w.hasBell);
                       return _buildBreadcrumbItem(
                         currentWindow,
-                        icon: hasAlerts
+                        icon: hasBell
                             ? Icons.notifications_active
                             : Icons.tab,
                         isSelected: true,
-                        alertColor: hasAlerts ? DesignColors.error : null,
+                        alertColor: hasBell ? DesignColors.error : null,
                         onTap: () => _showWindowSelector(tmuxState),
                       );
                     }),
