@@ -35,6 +35,7 @@ import '../../services/tmux/tmux_control_client.dart';
 import '../../services/tmux/tmux_parser.dart'
     show TmuxPane, TmuxParser, TmuxWindow, TmuxWindowFlag;
 import '../../theme/design_colors.dart';
+import '../../utils/async_utils.dart';
 import '../../widgets/dialogs/viewport_resize_dialog.dart';
 import 'widgets/tmux_management_dialogs.dart';
 import '../../widgets/special_keys_bar.dart';
@@ -418,7 +419,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
     _stopConnectionStatsPolling(resetValue: true);
-    unawaited(_stopControlClient(resetRestartState: true));
+    fireAndForget(
+      _stopControlClient(resetRestartState: true),
+      debugLabel: 'TerminalScreen._pausePolling stop control client',
+    );
     WakelockPlus.disable();
   }
 
@@ -428,11 +432,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _isInBackground = false;
     _applyKeepScreenOn();
     _startConnectionStatsPolling();
-    unawaited(
+    fireAndForget(
       _restartTerminalStream(
         restartControlClient: true,
         reason: 'resume_foreground',
       ),
+      debugLabel: 'TerminalScreen._resumePolling restart stream',
     );
   }
 
@@ -482,11 +487,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       }
       if (previous?.scrollbackLines != next.scrollbackLines) {
         _reconfigureTerminal(next);
-        unawaited(
+        fireAndForget(
           _resyncActivePane(
             refreshTree: false,
             reason: 'settings_scrollback_change',
           ),
+          debugLabel: 'TerminalScreen resync after scrollback change',
         );
       }
     }, fireImmediately: false);
@@ -1425,7 +1431,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     final sshState = ref.read(sshProvider);
     if (!sshState.isConnected) {
       if (!sshState.isReconnecting) {
-        unawaited(_attemptReconnect());
+        fireAndForget(
+          _attemptReconnect(),
+          debugLabel: 'TerminalScreen._scheduleControlClientRestart reconnect',
+        );
       }
       return;
     }
@@ -2194,7 +2203,10 @@ $metadataCommand
       }
       final currentState = ref.read(sshProvider);
       if (!currentState.isReconnecting) {
-        unawaited(_attemptReconnect());
+        fireAndForget(
+          _attemptReconnect(),
+          debugLabel: 'TerminalScreen._resyncActivePane reconnect on error',
+        );
       }
     } finally {
       _isResyncingPane = false;
@@ -2217,12 +2229,13 @@ $metadataCommand
         visibleFrameForBackfill != null &&
         visiblePaneIdForBackfill != null &&
         targetTerminalForBackfill != null) {
-      unawaited(
+      fireAndForget(
         _scheduleScrollbackBackfill(
           paneId: visiblePaneIdForBackfill,
           visibleFrame: visibleFrameForBackfill,
           targetTerminal: targetTerminalForBackfill,
         ),
+        debugLabel: 'TerminalScreen scrollback backfill',
       );
     }
   }
@@ -2287,7 +2300,10 @@ $metadataCommand
               ) ??
               data;
 
-    unawaited(_sendTerminalData(normalizeTerminalOutput(output)));
+    fireAndForget(
+      _sendTerminalData(normalizeTerminalOutput(output)),
+      debugLabel: 'TerminalScreen send terminal data',
+    );
   }
 
   /// Attempt auto-reconnection
@@ -2391,7 +2407,10 @@ $metadataCommand
       return await task();
     } finally {
       if (mounted) {
-        unawaited(Navigator.of(context, rootNavigator: true).maybePop());
+        fireAndForget(
+          Navigator.of(context, rootNavigator: true).maybePop().then((_) {}),
+          debugLabel: 'TerminalScreen dismiss progress dialog',
+        );
       }
     }
   }
@@ -2519,7 +2538,10 @@ $metadataCommand
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
     _stopConnectionStatsPolling();
-    unawaited(_stopControlClient(resetRestartState: true));
+    fireAndForget(
+      _stopControlClient(resetRestartState: true),
+      debugLabel: 'TerminalScreen.dispose stop control client',
+    );
     // Dispose ValueNotifier
     _viewNotifier.dispose();
     _latencyNotifier.dispose();
@@ -4727,7 +4749,10 @@ $metadataCommand
                       onTap: canAttachImage
                           ? () {
                               Navigator.pop(context);
-                              unawaited(_attachImageFromDevice());
+                              fireAndForget(
+                                _attachImageFromDevice(),
+                                debugLabel: 'TerminalScreen attach image',
+                              );
                             }
                           : null,
                     ),

@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
@@ -11,6 +9,7 @@ import '../../../providers/settings_provider.dart';
 import '../../../services/terminal/font_calculator.dart';
 import '../../../services/tmux/pane_navigator.dart';
 import '../../../theme/design_colors.dart';
+import '../../../utils/async_utils.dart';
 
 /// Terminal interaction mode.
 enum PaneTerminalMode { normal, select }
@@ -670,7 +669,10 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
               icon: Icons.copy,
               label: 'Copy',
               onTap: () {
-                unawaited(copySelection());
+                fireAndForget(
+                  copySelection(),
+                  debugLabel: 'PaneTerminalView copy selection',
+                );
               },
             ),
             const SizedBox(width: 8),

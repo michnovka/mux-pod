@@ -138,6 +138,22 @@ class SettingsScreen extends ConsumerWidget {
                     ref.read(settingsProvider.notifier).setInvertPaneNavigation(value);
                   },
                 ),
+                ListTile(
+                  leading: const Icon(Icons.timer),
+                  title: const Text('Keep-Alive Timeout'),
+                  subtitle: Text('${settings.keepAliveTimeoutSeconds} seconds'),
+                  onTap: () async {
+                    final value = await showDialog<int>(
+                      context: context,
+                      builder: (context) => _KeepAliveTimeoutDialog(
+                        currentValue: settings.keepAliveTimeoutSeconds,
+                      ),
+                    );
+                    if (value != null) {
+                      ref.read(settingsProvider.notifier).setKeepAliveTimeoutSeconds(value);
+                    }
+                  },
+                ),
                 const Divider(),
                 const _SectionHeader(title: 'Appearance'),
                 ListTile(
@@ -238,6 +254,46 @@ class _SectionHeader extends StatelessWidget {
           letterSpacing: 1.5,
         ),
       ),
+    );
+  }
+}
+
+class _KeepAliveTimeoutDialog extends StatelessWidget {
+  final int currentValue;
+
+  static const List<int> _options = [3, 5, 10, 15, 20, 30];
+
+  const _KeepAliveTimeoutDialog({required this.currentValue});
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Keep-Alive Timeout'),
+      content: SingleChildScrollView(
+        child: RadioGroup<int>(
+          groupValue: currentValue,
+          onChanged: (value) {
+            if (value != null) {
+              Navigator.pop(context, value);
+            }
+          },
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: _options.map((seconds) {
+              return RadioListTile<int>(
+                title: Text('$seconds seconds'),
+                value: seconds,
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+      ],
     );
   }
 }

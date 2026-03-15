@@ -4,6 +4,8 @@ import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 
+import '../../utils/async_utils.dart';
+
 /// Persistent shell session
 ///
 /// Writes commands and detects output completion via markers to return results.
@@ -159,7 +161,7 @@ class PersistentShell {
       // The timed-out command may still be running on the remote side,
       // consuming stdin. Restart the shell so subsequent exec() calls
       // get a clean session.
-      unawaited(restart());
+      fireAndForget(restart(), debugLabel: 'PersistentShell restart after timeout');
       throw PersistentShellError('Command execution timed out');
     }
   }
@@ -185,7 +187,7 @@ class PersistentShell {
       _scanOffset = 0;
       // Restart the shell so subsequent commands get a clean session —
       // the hung command may still be running and consuming stdin.
-      unawaited(restart());
+      fireAndForget(restart(), debugLabel: 'PersistentShell restart after buffer overflow');
       pending.completeError(
         PersistentShellError('Buffer overflow (>${_maxBufferSize ~/ 1024} KB)'),
       );

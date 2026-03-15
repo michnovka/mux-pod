@@ -6,8 +6,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/background/foreground_task_service.dart';
 import '../services/network/network_monitor.dart';
 import '../services/ssh/ssh_client.dart';
+import '../utils/async_utils.dart';
 import 'connection_provider.dart';
 import 'known_hosts_provider.dart';
+import 'settings_provider.dart';
 
 typedef SshClientFactory = SshClient Function();
 
@@ -130,7 +132,10 @@ class SshNotifier extends Notifier<SshState> {
       _connectionStateSubscription = null;
       _networkStatusSubscription?.cancel();
       _networkStatusSubscription = null;
-      _client?.dispose();
+      fireAndForget(
+        _client?.dispose() ?? Future<void>.value(),
+        debugLabel: 'SshNotifier.onDispose client cleanup',
+      );
       _client = null;
       _foregroundService.stopService();
     });
@@ -162,7 +167,10 @@ class SshNotifier extends Notifier<SshState> {
           nextRetryAt: null,
         );
         _cancelReconnectFlow();
-        unawaited(reconnectNow());
+        fireAndForget(
+          reconnectNow().then((_) {}),
+          debugLabel: 'SshNotifier.reconnectNow after network recovery',
+        );
       }
     } else {
       // When going offline
@@ -187,7 +195,10 @@ class SshNotifier extends Notifier<SshState> {
   }
 
   SshClient _createClient() {
-    return ref.read(sshClientFactoryProvider)();
+    final client = ref.read(sshClientFactoryProvider)();
+    final settings = ref.read(settingsProvider);
+    client.keepAliveTimeoutSeconds = settings.keepAliveTimeoutSeconds;
+    return client;
   }
 
   void _cancelReconnectFlow({bool completePending = false}) {
@@ -386,7 +397,10 @@ class SshNotifier extends Notifier<SshState> {
 
       // Attempt automatic reconnection (if not already reconnecting)
       if (!state.isReconnecting) {
-        unawaited(reconnect());
+        fireAndForget(
+          reconnect().then((_) {}),
+          debugLabel: 'SshNotifier.reconnect on connection state change',
+        );
       }
     }
   }
@@ -465,7 +479,10 @@ class SshNotifier extends Notifier<SshState> {
     final generation = _reconnectGeneration;
 
     if (delayMs == 0) {
-      unawaited(_runReconnectAttempt(completer, generation));
+      fireAndForget(
+        _runReconnectAttempt(completer, generation),
+        debugLabel: 'SshNotifier._runReconnectAttempt immediate',
+      );
       return completer.future;
     }
 
@@ -474,8 +491,9 @@ class SshNotifier extends Notifier<SshState> {
       _reconnectTimer = null;
       final scheduledCompleter = _scheduledReconnectCompleter;
       _scheduledReconnectCompleter = null;
-      unawaited(
+      fireAndForget(
         _runReconnectAttempt(scheduledCompleter ?? completer, generation),
+        debugLabel: 'SshNotifier._runReconnectAttempt scheduled',
       );
     });
 
@@ -524,7 +542,10 @@ class SshNotifier extends Notifier<SshState> {
         state.isReconnecting &&
         state.isNetworkAvailable &&
         _canRetry(state.reconnectAttempt)) {
-      unawaited(_requestReconnect(immediate: false, resetAttempt: false));
+      fireAndForget(
+        _requestReconnect(immediate: false, resetAttempt: false).then((_) {}),
+        debugLabel: 'SshNotifier._requestReconnect retry after failure',
+      );
     }
   }
 

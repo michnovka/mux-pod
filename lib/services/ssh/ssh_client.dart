@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 
+import '../../utils/async_utils.dart';
 import '../terminal/terminal_image_attachment.dart';
 import 'ssh_lifecycle.dart';
 import 'persistent_shell.dart';
@@ -218,8 +219,8 @@ class SshClient {
   /// Keep-alive maximum interval (seconds)
   static const int _maxKeepAliveIntervalSeconds = 30;
 
-  /// Keep-alive timeout (seconds) - reduced to 3 seconds for fast detection
-  static const int _keepAliveTimeoutSeconds = 3;
+  /// Keep-alive timeout (seconds) - configurable, default 10 seconds
+  int keepAliveTimeoutSeconds = 10;
 
   /// Current keep-alive interval (dynamically adjusted)
   int _currentKeepAliveIntervalSeconds = 10;
@@ -716,7 +717,7 @@ class SshClient {
       // Keep-alive via persistent shell (fast)
       await execPersistent(
         'echo ping',
-        timeout: Duration(seconds: _keepAliveTimeoutSeconds),
+        timeout: Duration(seconds: keepAliveTimeoutSeconds),
       );
       _recordKeepAliveLatency(
         DateTime.now().difference(startTime).inMilliseconds,
@@ -954,8 +955,14 @@ class SshClient {
     _streamingShellOnDone = null;
     _streamingShellOnError = null;
 
-    unawaited(stdoutSubscription?.cancel() ?? Future<void>.value());
-    unawaited(stderrSubscription?.cancel() ?? Future<void>.value());
+    fireAndForget(
+      stdoutSubscription?.cancel() ?? Future<void>.value(),
+      debugLabel: 'SshClient streaming shell stdout cancel',
+    );
+    fireAndForget(
+      stderrSubscription?.cancel() ?? Future<void>.value(),
+      debugLabel: 'SshClient streaming shell stderr cancel',
+    );
 
     onDone?.call();
   }

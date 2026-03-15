@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../utils/async_utils.dart';
 import '../storage/versioned_json_storage.dart';
 
 /// Result of looking up a host in the known hosts store.
@@ -128,7 +129,10 @@ class KnownHostsService {
             _decodeEntries(legacy as Map<String, dynamic>),
       );
       if (loaded.usedLegacyFormat) {
-        unawaited(_saveEntries(loaded.value));
+        fireAndForget(
+          _saveEntries(loaded.value),
+          debugLabel: 'KnownHostsService persist legacy entries migration',
+        );
       }
       return loaded.value;
     } catch (e) {
