@@ -554,6 +554,15 @@ class TmuxWindow {
   /// Whether this window is zoomed
   bool get isZoomed => flags.contains(TmuxWindowFlag.zoomed);
 
+  /// Whether this window has activity
+  bool get hasActivity => flags.contains(TmuxWindowFlag.activity);
+
+  /// Whether this window has bell
+  bool get hasBell => flags.contains(TmuxWindowFlag.bell);
+
+  /// Whether this window has silence
+  bool get hasSilence => flags.contains(TmuxWindowFlag.silence);
+
   @override
   String toString() => 'TmuxWindow($index: $name, panes: $paneCount, active: $active)';
 

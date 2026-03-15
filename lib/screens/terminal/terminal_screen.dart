@@ -30,8 +30,10 @@ import '../../services/terminal/xterm_input_adapter.dart';
 import '../../services/tmux/pane_navigator.dart';
 import '../../services/tmux/tmux_commands.dart';
 import '../../services/tmux/tmux_control_client.dart';
-import '../../services/tmux/tmux_parser.dart' show TmuxPane;
+import '../../services/tmux/tmux_parser.dart'
+    show TmuxPane, TmuxWindow, TmuxWindowFlag;
 import '../../theme/design_colors.dart';
+import 'widgets/tmux_management_dialogs.dart';
 import '../../widgets/special_keys_bar.dart';
 import '../../providers/terminal_display_provider.dart';
 import '../settings/settings_screen.dart';
@@ -3336,6 +3338,24 @@ $metadataCommand
     );
   }
 
+  /// Execute a tmux management command with error handling and tree refresh.
+  Future<bool> _execTmuxManagement(String command) async {
+    final sshClient = ref.read(sshProvider.notifier).client;
+    if (sshClient == null || !sshClient.isConnected) return false;
+    try {
+      await sshClient.execPersistent(command);
+      _scheduleControlSync(refreshTree: true);
+      return true;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Command failed: $e')),
+        );
+      }
+      return false;
+    }
+  }
+
   /// Show session selection dialog
   void _showSessionSelector(TmuxState tmuxState) {
     showModalBottomSheet(
@@ -3356,18 +3376,46 @@ $metadataCommand
               mainAxisSize: MainAxisSize.min,
               children: [
                 Padding(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.only(
+                    left: 16,
+                    top: 16,
+                    bottom: 16,
+                    right: 4,
+                  ),
                   child: Row(
                     children: [
                       Icon(Icons.folder, color: colorScheme.primary),
                       const SizedBox(width: 8),
-                      Text(
-                        'Select Session',
-                        style: GoogleFonts.spaceGrotesk(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: colorScheme.onSurface,
+                      Expanded(
+                        child: Text(
+                          'Select Session',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            color: colorScheme.onSurface,
+                          ),
                         ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.add),
+                        tooltip: 'New Session',
+                        onPressed: () async {
+                          Navigator.pop(sheetContext);
+                          final name = await showDialog<String>(
+                            context: context,
+                            builder: (_) => TmuxNewItemDialog(
+                              itemType: 'Session',
+                              existingNames: tmuxState.sessions
+                                  .map((s) => s.name)
+                                  .toList(),
+                            ),
+                          );
+                          if (name != null) {
+                            await _execTmuxManagement(
+                              TmuxCommands.newSession(name: name),
+                            );
+                          }
+                        },
                       ),
                     ],
                   ),
@@ -3381,9 +3429,10 @@ $metadataCommand
                       final session = tmuxState.sessions[index];
                       final isActive =
                           session.name == tmuxState.activeSessionName;
+                      final canDelete = tmuxState.sessions.length > 1;
                       return ListTile(
                         leading: Icon(
-                          Icons.folder,
+                          isActive ? Icons.folder : Icons.folder_outlined,
                           color: isActive
                               ? colorScheme.primary
                               : colorScheme.onSurface.withValues(alpha: 0.6),
@@ -3407,11 +3456,85 @@ $metadataCommand
                             ),
                           ),
                         ),
-                        trailing: isActive
-                            ? Icon(Icons.check, color: colorScheme.primary)
-                            : null,
+                        trailing: PopupMenuButton<String>(
+                          icon: Icon(
+                            Icons.more_vert,
+                            size: 20,
+                            color: colorScheme.onSurface.withValues(alpha: 0.6),
+                          ),
+                          onSelected: (action) async {
+                            Navigator.pop(sheetContext);
+                            switch (action) {
+                              case 'rename':
+                                final newName = await showDialog<String>(
+                                  context: context,
+                                  builder: (_) => TmuxRenameDialog(
+                                    currentName: session.name,
+                                    itemType: 'Session',
+                                    existingNames: tmuxState.sessions
+                                        .map((s) => s.name)
+                                        .toList(),
+                                  ),
+                                );
+                                if (newName != null) {
+                                  final ok = await _execTmuxManagement(
+                                    TmuxCommands.renameSession(
+                                      session.name,
+                                      newName,
+                                    ),
+                                  );
+                                  if (ok && isActive) {
+                                    ref
+                                        .read(tmuxProvider.notifier)
+                                        .setActive(sessionName: newName);
+                                  }
+                                }
+                              case 'delete':
+                                final confirmed = await showDialog<bool>(
+                                  context: context,
+                                  builder: (_) => TmuxConfirmDeleteDialog(
+                                    itemType: 'Session',
+                                    itemName: session.name,
+                                  ),
+                                );
+                                if (confirmed == true) {
+                                  await _execTmuxManagement(
+                                    TmuxCommands.killSession(session.name),
+                                  );
+                                }
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'rename',
+                              child: ListTile(
+                                leading: Icon(Icons.edit),
+                                title: Text('Rename'),
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                            ),
+                            if (canDelete)
+                              PopupMenuItem(
+                                value: 'delete',
+                                child: ListTile(
+                                  leading: Icon(
+                                    Icons.delete,
+                                    color: DesignColors.error,
+                                  ),
+                                  title: Text(
+                                    'Delete',
+                                    style:
+                                        TextStyle(color: DesignColors.error),
+                                  ),
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                              ),
+                          ],
+                        ),
                         onTap: () {
-                          Navigator.pop(context);
+                          Navigator.pop(sheetContext);
                           _selectSession(session.name);
                         },
                       );
@@ -3424,6 +3547,74 @@ $metadataCommand
           ),
         );
       },
+    );
+  }
+
+  /// Get the icon color for a window based on its flags and active state.
+  Color _windowIconColor(
+    TmuxWindow window,
+    bool isActive,
+    ColorScheme colorScheme,
+  ) {
+    if (isActive) return colorScheme.primary;
+    if (window.hasBell) return DesignColors.error;
+    if (window.hasActivity) return Colors.orange;
+    if (window.hasSilence) return Colors.grey;
+    return colorScheme.onSurface.withValues(alpha: 0.6);
+  }
+
+  /// Build an activity/bell/silence badge for a window.
+  Widget? _windowFlagBadge(TmuxWindow window, bool isDark) {
+    final TmuxWindowFlag? flag;
+    if (window.hasBell) {
+      flag = TmuxWindowFlag.bell;
+    } else if (window.hasActivity) {
+      flag = TmuxWindowFlag.activity;
+    } else if (window.hasSilence) {
+      flag = TmuxWindowFlag.silence;
+    } else {
+      return null;
+    }
+
+    final Color bgColor;
+    final Color borderColor;
+    final Color textColor;
+    final String label;
+    switch (flag) {
+      case TmuxWindowFlag.bell:
+        bgColor = DesignColors.error.withValues(alpha: isDark ? 0.15 : 0.1);
+        borderColor = DesignColors.error.withValues(alpha: 0.3);
+        textColor = DesignColors.error;
+        label = 'Bell';
+      case TmuxWindowFlag.activity:
+        bgColor = Colors.orange.withValues(alpha: isDark ? 0.15 : 0.1);
+        borderColor = Colors.orange.withValues(alpha: 0.3);
+        textColor = Colors.orange;
+        label = 'Activity';
+      case TmuxWindowFlag.silence:
+        bgColor = Colors.grey.withValues(alpha: isDark ? 0.15 : 0.1);
+        borderColor = Colors.grey.withValues(alpha: 0.3);
+        textColor = Colors.grey;
+        label = 'Silence';
+      default:
+        return null;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: borderColor),
+      ),
+      child: Text(
+        label,
+        style: GoogleFonts.jetBrainsMono(
+          fontSize: 9,
+          fontWeight: FontWeight.w600,
+          color: textColor,
+        ),
+      ),
     );
   }
 
@@ -3442,6 +3633,7 @@ $metadataCommand
       ),
       builder: (sheetContext) {
         final colorScheme = Theme.of(sheetContext).colorScheme;
+        final isDark = Theme.of(sheetContext).brightness == Brightness.dark;
         final maxHeight = MediaQuery.of(sheetContext).size.height * 0.6;
         return SafeArea(
           child: ConstrainedBox(
@@ -3450,18 +3642,50 @@ $metadataCommand
               mainAxisSize: MainAxisSize.min,
               children: [
                 Padding(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.only(
+                    left: 16,
+                    top: 16,
+                    bottom: 16,
+                    right: 4,
+                  ),
                   child: Row(
                     children: [
                       Icon(Icons.tab, color: colorScheme.primary),
                       const SizedBox(width: 8),
-                      Text(
-                        'Select Window',
-                        style: GoogleFonts.spaceGrotesk(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: colorScheme.onSurface,
+                      Expanded(
+                        child: Text(
+                          'Select Window',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            color: colorScheme.onSurface,
+                          ),
                         ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.add),
+                        tooltip: 'New Window',
+                        onPressed: () async {
+                          Navigator.pop(sheetContext);
+                          final name = await showDialog<String>(
+                            context: context,
+                            builder: (_) => TmuxNewItemDialog(
+                              itemType: 'Window',
+                              existingNames: session.windows
+                                  .map((w) => w.name)
+                                  .toList(),
+                            ),
+                          );
+                          if (name != null) {
+                            await _execTmuxManagement(
+                              TmuxCommands.newWindow(
+                                sessionName: session.name,
+                                windowName: name,
+                                background: true,
+                              ),
+                            );
+                          }
+                        },
                       ),
                     ],
                   ),
@@ -3475,12 +3699,16 @@ $metadataCommand
                       final window = session.windows[index];
                       final isActive =
                           window.index == tmuxState.activeWindowIndex;
+                      final canDelete = session.windows.length > 1;
+                      final flagBadge = _windowFlagBadge(window, isDark);
                       return ListTile(
                         leading: Icon(
                           Icons.tab,
-                          color: isActive
-                              ? colorScheme.primary
-                              : colorScheme.onSurface.withValues(alpha: 0.6),
+                          color: _windowIconColor(
+                            window,
+                            isActive,
+                            colorScheme,
+                          ),
                         ),
                         title: Text(
                           '${window.index}: ${window.name}',
@@ -3493,19 +3721,108 @@ $metadataCommand
                                 : FontWeight.normal,
                           ),
                         ),
-                        subtitle: Text(
-                          '${window.paneCount} panes',
-                          style: TextStyle(
-                            color: colorScheme.onSurface.withValues(
-                              alpha: 0.38,
+                        subtitle: Row(
+                          children: [
+                            Text(
+                              '${window.paneCount} panes',
+                              style: TextStyle(
+                                color: colorScheme.onSurface.withValues(
+                                  alpha: 0.38,
+                                ),
+                              ),
                             ),
-                          ),
+                            if (flagBadge != null) ...[
+                              const SizedBox(width: 8),
+                              flagBadge,
+                            ],
+                            if (window.isZoomed) ...[
+                              const SizedBox(width: 8),
+                              Icon(
+                                Icons.fullscreen,
+                                size: 14,
+                                color: colorScheme.onSurface.withValues(
+                                  alpha: 0.5,
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
-                        trailing: isActive
-                            ? Icon(Icons.check, color: colorScheme.primary)
-                            : null,
+                        trailing: PopupMenuButton<String>(
+                          icon: Icon(
+                            Icons.more_vert,
+                            size: 20,
+                            color: colorScheme.onSurface.withValues(alpha: 0.6),
+                          ),
+                          onSelected: (action) async {
+                            Navigator.pop(sheetContext);
+                            switch (action) {
+                              case 'rename':
+                                final newName = await showDialog<String>(
+                                  context: context,
+                                  builder: (_) => TmuxRenameDialog(
+                                    currentName: window.name,
+                                    itemType: 'Window',
+                                  ),
+                                );
+                                if (newName != null) {
+                                  await _execTmuxManagement(
+                                    TmuxCommands.renameWindow(
+                                      session.name,
+                                      window.index,
+                                      newName,
+                                    ),
+                                  );
+                                }
+                              case 'delete':
+                                final confirmed = await showDialog<bool>(
+                                  context: context,
+                                  builder: (_) => TmuxConfirmDeleteDialog(
+                                    itemType: 'Window',
+                                    itemName:
+                                        '${window.index}: ${window.name}',
+                                  ),
+                                );
+                                if (confirmed == true) {
+                                  await _execTmuxManagement(
+                                    TmuxCommands.killWindow(
+                                      session.name,
+                                      window.index,
+                                    ),
+                                  );
+                                }
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'rename',
+                              child: ListTile(
+                                leading: Icon(Icons.edit),
+                                title: Text('Rename'),
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                            ),
+                            if (canDelete)
+                              PopupMenuItem(
+                                value: 'delete',
+                                child: ListTile(
+                                  leading: Icon(
+                                    Icons.delete,
+                                    color: DesignColors.error,
+                                  ),
+                                  title: Text(
+                                    'Delete',
+                                    style:
+                                        TextStyle(color: DesignColors.error),
+                                  ),
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                              ),
+                          ],
+                        ),
                         onTap: () {
-                          Navigator.pop(context);
+                          Navigator.pop(sheetContext);
                           _selectWindow(session.name, window.index);
                         },
                       );
@@ -3524,7 +3841,8 @@ $metadataCommand
   /// Show pane selection dialog
   void _showPaneSelector(TmuxState tmuxState) {
     final window = tmuxState.activeWindow;
-    if (window == null) return;
+    final session = tmuxState.activeSession;
+    if (window == null || session == null) return;
 
     showModalBottomSheet(
       context: context,
@@ -3537,6 +3855,9 @@ $metadataCommand
       builder: (sheetContext) {
         final colorScheme = Theme.of(sheetContext).colorScheme;
         final maxHeight = MediaQuery.of(sheetContext).size.height * 0.7;
+        final activePaneId = tmuxState.activePaneId;
+        final layoutTarget =
+            '${session.name}:${window.index}';
         return SafeArea(
           child: ConstrainedBox(
             constraints: BoxConstraints(maxHeight: maxHeight),
@@ -3544,18 +3865,151 @@ $metadataCommand
               mainAxisSize: MainAxisSize.min,
               children: [
                 Padding(
-                  padding: const EdgeInsets.all(16),
+                  padding: const EdgeInsets.only(
+                    left: 16,
+                    top: 16,
+                    bottom: 16,
+                    right: 4,
+                  ),
                   child: Row(
                     children: [
                       Icon(Icons.terminal, color: colorScheme.primary),
                       const SizedBox(width: 8),
-                      Text(
-                        'Select Pane',
-                        style: GoogleFonts.spaceGrotesk(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: colorScheme.onSurface,
+                      Expanded(
+                        child: Text(
+                          'Select Pane',
+                          style: GoogleFonts.spaceGrotesk(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            color: colorScheme.onSurface,
+                          ),
                         ),
+                      ),
+                      PopupMenuButton<String>(
+                        icon: const Icon(Icons.add),
+                        tooltip: 'Split / Layout',
+                        onSelected: (action) async {
+                          Navigator.pop(sheetContext);
+                          switch (action) {
+                            case 'split_h':
+                              if (activePaneId != null) {
+                                await _execTmuxManagement(
+                                  TmuxCommands.splitWindowHorizontal(
+                                    target: activePaneId,
+                                  ),
+                                );
+                              }
+                            case 'split_v':
+                              if (activePaneId != null) {
+                                await _execTmuxManagement(
+                                  TmuxCommands.splitWindowVertical(
+                                    target: activePaneId,
+                                  ),
+                                );
+                              }
+                            case 'layout_even_h':
+                              await _execTmuxManagement(
+                                TmuxCommands.selectLayout(
+                                  layoutTarget,
+                                  TmuxLayout.evenHorizontal,
+                                ),
+                              );
+                            case 'layout_even_v':
+                              await _execTmuxManagement(
+                                TmuxCommands.selectLayout(
+                                  layoutTarget,
+                                  TmuxLayout.evenVertical,
+                                ),
+                              );
+                            case 'layout_main_h':
+                              await _execTmuxManagement(
+                                TmuxCommands.selectLayout(
+                                  layoutTarget,
+                                  TmuxLayout.mainHorizontal,
+                                ),
+                              );
+                            case 'layout_main_v':
+                              await _execTmuxManagement(
+                                TmuxCommands.selectLayout(
+                                  layoutTarget,
+                                  TmuxLayout.mainVertical,
+                                ),
+                              );
+                            case 'layout_tiled':
+                              await _execTmuxManagement(
+                                TmuxCommands.selectLayout(
+                                  layoutTarget,
+                                  TmuxLayout.tiled,
+                                ),
+                              );
+                          }
+                        },
+                        itemBuilder: (_) => [
+                          const PopupMenuItem(
+                            value: 'split_h',
+                            child: ListTile(
+                              leading: Icon(Icons.vertical_split),
+                              title: Text('Split Horizontal'),
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                          const PopupMenuItem(
+                            value: 'split_v',
+                            child: ListTile(
+                              leading: Icon(Icons.horizontal_split),
+                              title: Text('Split Vertical'),
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                          const PopupMenuDivider(),
+                          const PopupMenuItem(
+                            value: 'layout_even_h',
+                            child: ListTile(
+                              leading: Icon(Icons.view_column),
+                              title: Text('Even Horizontal'),
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                          const PopupMenuItem(
+                            value: 'layout_even_v',
+                            child: ListTile(
+                              leading: Icon(Icons.view_stream),
+                              title: Text('Even Vertical'),
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                          const PopupMenuItem(
+                            value: 'layout_main_h',
+                            child: ListTile(
+                              leading: Icon(Icons.vertical_align_top),
+                              title: Text('Main Horizontal'),
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                          const PopupMenuItem(
+                            value: 'layout_main_v',
+                            child: ListTile(
+                              leading: Icon(Icons.align_horizontal_left),
+                              title: Text('Main Vertical'),
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                          const PopupMenuItem(
+                            value: 'layout_tiled',
+                            child: ListTile(
+                              leading: Icon(Icons.grid_view),
+                              title: Text('Tiled'),
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -3580,6 +4034,7 @@ $metadataCommand
                     itemBuilder: (context, index) {
                       final pane = window.panes[index];
                       final isActive = pane.id == tmuxState.activePaneId;
+                      final canDelete = window.panes.length > 1;
                       // Prioritize title display, then command name, then Pane index
                       final paneTitle = pane.title?.isNotEmpty == true
                           ? pane.title!
@@ -3637,11 +4092,65 @@ $metadataCommand
                             ),
                           ),
                         ),
-                        trailing: isActive
-                            ? Icon(Icons.check, color: colorScheme.primary)
-                            : null,
+                        trailing: PopupMenuButton<String>(
+                          icon: Icon(
+                            Icons.more_vert,
+                            size: 20,
+                            color: colorScheme.onSurface.withValues(alpha: 0.6),
+                          ),
+                          onSelected: (action) async {
+                            Navigator.pop(sheetContext);
+                            switch (action) {
+                              case 'zoom':
+                                await _execTmuxManagement(
+                                  TmuxCommands.resizePane(pane.id),
+                                );
+                              case 'delete':
+                                final confirmed = await showDialog<bool>(
+                                  context: context,
+                                  builder: (_) => TmuxConfirmDeleteDialog(
+                                    itemType: 'Pane',
+                                    itemName: paneTitle,
+                                  ),
+                                );
+                                if (confirmed == true) {
+                                  await _execTmuxManagement(
+                                    TmuxCommands.killPane(pane.id),
+                                  );
+                                }
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'zoom',
+                              child: ListTile(
+                                leading: Icon(Icons.fullscreen),
+                                title: Text('Toggle Zoom'),
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                              ),
+                            ),
+                            if (canDelete)
+                              PopupMenuItem(
+                                value: 'delete',
+                                child: ListTile(
+                                  leading: Icon(
+                                    Icons.delete,
+                                    color: DesignColors.error,
+                                  ),
+                                  title: Text(
+                                    'Kill Pane',
+                                    style:
+                                        TextStyle(color: DesignColors.error),
+                                  ),
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                ),
+                              ),
+                          ],
+                        ),
                         onTap: () {
-                          Navigator.pop(context);
+                          Navigator.pop(sheetContext);
                           _selectPane(pane.id);
                         },
                       );
