@@ -1669,7 +1669,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     if (!mounted) return;
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
       SnackBar(
         content: Text(
           'Bell in window ${bellWindow.index}: ${bellWindow.name}',
@@ -1679,9 +1680,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           textColor: Colors.white,
           onPressed: () {
             _lastBellWindowIndex = null;
+            messenger.hideCurrentSnackBar();
             _selectWindow(session.name, bellWindow!.index);
           },
         ),
+        dismissDirection: DismissDirection.horizontal,
+        showCloseIcon: true,
+        closeIconColor: Colors.white,
         duration: const Duration(seconds: 5),
         behavior: SnackBarBehavior.floating,
       ),
@@ -3006,6 +3011,7 @@ $metadataCommand
     if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
     _lastBellWindowIndex = null;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
     _resetTransientTerminalUiBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
