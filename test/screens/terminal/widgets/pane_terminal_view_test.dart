@@ -136,6 +136,58 @@ void main() {
       expect(paneKey.currentState?.shouldAutoFollow, isTrue);
     });
 
+    testWidgets('disables on-screen keyboard when scrolled into history', (
+      tester,
+    ) async {
+      final terminal = Terminal(maxLines: 200, reflowEnabled: false);
+      final paneKey = GlobalKey<PaneTerminalViewState>();
+      final verticalScrollController = ScrollController();
+
+      for (var index = 0; index < 80; index += 1) {
+        terminal.write('line $index\r\n');
+      }
+
+      await tester.pumpWidget(
+        buildHarness(
+          paneWidth: 80,
+          paneHeight: 24,
+          terminal: terminal,
+          paneKey: paneKey,
+          verticalScrollController: verticalScrollController,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // At live tail: keyboard should be enabled
+      var terminalView = tester.widget<TerminalView>(
+        find.byType(TerminalView),
+      );
+      expect(terminalView.hardwareKeyboardOnly, isFalse);
+
+      // Scroll up into history
+      await tester.dragFrom(
+        tester.getCenter(find.byType(PaneTerminalView)),
+        const Offset(0, 140),
+      );
+      await tester.pumpAndSettle();
+
+      // In history: keyboard should be disabled
+      terminalView = tester.widget<TerminalView>(
+        find.byType(TerminalView),
+      );
+      expect(terminalView.hardwareKeyboardOnly, isTrue);
+
+      // Scroll back to bottom
+      paneKey.currentState?.scrollToBottom();
+      await tester.pumpAndSettle();
+
+      // Back at live tail: keyboard should be enabled again
+      terminalView = tester.widget<TerminalView>(
+        find.byType(TerminalView),
+      );
+      expect(terminalView.hardwareKeyboardOnly, isFalse);
+    });
+
     testWidgets('captures and restores viewport state', (tester) async {
       final terminal = Terminal(maxLines: 300, reflowEnabled: false);
       final paneKey = GlobalKey<PaneTerminalViewState>();

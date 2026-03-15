@@ -362,7 +362,9 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     if (_followBottom == value) {
       return;
     }
-    _followBottom = value;
+    setState(() {
+      _followBottom = value;
+    });
     if (notify) {
       widget.onFollowBottomChanged?.call(value);
     }
