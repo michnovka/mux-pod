@@ -121,6 +121,13 @@ class SshNotifier extends Notifier<SshState> {
     // Monitor network state
     _startNetworkMonitoring();
 
+    // Propagate keep-alive timeout changes to the live client
+    ref.listen<AppSettings>(settingsProvider, (previous, next) {
+      if (previous?.keepAliveTimeoutSeconds != next.keepAliveTimeoutSeconds) {
+        _client?.keepAliveTimeoutSeconds = next.keepAliveTimeoutSeconds;
+      }
+    });
+
     // Register cleanup
     ref.onDispose(() {
       _reconnectGeneration++;
