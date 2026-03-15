@@ -35,6 +35,7 @@ import '../../theme/design_colors.dart';
 import '../../widgets/special_keys_bar.dart';
 import '../../providers/terminal_display_provider.dart';
 import '../settings/settings_screen.dart';
+import 'terminal_scroll_policy.dart';
 import 'widgets/pane_terminal_view.dart';
 
 /// Terminal mode used by the mobile UI.
@@ -934,6 +935,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _terminalMode != TerminalMode.normal) {
+        return;
+      }
+
+      if (_terminalScrollController.shouldPreserveTopAnchorForShortContent) {
         return;
       }
 
@@ -4522,6 +4527,20 @@ class _StableScrollController extends ScrollController {
   /// have fit without the keyboard.
   double viewportShrinkBudget = 0;
 
+  bool get shouldPreserveTopAnchorForShortContent {
+    if (!hasClients) {
+      return false;
+    }
+
+    final position = this.position;
+    return TerminalScrollPolicy.shouldSuppressStickToBottom(
+      suppressScrollToMax: suppressScrollToMax,
+      pixels: position.pixels,
+      maxScrollExtent: position.maxScrollExtent,
+      viewportShrinkBudget: viewportShrinkBudget,
+    );
+  }
+
   void armUnsuppressedStickToBottom([int passes = 2]) {
     if (passes <= 0) {
       return;
@@ -4564,18 +4583,13 @@ class _StableScrollPosition extends ScrollPositionWithSingleContext {
 
   final _StableScrollController controller;
 
-  /// Threshold in pixels — positions within this range from the top are
-  /// considered "at the top".
-  static const double _nearTopThreshold = 2.0;
-
   bool get _shouldSuppress {
-    if (!controller.suppressScrollToMax || pixels > _nearTopThreshold) {
-      return false;
-    }
-    // Only suppress if the content would have fit in the full viewport
-    // (before the keyboard appeared).  For genuinely long content
-    // maxScrollExtent far exceeds the viewport shrink budget.
-    return maxScrollExtent <= controller.viewportShrinkBudget;
+    return TerminalScrollPolicy.shouldSuppressStickToBottom(
+      suppressScrollToMax: controller.suppressScrollToMax,
+      pixels: pixels,
+      maxScrollExtent: maxScrollExtent,
+      viewportShrinkBudget: controller.viewportShrinkBudget,
+    );
   }
 
   @override
