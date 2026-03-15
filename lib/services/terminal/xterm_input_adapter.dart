@@ -6,6 +6,8 @@ import 'package:xterm/xterm.dart';
 /// encoding, so the rest of the app can keep using labels such as `Enter`,
 /// `C-c`, or `S-Enter` without sending tmux-format commands directly.
 class XtermInputAdapter {
+  static final RegExp _singleAlphaPattern = RegExp(r'^[a-zA-Z]$');
+
   static final Map<String, TerminalKey> _namedKeys = {
     'Enter': TerminalKey.enter,
     'Escape': TerminalKey.escape,
@@ -280,7 +282,7 @@ class XtermInputAdapter {
       '/': '?',
     };
 
-    if (RegExp(r'^[a-zA-Z]$').hasMatch(baseKey)) {
+    if (_singleAlphaPattern.hasMatch(baseKey)) {
       return baseKey.toUpperCase();
     }
 

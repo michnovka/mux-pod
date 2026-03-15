@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:developer' as developer;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -187,9 +188,12 @@ class SettingsNotifier extends Notifier<AppSettings> {
           },
         );
         return loaded.value;
-      } catch (_) {
+      } catch (e) {
         if (!_hasLegacySettingsKeys(prefs)) {
           rethrow;
+        }
+        if (kDebugMode) {
+          debugPrint('[SettingsNotifier] versioned JSON decode failed, trying legacy: $e');
         }
       }
     }

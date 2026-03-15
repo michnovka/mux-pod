@@ -85,9 +85,10 @@ class TmuxControlClient {
         'refresh-client -C ${cols}x$rows',
         timeout: const Duration(seconds: 1),
       );
-    } catch (_) {
+    } catch (e) {
       // Best effort: the PTY size is already correct, and some older tmux
       // setups may reject explicit refresh-client sizing.
+      assert(() { debugPrint('TmuxControlClient.start refresh-client: $e'); return true; }());
     }
   }
 

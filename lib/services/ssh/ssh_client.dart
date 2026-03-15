@@ -148,6 +148,7 @@ enum SshConnectionState { disconnected, connecting, connected, error }
 /// Wraps dartssh2 and manages SSH connections.
 class SshClient {
   static final RegExp _safeTmuxPathPattern = RegExp(r'^/[A-Za-z0-9._/-]+$');
+  static final RegExp _tmuxWordPattern = RegExp(r'(^|[\s;|&(])tmux(?=\s)', multiLine: true);
 
   SSHClient? _client;
   SSHSession? _session;
@@ -534,8 +535,9 @@ class SshClient {
         _tmuxPath = sanitizedPath;
         return;
       }
-    } catch (_) {
+    } catch (e) {
       // Fall back to known tmux locations below.
+      assert(() { debugPrint('SshClient._detectTmuxPath login shell: $e'); return true; }());
     }
 
     // Step 2: Fallback to known paths
@@ -565,22 +567,32 @@ class SshClient {
           _tmuxPath = candidate;
           return;
         }
-      } catch (_) {
+      } catch (e) {
         // Try the next candidate path.
+        assert(() { debugPrint('SshClient._detectTmuxPath candidate $candidate: $e'); return true; }());
       }
     }
   }
 
   /// Replace `tmux` in command with detected absolute path
   String _resolveTmuxCommand(String command) {
-    if (_tmuxPath == null) {
-      return command;
-    }
-    final resolved = command.replaceAllMapped(
-      RegExp(r'(^|;\s*)tmux\b'),
+    if (_tmuxPath == null) return command;
+    return command.replaceAllMapped(
+      _tmuxWordPattern,
       (m) => '${m[1]}$_tmuxPath',
     );
-    return resolved;
+  }
+
+  /// Resolve `tmux` words in [command] using the given [tmuxPath].
+  ///
+  /// Exposed for unit testing the replacement logic without requiring
+  /// a live SSH connection.
+  @visibleForTesting
+  static String resolveForTesting(String command, String tmuxPath) {
+    return command.replaceAllMapped(
+      _tmuxWordPattern,
+      (m) => '${m[1]}$tmuxPath',
+    );
   }
 
   @visibleForTesting
@@ -635,8 +647,9 @@ class SshClient {
     }
     try {
       await cleanup();
-    } catch (_) {
+    } catch (e) {
       // Ignore cleanup races for partially-initialized resources.
+      assert(() { debugPrint('SshClient._disposeQuietly: $e'); return true; }());
     }
   }
 
@@ -646,8 +659,9 @@ class SshClient {
     }
     try {
       close();
-    } catch (_) {
+    } catch (e) {
       // Ignore cleanup races for partially-initialized resources.
+      assert(() { debugPrint('SshClient._closeQuietly: $e'); return true; }());
     }
   }
 
@@ -897,8 +911,9 @@ class SshClient {
     await stderrSubscription?.cancel();
     try {
       session?.close();
-    } catch (_) {
+    } catch (e) {
       // Ignore races with remote shutdown.
+      assert(() { debugPrint('SshClient.stopStreamingShell: $e'); return true; }());
     }
   }
 
@@ -1040,8 +1055,11 @@ class SshClient {
           if (_controlShell != null && _controlShell!.isStarted) {
             return await _controlShell!.exec(resolvedCommand, timeout: timeout);
           }
-        } catch (_) {
+        } catch (e) {
           // Fall back to traditional exec() if restart also fails
+          if (kDebugMode) {
+            debugPrint('[SshClient] control shell restart failed: $e');
+          }
           return exec(resolvedCommand, timeout: timeout);
         }
       }
@@ -1087,7 +1105,10 @@ class SshClient {
           if (_inputShell != null && _inputShell!.isStarted) {
             return await _inputShell!.exec(resolvedCommand, timeout: timeout);
           }
-        } catch (_) {
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('[SshClient] input shell restart failed: $e');
+          }
           return execPersistent(resolvedCommand, timeout: timeout);
         }
       }
@@ -1109,7 +1130,10 @@ class SshClient {
         }
         return resolved;
       });
-    } catch (_) {
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[SshClient] SFTP home resolution failed, falling back: $e');
+      }
       final resolved = await execPersistent(
         r'printf %s "$HOME"',
         timeout: const Duration(seconds: 2),
