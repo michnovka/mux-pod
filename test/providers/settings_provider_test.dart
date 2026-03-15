@@ -7,7 +7,6 @@ void main() {
       darkMode: false,
       fontSize: 18.0,
       fontFamily: 'HackGen Console',
-      requireBiometricAuth: true,
       enableNotifications: false,
       enableVibration: false,
       keepScreenOn: false,
@@ -24,7 +23,6 @@ void main() {
     expect(restored.darkMode, settings.darkMode);
     expect(restored.fontSize, settings.fontSize);
     expect(restored.fontFamily, settings.fontFamily);
-    expect(restored.requireBiometricAuth, settings.requireBiometricAuth);
     expect(restored.enableNotifications, settings.enableNotifications);
     expect(restored.enableVibration, settings.enableVibration);
     expect(restored.keepScreenOn, settings.keepScreenOn);

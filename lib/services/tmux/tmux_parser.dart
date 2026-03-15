@@ -14,9 +14,13 @@ class TmuxParser {
   ///
   /// Supported format: `#{session_name}\t#{session_created}\t#{session_attached}\t#{session_windows}\t#{session_id}`
   static List<TmuxSession> parseSessions(String output, {String delimiter = defaultDelimiter}) {
-    debugPrint('parseSessions: raw output="${output.trim()}"');
+    if (kDebugMode) {
+      debugPrint('parseSessions: raw output length=${output.trim().length}');
+    }
     if (!isServerRunning(output)) {
-      debugPrint('parseSessions: isServerRunning=false, returning empty');
+      if (kDebugMode) {
+        debugPrint('parseSessions: isServerRunning=false, returning empty');
+      }
       return [];
     }
 
@@ -40,13 +44,17 @@ class TmuxParser {
     final parts = line.split(delimiter);
     // Lines without delimiters are not tmux output (e.g. shell errors)
     if (parts.length < 2) {
-      debugPrint('parseSessionLine: skipping line with ${parts.length} fields (expected ≥2): "$line"');
+      if (kDebugMode) {
+        debugPrint('parseSessionLine: skipping line with ${parts.length} fields (expected ≥2): "$line"');
+      }
       return null;
     }
 
     final name = parts[0];
     if (name.isEmpty) {
-      debugPrint('parseSessionLine: skipping line with empty session name: "$line"');
+      if (kDebugMode) {
+        debugPrint('parseSessionLine: skipping line with empty session name: "$line"');
+      }
       return null;
     }
 
@@ -109,13 +117,17 @@ class TmuxParser {
   static TmuxWindow? parseWindowLine(String line, {String delimiter = defaultDelimiter}) {
     final parts = line.split(delimiter);
     if (parts.length < 2) {
-      debugPrint('parseWindowLine: skipping line with ${parts.length} fields (expected ≥2): "$line"');
+      if (kDebugMode) {
+        debugPrint('parseWindowLine: skipping line with ${parts.length} fields (expected ≥2): "$line"');
+      }
       return null;
     }
 
     final index = int.tryParse(parts[0]);
     if (index == null) {
-      debugPrint('parseWindowLine: skipping line with non-integer index "${parts[0]}": "$line"');
+      if (kDebugMode) {
+        debugPrint('parseWindowLine: skipping line with non-integer index "${parts[0]}": "$line"');
+      }
       return null;
     }
 
@@ -178,19 +190,25 @@ class TmuxParser {
   static TmuxPane? parsePaneLine(String line, {String delimiter = defaultDelimiter}) {
     final parts = line.split(delimiter);
     if (parts.length < 2) {
-      debugPrint('parsePaneLine: skipping line with ${parts.length} fields (expected ≥2): "$line"');
+      if (kDebugMode) {
+        debugPrint('parsePaneLine: skipping line with ${parts.length} fields (expected ≥2): "$line"');
+      }
       return null;
     }
 
     final index = int.tryParse(parts[0]);
     if (index == null) {
-      debugPrint('parsePaneLine: skipping line with non-integer index "${parts[0]}": "$line"');
+      if (kDebugMode) {
+        debugPrint('parsePaneLine: skipping line with non-integer index "${parts[0]}": "$line"');
+      }
       return null;
     }
 
     final id = parts[1];
     if (id.isEmpty) {
-      debugPrint('parsePaneLine: skipping line with empty pane id: "$line"');
+      if (kDebugMode) {
+        debugPrint('parsePaneLine: skipping line with empty pane id: "$line"');
+      }
       return null;
     }
 
@@ -264,9 +282,13 @@ class TmuxParser {
   ///
   /// Builds a complete tree from `tmux list-panes -a -F "..."` output
   static List<TmuxSession> parseFullTree(String output, {String delimiter = defaultDelimiter}) {
-    debugPrint('parseFullTree: raw output="${output.trim()}"');
+    if (kDebugMode) {
+      debugPrint('parseFullTree: raw output length=${output.trim().length}');
+    }
     if (!isServerRunning(output)) {
-      debugPrint('parseFullTree: isServerRunning=false, returning empty');
+      if (kDebugMode) {
+        debugPrint('parseFullTree: isServerRunning=false, returning empty');
+      }
       return [];
     }
 
@@ -279,7 +301,9 @@ class TmuxParser {
 
       final parts = trimmed.split(delimiter);
       if (parts.length < 10) {
-        debugPrint('parseFullTree: skipping line with ${parts.length} fields (expected ≥10): "$trimmed"');
+        if (kDebugMode) {
+          debugPrint('parseFullTree: skipping line with ${parts.length} fields (expected ≥10): "$trimmed"');
+        }
         continue;
       }
 
