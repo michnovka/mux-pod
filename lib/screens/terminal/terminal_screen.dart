@@ -302,6 +302,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _isConnecting = false;
   bool _isSwitchingPane = false;
   bool _showSwitchingOverlay = false;
+  int? _lastBellWindowIndex;
   String? _connectionError;
   SshState _sshState = const SshState();
 
@@ -1560,8 +1561,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       return;
     }
 
-    final activePaneId = ref.read(tmuxProvider).activePaneId;
+    final tmuxState = ref.read(tmuxProvider);
+    final activePaneId = tmuxState.activePaneId;
     if (activePaneId != paneId) {
+      // Check for bell character in output from non-active panes
+      if (data.contains('\x07')) {
+        _handleBellFromPane(paneId, tmuxState);
+      }
       return;
     }
 
@@ -1612,7 +1618,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       case 'window-pane-changed':
         _scheduleControlSync(refreshTree: true, resyncPane: true);
         break;
-      case 'alert':
       case 'session-window-changed':
       case 'sessions-changed':
       case 'unlinked-window-add':
@@ -1625,6 +1630,54 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         _handleControlClientClosed();
         break;
     }
+  }
+
+  /// Handle a bell character received from a non-active pane.
+  ///
+  /// Shows a SnackBar prompting the user to switch to the window that
+  /// triggered the bell.
+  void _handleBellFromPane(String paneId, TmuxState tmuxState) {
+    // Find which window contains this pane
+    final session = tmuxState.activeSession;
+    if (session == null) return;
+
+    TmuxWindow? bellWindow;
+    for (final window in session.windows) {
+      for (final pane in window.panes) {
+        if (pane.id == paneId) {
+          bellWindow = window;
+          break;
+        }
+      }
+      if (bellWindow != null) break;
+    }
+    if (bellWindow == null) return;
+
+    // Don't show duplicate notifications for the same window
+    if (_lastBellWindowIndex == bellWindow.index) return;
+    _lastBellWindowIndex = bellWindow.index;
+
+    // Refresh tree to pick up the bell flag
+    _scheduleControlSync(refreshTree: true);
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Bell in window ${bellWindow.index}: ${bellWindow.name}',
+        ),
+        action: SnackBarAction(
+          label: 'Go',
+          onPressed: () {
+            _lastBellWindowIndex = null;
+            _selectWindow(session.name, bellWindow!.index);
+          },
+        ),
+        duration: const Duration(seconds: 5),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   void _handleControlClientError(Object error) {
@@ -2944,6 +2997,7 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
+    _lastBellWindowIndex = null;
     _resetTransientTerminalUiBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
       ref.read(tmuxProvider),
@@ -3701,10 +3755,30 @@ $metadataCommand
     );
   }
 
-  /// Show window selection dialog
-  void _showWindowSelector(TmuxState tmuxState) {
+  /// Show window selection dialog.
+  ///
+  /// Refreshes the session tree first so window flags (bell, activity,
+  /// silence) are up-to-date when the modal opens.
+  Future<void> _showWindowSelector(TmuxState tmuxState) async {
     final session = tmuxState.activeSession;
     if (session == null) return;
+
+    // Quick tree refresh so flags are current
+    final sshClient = ref.read(sshProvider.notifier).client;
+    if (sshClient != null && sshClient.isConnected) {
+      try {
+        final output =
+            await sshClient.execPersistent(TmuxCommands.listAllPanes());
+        if (mounted && !_isDisposed) {
+          ref.read(tmuxProvider.notifier).parseAndUpdateFullTree(output);
+        }
+      } catch (_) {}
+    }
+    if (!mounted || _isDisposed) return;
+
+    // Re-read updated state
+    final freshState = ref.read(tmuxProvider);
+    final freshSession = freshState.activeSession ?? session;
 
     showModalBottomSheet(
       context: context,
@@ -3754,7 +3828,7 @@ $metadataCommand
                             context: context,
                             builder: (_) => TmuxNewItemDialog(
                               itemType: 'Window',
-                              existingNames: session.windows
+                              existingNames: freshSession.windows
                                   .map((w) => w.name)
                                   .toList(),
                             ),
@@ -3762,7 +3836,7 @@ $metadataCommand
                           if (name != null) {
                             final ok = await _execTmuxAndRefreshTree(
                               TmuxCommands.newWindow(
-                                sessionName: session.name,
+                                sessionName: freshSession.name,
                                 windowName: name,
                                 background: true,
                               ),
@@ -3771,14 +3845,14 @@ $metadataCommand
                               final updated = ref
                                   .read(tmuxProvider)
                                   .sessions
-                                  .where((s) => s.name == session.name)
+                                  .where((s) => s.name == freshSession.name)
                                   .firstOrNull;
                               final newWindow = updated?.windows
                                   .where((w) => w.name == name)
                                   .lastOrNull;
                               if (newWindow != null) {
                                 _selectWindow(
-                                  session.name,
+                                  freshSession.name,
                                   newWindow.index,
                                 );
                               }
@@ -3793,12 +3867,12 @@ $metadataCommand
                 Flexible(
                   child: ListView.builder(
                     shrinkWrap: true,
-                    itemCount: session.windows.length,
+                    itemCount: freshSession.windows.length,
                     itemBuilder: (context, index) {
-                      final window = session.windows[index];
+                      final window = freshSession.windows[index];
                       final isActive =
-                          window.index == tmuxState.activeWindowIndex;
-                      final canDelete = session.windows.length > 1;
+                          window.index == freshState.activeWindowIndex;
+                      final canDelete = freshSession.windows.length > 1;
                       final flagBadge = _windowFlagBadge(window, isDark);
                       return ListTile(
                         leading: Icon(
@@ -3866,7 +3940,7 @@ $metadataCommand
                                 if (newName != null) {
                                   await _execTmuxManagement(
                                     TmuxCommands.renameWindow(
-                                      session.name,
+                                      freshSession.name,
                                       window.index,
                                       newName,
                                     ),
@@ -3884,7 +3958,7 @@ $metadataCommand
                                 if (confirmed == true) {
                                   await _execTmuxManagement(
                                     TmuxCommands.killWindow(
-                                      session.name,
+                                      freshSession.name,
                                       window.index,
                                     ),
                                   );
@@ -3922,7 +3996,7 @@ $metadataCommand
                         ),
                         onTap: () {
                           Navigator.pop(sheetContext);
-                          _selectWindow(session.name, window.index);
+                          _selectWindow(freshSession.name, window.index);
                         },
                       );
                     },
