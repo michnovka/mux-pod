@@ -1,7 +1,9 @@
-import 'dart:convert';
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../storage/versioned_json_storage.dart';
 
 /// Result of looking up a host in the known hosts store.
 enum HostKeyStatus { trusted, unknown, changed }
@@ -19,10 +21,10 @@ class KnownHostEntry {
   });
 
   Map<String, dynamic> toJson() => {
-        'keyType': keyType,
-        'fingerprint': fingerprint,
-        'addedAt': addedAt.toIso8601String(),
-      };
+    'keyType': keyType,
+    'fingerprint': fingerprint,
+    'addedAt': addedAt.toIso8601String(),
+  };
 
   factory KnownHostEntry.fromJson(Map<String, dynamic> json) {
     return KnownHostEntry(
@@ -46,9 +48,7 @@ class KnownHostsService {
 
   /// Convert raw MD5 bytes to colon-separated hex string.
   static String formatFingerprint(Uint8List rawBytes) {
-    return rawBytes
-        .map((b) => b.toRadixString(16).padLeft(2, '0'))
-        .join(':');
+    return rawBytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':');
   }
 
   /// Build a normalized storage key for a host:port pair.
@@ -117,22 +117,36 @@ class KnownHostsService {
     if (raw == null) return {};
 
     try {
-      final decoded = jsonDecode(raw) as Map<String, dynamic>;
-      return decoded.map(
-        (key, value) => MapEntry(
-          key,
-          KnownHostEntry.fromJson(value as Map<String, dynamic>),
-        ),
+      final loaded = decodeVersionedJsonEnvelope<Map<String, KnownHostEntry>>(
+        raw: raw,
+        storageKey: _storageKey,
+        versionReaders: {
+          sharedPreferencesSchemaVersion1: (data) =>
+              _decodeEntries(data as Map<String, dynamic>),
+        },
+        legacyReader: (legacy) =>
+            _decodeEntries(legacy as Map<String, dynamic>),
       );
+      if (loaded.usedLegacyFormat) {
+        unawaited(_saveEntries(loaded.value));
+      }
+      return loaded.value;
     } catch (_) {
       return {};
     }
   }
 
   Future<void> _saveEntries(Map<String, KnownHostEntry> entries) async {
-    final encoded = jsonEncode(
+    final encoded = encodeVersionedJsonEnvelope(
       entries.map((key, entry) => MapEntry(key, entry.toJson())),
     );
     await _prefs.setString(_storageKey, encoded);
+  }
+
+  Map<String, KnownHostEntry> _decodeEntries(Map<String, dynamic> decoded) {
+    return decoded.map(
+      (key, value) =>
+          MapEntry(key, KnownHostEntry.fromJson(value as Map<String, dynamic>)),
+    );
   }
 }

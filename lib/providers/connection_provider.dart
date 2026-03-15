@@ -1,10 +1,10 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:developer' as developer;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/storage/versioned_json_storage.dart';
 import 'shared_preferences_provider.dart';
 
 /// Connection settings
@@ -154,19 +154,36 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
         return const ConnectionsState();
       }
 
-      final jsonList = jsonDecode(jsonString) as List<dynamic>;
-      final connections = jsonList
-          .map((json) => Connection.fromJson(json as Map<String, dynamic>))
-          .toList();
-
+      final loaded = decodeVersionedJsonEnvelope<List<Connection>>(
+        raw: jsonString,
+        storageKey: _storageKey,
+        versionReaders: {
+          sharedPreferencesSchemaVersion1: (data) =>
+              _decodeConnectionsList(data),
+        },
+        legacyReader: (legacy) => _decodeConnectionsList(legacy),
+      );
+      final connections = loaded.value;
+      if (loaded.usedLegacyFormat) {
+        unawaited(_persistConnectionList(prefs, connections));
+      }
       developer.log(
-        'Loaded ${connections.length} connections from storage',
+        loaded.usedLegacyFormat
+            ? 'Loaded ${connections.length} legacy connections from storage'
+            : 'Loaded ${connections.length} versioned connections from storage',
         name: 'ConnectionsProvider',
       );
       return ConnectionsState(connections: connections);
     } catch (e) {
       return ConnectionsState(error: e.toString());
     }
+  }
+
+  List<Connection> _decodeConnectionsList(Object? data) {
+    final jsonList = data as List<dynamic>;
+    return jsonList
+        .map((json) => Connection.fromJson(json as Map<String, dynamic>))
+        .toList();
   }
 
   Future<SharedPreferences> _getPrefs() async {
@@ -206,9 +223,15 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
   Future<void> _waitForInitialLoad() => _initialLoadCompleter.future;
 
   Future<void> _saveConnections() async {
-    final prefs = await _getPrefs();
-    final jsonList = state.connections.map((c) => c.toJson()).toList();
-    await prefs.setString(_storageKey, jsonEncode(jsonList));
+    await _persistConnectionList(await _getPrefs(), state.connections);
+  }
+
+  Future<void> _persistConnectionList(
+    SharedPreferences prefs,
+    List<Connection> connections,
+  ) async {
+    final jsonList = connections.map((c) => c.toJson()).toList();
+    await prefs.setString(_storageKey, encodeVersionedJsonEnvelope(jsonList));
   }
 
   /// Add a connection

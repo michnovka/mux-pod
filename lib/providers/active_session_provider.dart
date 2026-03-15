@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/storage/versioned_json_storage.dart';
 import '../services/tmux/tmux_parser.dart';
 import 'shared_preferences_provider.dart';
 
@@ -171,14 +171,30 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
         return const ActiveSessionsState();
       }
 
-      final jsonList = jsonDecode(jsonStr) as List<dynamic>;
-      final sessions = jsonList
-          .map((json) => ActiveSession.fromJson(json as Map<String, dynamic>))
-          .toList();
+      final loaded = decodeVersionedJsonEnvelope<List<ActiveSession>>(
+        raw: jsonStr,
+        storageKey: _storageKey,
+        versionReaders: {
+          sharedPreferencesSchemaVersion1: (data) =>
+              _decodeActiveSessionsList(data),
+        },
+        legacyReader: (legacy) => _decodeActiveSessionsList(legacy),
+      );
+      final sessions = loaded.value;
+      if (loaded.usedLegacyFormat) {
+        unawaited(_persistSessions(prefs, sessions));
+      }
       return ActiveSessionsState(sessions: sessions);
     } catch (e) {
       return const ActiveSessionsState();
     }
+  }
+
+  List<ActiveSession> _decodeActiveSessionsList(Object? data) {
+    final jsonList = data as List<dynamic>;
+    return jsonList
+        .map((json) => ActiveSession.fromJson(json as Map<String, dynamic>))
+        .toList();
   }
 
   Future<SharedPreferences> _getPrefs() async {
@@ -210,12 +226,18 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
   /// Save session information to storage
   Future<void> _saveToStorage() async {
     try {
-      final prefs = await _getPrefs();
-      final jsonList = state.sessions.map((s) => s.toJson()).toList();
-      await prefs.setString(_storageKey, jsonEncode(jsonList));
+      await _persistSessions(await _getPrefs(), state.sessions);
     } catch (e) {
       // Ignore save errors
     }
+  }
+
+  Future<void> _persistSessions(
+    SharedPreferences prefs,
+    List<ActiveSession> sessions,
+  ) async {
+    final jsonList = sessions.map((s) => s.toJson()).toList();
+    await prefs.setString(_storageKey, encodeVersionedJsonEnvelope(jsonList));
   }
 
   /// Add or update a session
@@ -378,8 +400,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     final sessions = state.sessions
         .where(
           (s) =>
-              !(s.connectionId == connectionId &&
-                  s.sessionName == sessionName),
+              !(s.connectionId == connectionId && s.sessionName == sessionName),
         )
         .toList();
     state = state.copyWith(sessions: sessions);

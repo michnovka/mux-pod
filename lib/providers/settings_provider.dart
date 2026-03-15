@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/storage/versioned_json_storage.dart';
 import 'shared_preferences_provider.dart';
 
 /// App settings
@@ -74,10 +76,47 @@ class AppSettings {
       invertPaneNavigation: invertPaneNavigation ?? this.invertPaneNavigation,
     );
   }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'darkMode': darkMode,
+      'fontSize': fontSize,
+      'fontFamily': fontFamily,
+      'requireBiometricAuth': requireBiometricAuth,
+      'enableNotifications': enableNotifications,
+      'enableVibration': enableVibration,
+      'keepScreenOn': keepScreenOn,
+      'scrollbackLines': scrollbackLines,
+      'minFontSize': minFontSize,
+      'autoFitEnabled': autoFitEnabled,
+      'directInputEnabled': directInputEnabled,
+      'showTerminalCursor': showTerminalCursor,
+      'invertPaneNavigation': invertPaneNavigation,
+    };
+  }
+
+  factory AppSettings.fromJson(Map<String, dynamic> json) {
+    return AppSettings(
+      darkMode: json['darkMode'] as bool? ?? true,
+      fontSize: (json['fontSize'] as num?)?.toDouble() ?? 14.0,
+      fontFamily: json['fontFamily'] as String? ?? 'JetBrains Mono',
+      requireBiometricAuth: json['requireBiometricAuth'] as bool? ?? false,
+      enableNotifications: json['enableNotifications'] as bool? ?? true,
+      enableVibration: json['enableVibration'] as bool? ?? true,
+      keepScreenOn: json['keepScreenOn'] as bool? ?? true,
+      scrollbackLines: json['scrollbackLines'] as int? ?? 10000,
+      minFontSize: (json['minFontSize'] as num?)?.toDouble() ?? 8.0,
+      autoFitEnabled: json['autoFitEnabled'] as bool? ?? true,
+      directInputEnabled: json['directInputEnabled'] as bool? ?? false,
+      showTerminalCursor: json['showTerminalCursor'] as bool? ?? true,
+      invertPaneNavigation: json['invertPaneNavigation'] as bool? ?? false,
+    );
+  }
 }
 
 /// Notifier that manages settings
 class SettingsNotifier extends Notifier<AppSettings> {
+  static const String _storageKey = 'settings';
   static const String _darkModeKey = 'settings_dark_mode';
   static const String _fontSizeKey = 'settings_font_size';
   static const String _fontFamilyKey = 'settings_font_family';
@@ -91,6 +130,21 @@ class SettingsNotifier extends Notifier<AppSettings> {
   static const String _directInputEnabledKey = 'settings_direct_input_enabled';
   static const String _showTerminalCursorKey = 'settings_show_terminal_cursor';
   static const String _invertPaneNavKey = 'settings_invert_pane_nav';
+  static const List<String> _legacySettingsKeys = [
+    _darkModeKey,
+    _fontSizeKey,
+    _fontFamilyKey,
+    _biometricKey,
+    _notificationsKey,
+    _vibrationKey,
+    _keepScreenOnKey,
+    _scrollbackKey,
+    _minFontSizeKey,
+    _autoFitEnabledKey,
+    _directInputEnabledKey,
+    _showTerminalCursorKey,
+    _invertPaneNavKey,
+  ];
   final Completer<void> _initialLoadCompleter = Completer<void>();
   SharedPreferences? _sharedPreferences;
 
@@ -98,7 +152,18 @@ class SettingsNotifier extends Notifier<AppSettings> {
   AppSettings build() {
     final prefs = _sharedPreferences = ref.read(sharedPreferencesProvider);
     if (prefs != null) {
-      final settings = _loadSettingsSync(prefs);
+      AppSettings settings;
+      try {
+        settings = _loadSettingsSync(prefs);
+      } catch (e, stackTrace) {
+        developer.log(
+          'Failed to load settings, using defaults: $e',
+          name: 'SettingsProvider',
+          error: e,
+          stackTrace: stackTrace,
+        );
+        settings = const AppSettings();
+      }
       if (!_initialLoadCompleter.isCompleted) {
         _initialLoadCompleter.complete();
       }
@@ -110,6 +175,33 @@ class SettingsNotifier extends Notifier<AppSettings> {
   }
 
   AppSettings _loadSettingsSync(SharedPreferences prefs) {
+    final jsonString = prefs.getString(_storageKey);
+    if (jsonString != null) {
+      try {
+        final loaded = decodeVersionedJsonEnvelope<AppSettings>(
+          raw: jsonString,
+          storageKey: _storageKey,
+          versionReaders: {
+            sharedPreferencesSchemaVersion1: (data) =>
+                AppSettings.fromJson(data as Map<String, dynamic>),
+          },
+        );
+        return loaded.value;
+      } catch (_) {
+        if (!_hasLegacySettingsKeys(prefs)) {
+          rethrow;
+        }
+      }
+    }
+
+    final settings = _loadLegacySettings(prefs);
+    if (_hasLegacySettingsKeys(prefs)) {
+      unawaited(_persistSettingsValue(prefs, settings));
+    }
+    return settings;
+  }
+
+  AppSettings _loadLegacySettings(SharedPreferences prefs) {
     return AppSettings(
       darkMode: prefs.getBool(_darkModeKey) ?? true,
       fontSize: prefs.getDouble(_fontSizeKey) ?? 14.0,
@@ -141,6 +233,14 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> _loadSettings() async {
     try {
       state = _loadSettingsSync(await _getPrefs());
+    } catch (e, stackTrace) {
+      developer.log(
+        'Failed to async-load settings, using defaults: $e',
+        name: 'SettingsProvider',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      state = const AppSettings();
     } finally {
       if (!_initialLoadCompleter.isCompleted) {
         _initialLoadCompleter.complete();
@@ -148,96 +248,111 @@ class SettingsNotifier extends Notifier<AppSettings> {
     }
   }
 
+  bool _hasLegacySettingsKeys(SharedPreferences prefs) {
+    for (final key in _legacySettingsKeys) {
+      if (prefs.containsKey(key)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   Future<void> _waitForInitialLoad() => _initialLoadCompleter.future;
 
-  Future<void> _saveSetting(String key, dynamic value) async {
-    final prefs = await _getPrefs();
-    if (value is bool) {
-      await prefs.setBool(key, value);
-    } else if (value is double) {
-      await prefs.setDouble(key, value);
-    } else if (value is int) {
-      await prefs.setInt(key, value);
-    } else if (value is String) {
-      await prefs.setString(key, value);
-    }
+  Future<void> _saveSettings() async {
+    await _persistSettingsValue(await _getPrefs(), state);
+  }
+
+  Future<void> _persistSettingsValue(
+    SharedPreferences prefs,
+    AppSettings settings,
+  ) async {
+    await prefs.setString(
+      _storageKey,
+      encodeVersionedJsonEnvelope(settings.toJson()),
+    );
+    await _removeLegacySettingsKeys(prefs);
+  }
+
+  Future<void> _removeLegacySettingsKeys(SharedPreferences prefs) async {
+    await Future.wait(_legacySettingsKeys.map(prefs.remove));
   }
 
   /// Set dark mode
   Future<void> setDarkMode(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(darkMode: value);
-    await _saveSetting(_darkModeKey, value);
+    await _saveSettings();
   }
 
   /// Set font size
   Future<void> setFontSize(double value) async {
     await _waitForInitialLoad();
     state = state.copyWith(fontSize: value);
-    await _saveSetting(_fontSizeKey, value);
+    await _saveSettings();
   }
 
   /// Set font family
   Future<void> setFontFamily(String value) async {
     await _waitForInitialLoad();
     state = state.copyWith(fontFamily: value);
-    await _saveSetting(_fontFamilyKey, value);
+    await _saveSettings();
   }
 
   /// Set biometric authentication requirement
   Future<void> setRequireBiometricAuth(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(requireBiometricAuth: value);
-    await _saveSetting(_biometricKey, value);
+    await _saveSettings();
   }
 
   /// Set notifications
   Future<void> setEnableNotifications(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(enableNotifications: value);
-    await _saveSetting(_notificationsKey, value);
+    await _saveSettings();
   }
 
   /// Set vibration
   Future<void> setEnableVibration(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(enableVibration: value);
-    await _saveSetting(_vibrationKey, value);
+    await _saveSettings();
   }
 
   /// Set keep screen on
   Future<void> setKeepScreenOn(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(keepScreenOn: value);
-    await _saveSetting(_keepScreenOnKey, value);
+    await _saveSettings();
   }
 
   /// Set scrollback line count
   Future<void> setScrollbackLines(int value) async {
     await _waitForInitialLoad();
     state = state.copyWith(scrollbackLines: value);
-    await _saveSetting(_scrollbackKey, value);
+    await _saveSettings();
   }
 
   /// Set minimum font size
   Future<void> setMinFontSize(double value) async {
     await _waitForInitialLoad();
     state = state.copyWith(minFontSize: value);
-    await _saveSetting(_minFontSizeKey, value);
+    await _saveSettings();
   }
 
   /// Set auto-fit
   Future<void> setAutoFitEnabled(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(autoFitEnabled: value);
-    await _saveSetting(_autoFitEnabledKey, value);
+    await _saveSettings();
   }
 
   /// Set direct input mode
   Future<void> setDirectInputEnabled(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(directInputEnabled: value);
-    await _saveSetting(_directInputEnabledKey, value);
+    await _saveSettings();
   }
 
   /// Toggle direct input mode
@@ -249,14 +364,14 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> setShowTerminalCursor(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(showTerminalCursor: value);
-    await _saveSetting(_showTerminalCursorKey, value);
+    await _saveSettings();
   }
 
   /// Set pane navigation direction inversion
   Future<void> setInvertPaneNavigation(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(invertPaneNavigation: value);
-    await _saveSetting(_invertPaneNavKey, value);
+    await _saveSettings();
   }
 
   /// Reload
