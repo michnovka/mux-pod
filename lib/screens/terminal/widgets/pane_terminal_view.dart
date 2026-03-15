@@ -873,6 +873,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
               autoResize: false,
               autofocus: true,
               deleteDetection: true,
+              hardwareKeyboardOnly: !_followBottom,
               readOnly:
                   widget.readOnly || widget.mode == PaneTerminalMode.select,
               simulateScroll:
