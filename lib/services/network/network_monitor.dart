@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../utils/async_utils.dart';
+
 /// Network status
 enum NetworkStatus {
   /// Network available
@@ -92,7 +94,10 @@ final networkMonitorProvider = Provider<NetworkMonitor>((ref) {
   monitor.start();
 
   ref.onDispose(() {
-    monitor.dispose();
+    fireAndForget(
+      monitor.dispose(),
+      debugLabel: 'NetworkMonitor.dispose',
+    );
   });
 
   return monitor;

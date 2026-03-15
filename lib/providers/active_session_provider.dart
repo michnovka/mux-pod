@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/storage/versioned_json_storage.dart';
 import '../services/tmux/tmux_parser.dart';
+import '../utils/async_utils.dart';
 import 'shared_preferences_provider.dart';
 
 /// Active session information
@@ -182,7 +183,10 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
       );
       final sessions = loaded.value;
       if (loaded.usedLegacyFormat) {
-        unawaited(_persistSessions(prefs, sessions));
+        fireAndForget(
+          _persistSessions(prefs, sessions),
+          debugLabel: 'ActiveSessionsNotifier persist legacy sessions migration',
+        );
       }
       return ActiveSessionsState(sessions: sessions);
     } catch (e) {

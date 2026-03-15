@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/storage/versioned_json_storage.dart';
+import '../utils/async_utils.dart';
 import 'shared_preferences_provider.dart';
 
 /// App settings
@@ -29,6 +30,9 @@ class AppSettings {
   /// Invert pane navigation direction
   final bool invertPaneNavigation;
 
+  /// SSH keep-alive timeout in seconds
+  final int keepAliveTimeoutSeconds;
+
   const AppSettings({
     this.darkMode = true,
     this.fontSize = 14.0,
@@ -42,6 +46,7 @@ class AppSettings {
     this.directInputEnabled = false,
     this.showTerminalCursor = true,
     this.invertPaneNavigation = false,
+    this.keepAliveTimeoutSeconds = 10,
   });
 
   AppSettings copyWith({
@@ -57,6 +62,7 @@ class AppSettings {
     bool? directInputEnabled,
     bool? showTerminalCursor,
     bool? invertPaneNavigation,
+    int? keepAliveTimeoutSeconds,
   }) {
     return AppSettings(
       darkMode: darkMode ?? this.darkMode,
@@ -71,6 +77,7 @@ class AppSettings {
       directInputEnabled: directInputEnabled ?? this.directInputEnabled,
       showTerminalCursor: showTerminalCursor ?? this.showTerminalCursor,
       invertPaneNavigation: invertPaneNavigation ?? this.invertPaneNavigation,
+      keepAliveTimeoutSeconds: keepAliveTimeoutSeconds ?? this.keepAliveTimeoutSeconds,
     );
   }
 
@@ -88,6 +95,7 @@ class AppSettings {
       'directInputEnabled': directInputEnabled,
       'showTerminalCursor': showTerminalCursor,
       'invertPaneNavigation': invertPaneNavigation,
+      'keepAliveTimeoutSeconds': keepAliveTimeoutSeconds,
     };
   }
 
@@ -105,6 +113,7 @@ class AppSettings {
       directInputEnabled: json['directInputEnabled'] as bool? ?? false,
       showTerminalCursor: json['showTerminalCursor'] as bool? ?? true,
       invertPaneNavigation: json['invertPaneNavigation'] as bool? ?? false,
+      keepAliveTimeoutSeconds: json['keepAliveTimeoutSeconds'] as int? ?? 10,
     );
   }
 }
@@ -193,7 +202,10 @@ class SettingsNotifier extends Notifier<AppSettings> {
 
     final settings = _loadLegacySettings(prefs);
     if (_hasLegacySettingsKeys(prefs)) {
-      unawaited(_persistSettingsValue(prefs, settings));
+      fireAndForget(
+        _persistSettingsValue(prefs, settings),
+        debugLabel: 'SettingsNotifier persist legacy settings migration',
+      );
     }
     return settings;
   }
@@ -360,6 +372,13 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> setInvertPaneNavigation(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(invertPaneNavigation: value);
+    await _saveSettings();
+  }
+
+  /// Set keep-alive timeout in seconds
+  Future<void> setKeepAliveTimeoutSeconds(int value) async {
+    await _waitForInitialLoad();
+    state = state.copyWith(keepAliveTimeoutSeconds: value);
     await _saveSettings();
   }
 

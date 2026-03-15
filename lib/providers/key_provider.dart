@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/keychain/secure_storage.dart';
 import '../services/keychain/ssh_key_service.dart';
 import '../services/storage/versioned_json_storage.dart';
+import '../utils/async_utils.dart';
 import 'shared_preferences_provider.dart';
 
 /// Enum indicating the origin of the key
@@ -150,7 +151,10 @@ class KeysNotifier extends Notifier<KeysState> {
       );
       final keys = loaded.value;
       if (loaded.usedLegacyFormat) {
-        unawaited(_persistKeys(prefs, keys));
+        fireAndForget(
+          _persistKeys(prefs, keys),
+          debugLabel: 'KeysNotifier persist legacy keys migration',
+        );
       }
 
       keys.sort((a, b) => b.createdAt.compareTo(a.createdAt));

@@ -21,6 +21,7 @@ void main() {
       directInputEnabled: true,
       showTerminalCursor: false,
       invertPaneNavigation: true,
+      keepAliveTimeoutSeconds: 25,
     );
 
     final restored = AppSettings.fromJson(settings.toJson());
@@ -37,6 +38,21 @@ void main() {
     expect(restored.directInputEnabled, settings.directInputEnabled);
     expect(restored.showTerminalCursor, settings.showTerminalCursor);
     expect(restored.invertPaneNavigation, settings.invertPaneNavigation);
+    expect(restored.keepAliveTimeoutSeconds, settings.keepAliveTimeoutSeconds);
+  });
+
+  test('keepAliveTimeoutSeconds defaults to 10 when missing from JSON', () {
+    // Simulate an old settings blob that predates the keepAliveTimeoutSeconds
+    // field — existing users upgrading should get the new default (10s).
+    final legacyJson = <String, dynamic>{
+      'darkMode': true,
+      'fontSize': 14.0,
+      'fontFamily': 'JetBrains Mono',
+    };
+
+    final restored = AppSettings.fromJson(legacyJson);
+
+    expect(restored.keepAliveTimeoutSeconds, 10);
   });
 
   test('legacy settings_biometric_auth key is cleaned up during migration',

@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/storage/versioned_json_storage.dart';
+import '../utils/async_utils.dart';
 import 'shared_preferences_provider.dart';
 
 /// Connection settings
@@ -170,7 +171,10 @@ class ConnectionsNotifier extends Notifier<ConnectionsState> {
       );
       final connections = loaded.value;
       if (loaded.usedLegacyFormat) {
-        unawaited(_persistConnectionList(prefs, connections));
+        fireAndForget(
+          _persistConnectionList(prefs, connections),
+          debugLabel: 'ConnectionsNotifier persist legacy connections migration',
+        );
       }
       if (kDebugMode) {
         developer.log(
