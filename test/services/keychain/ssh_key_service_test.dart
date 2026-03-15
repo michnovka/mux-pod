@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_muxpod/services/keychain/ssh_key_service.dart';
 
@@ -38,6 +40,30 @@ void main() {
   });
 
   group('RSA Key Generation (T014)', () {
+    test('delegates RSA generation through the configured async runner', () async {
+      final delegatedService = SshKeyService(
+        rsaGenerator: ({required bits, comment}) async {
+          return SshKeyPair(
+            type: 'rsa-$bits',
+            privateKeyBytes: Uint8List.fromList([1, 2, 3]),
+            publicKeyBytes: Uint8List.fromList([4, 5, 6]),
+            fingerprint: 'SHA256:test',
+            privatePem: 'pem',
+            publicKeyString: 'ssh-rsa blob ${comment ?? ''}'.trim(),
+          );
+        },
+      );
+
+      final keyPair = await delegatedService.generateRsa(
+        bits: 3072,
+        comment: 'test@example.com',
+      );
+
+      expect(keyPair.type, equals('rsa-3072'));
+      expect(keyPair.fingerprint, equals('SHA256:test'));
+      expect(keyPair.publicKeyString, equals('ssh-rsa blob test@example.com'));
+    });
+
     test('generates valid RSA-2048 key pair', () async {
       final keyPair = await service.generateRsa(bits: 2048);
 

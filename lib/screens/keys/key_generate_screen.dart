@@ -144,12 +144,9 @@ class _KeyGenerateScreenState extends ConsumerState<KeyGenerateScreen> {
       if (_keyType == 'ed25519') {
         keyPair = await keyService.generateEd25519(comment: name);
       } else {
-        // RSA generation takes time (blocks UI but is acceptable)
         setState(() {
           _statusMessage = 'Generating RSA key...';
         });
-        // Execute via microtask to briefly update the UI
-        await Future.delayed(const Duration(milliseconds: 50));
         keyPair = await keyService.generateRsa(bits: _rsaBits, comment: name);
       }
 
