@@ -2945,6 +2945,7 @@ $metadataCommand
       if (_terminalMode == TerminalMode.select) {
         _toggleSelectMode();
       }
+      _ensureTerminalViewportAtBottomForInput();
       XtermInputAdapter.sendPaste(_terminal, data.text!);
     }
   }
@@ -4541,6 +4542,9 @@ $metadataCommand
     final textColor = isDark ? Colors.white : Colors.black87;
     final mutedTextColor = isDark ? Colors.white38 : Colors.black38;
     final inactiveIconColor = isDark ? Colors.white60 : Colors.black45;
+    final canAttachImage =
+        ref.read(sshProvider).isConnected &&
+        ref.read(tmuxProvider.notifier).currentTarget != null;
 
     showModalBottomSheet(
       context: context,
@@ -4614,6 +4618,69 @@ $metadataCommand
                               Navigator.pop(context);
                             }
                           : null,
+                    ),
+                    Divider(
+                      height: 1,
+                      color: isDark ? const Color(0xFF2A2B36) : Colors.grey.shade300,
+                    ),
+                    // Attach Image
+                    ListTile(
+                      leading: Icon(
+                        Icons.image_outlined,
+                        color: canAttachImage
+                            ? DesignColors.primary
+                            : inactiveIconColor,
+                      ),
+                      title: Text(
+                        'Attach Image',
+                        style: TextStyle(
+                          color: canAttachImage ? textColor : mutedTextColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      enabled: canAttachImage,
+                      onTap: canAttachImage
+                          ? () {
+                              Navigator.pop(context);
+                              unawaited(_attachImageFromDevice());
+                            }
+                          : null,
+                    ),
+                    // Touch Selection
+                    ListTile(
+                      leading: Icon(
+                        Icons.touch_app,
+                        color: _terminalMode == TerminalMode.select
+                            ? DesignColors.warning
+                            : inactiveIconColor,
+                      ),
+                      title: Text(
+                        'Touch Selection',
+                        style: TextStyle(
+                          color: _terminalMode == TerminalMode.select
+                              ? DesignColors.warning
+                              : textColor,
+                        ),
+                      ),
+                      onTap: () {
+                        _toggleSelectMode();
+                        Navigator.pop(context);
+                      },
+                    ),
+                    // Paste from clipboard
+                    ListTile(
+                      leading: Icon(
+                        Icons.content_paste,
+                        color: inactiveIconColor,
+                      ),
+                      title: Text(
+                        'Paste Clipboard',
+                        style: TextStyle(color: textColor),
+                      ),
+                      onTap: () {
+                        Navigator.pop(context);
+                        _pasteFromClipboard();
+                      },
                     ),
                     Divider(
                       height: 1,
