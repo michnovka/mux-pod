@@ -303,6 +303,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   bool _isSwitchingPane = false;
   bool _showSwitchingOverlay = false;
   int? _lastBellWindowIndex;
+  DateTime? _lastBellTime;
   String? _connectionError;
   SshState _sshState = const SshState();
 
@@ -1653,9 +1654,15 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
     if (bellWindow == null) return;
 
-    // Don't show duplicate notifications for the same window
-    if (_lastBellWindowIndex == bellWindow.index) return;
+    // Don't show duplicate notifications for the same window within 10s
+    final now = DateTime.now();
+    if (_lastBellWindowIndex == bellWindow.index &&
+        _lastBellTime != null &&
+        now.difference(_lastBellTime!).inSeconds < 10) {
+      return;
+    }
     _lastBellWindowIndex = bellWindow.index;
+    _lastBellTime = now;
 
     // Refresh tree to pick up the bell flag
     _scheduleControlSync(refreshTree: true);
@@ -1669,6 +1676,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
         ),
         action: SnackBarAction(
           label: 'Go',
+          textColor: Colors.white,
           onPressed: () {
             _lastBellWindowIndex = null;
             _selectWindow(session.name, bellWindow!.index);
@@ -3296,12 +3304,23 @@ $metadataCommand
                     ),
                     _buildBreadcrumbSeparator(),
                     // Window name (tap to switch)
-                    _buildBreadcrumbItem(
-                      currentWindow,
-                      icon: Icons.tab,
-                      isSelected: true,
-                      onTap: () => _showWindowSelector(tmuxState),
-                    ),
+                    // Check if any non-active window has alert flags
+                    Builder(builder: (_) {
+                      final session = tmuxState.activeSession;
+                      final hasAlerts = session != null &&
+                          session.windows.any((w) =>
+                              w.index != tmuxState.activeWindowIndex &&
+                              (w.hasBell || w.hasActivity));
+                      return _buildBreadcrumbItem(
+                        currentWindow,
+                        icon: hasAlerts
+                            ? Icons.notifications_active
+                            : Icons.tab,
+                        isSelected: true,
+                        alertColor: hasAlerts ? DesignColors.error : null,
+                        onTap: () => _showWindowSelector(tmuxState),
+                      );
+                    }),
                     // Display pane if available
                     if (activePane != null) ...[
                       _buildBreadcrumbSeparator(),
@@ -4370,6 +4389,7 @@ $metadataCommand
     IconData? icon,
     bool isActive = false,
     bool isSelected = false,
+    Color? alertColor,
     VoidCallback? onTap,
   }) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -4382,7 +4402,8 @@ $metadataCommand
                 color: colorScheme.onSurface.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(4),
                 border: Border.all(
-                  color: colorScheme.onSurface.withValues(alpha: 0.05),
+                  color: alertColor?.withValues(alpha: 0.3) ??
+                      colorScheme.onSurface.withValues(alpha: 0.05),
                 ),
               )
             : null,
@@ -4393,11 +4414,12 @@ $metadataCommand
               Icon(
                 icon,
                 size: 12,
-                color: isActive
-                    ? colorScheme.primary
-                    : (isSelected
-                          ? colorScheme.onSurface
-                          : colorScheme.onSurface.withValues(alpha: 0.6)),
+                color: alertColor ??
+                    (isActive
+                        ? colorScheme.primary
+                        : (isSelected
+                              ? colorScheme.onSurface
+                              : colorScheme.onSurface.withValues(alpha: 0.6))),
               ),
               const SizedBox(width: 4),
             ],
