@@ -1,5 +1,6 @@
 import 'dart:developer' as developer;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'terminal_font_styles.dart';
 
@@ -39,27 +40,33 @@ class FontCalculator {
     // T031: Fall back to default 80 if pane width is 0 or less
     int effectivePaneWidth = paneCharWidth;
     if (paneCharWidth <= 0) {
-      developer.log(
-        'Invalid pane width ($paneCharWidth), using default: $defaultPaneWidth',
-        name: 'FontCalculator',
-      );
+      if (kDebugMode) {
+        developer.log(
+          'Invalid pane width ($paneCharWidth), using default: $defaultPaneWidth',
+          name: 'FontCalculator',
+        );
+      }
       effectivePaneWidth = defaultPaneWidth;
     }
     // T032: Clamp extremely narrow panes (less than 10 characters) to minimum
     else if (paneCharWidth < minPaneWidth) {
-      developer.log(
-        'Narrow pane ($paneCharWidth chars), clamping to minimum: $minPaneWidth',
-        name: 'FontCalculator',
-      );
+      if (kDebugMode) {
+        developer.log(
+          'Narrow pane ($paneCharWidth chars), clamping to minimum: $minPaneWidth',
+          name: 'FontCalculator',
+        );
+      }
       effectivePaneWidth = minPaneWidth;
     }
 
     // Return default value for invalid screen width
     if (screenWidth <= 0) {
-      developer.log(
-        'Invalid screen width ($screenWidth), returning default font size',
-        name: 'FontCalculator',
-      );
+      if (kDebugMode) {
+        developer.log(
+          'Invalid screen width ($screenWidth), returning default font size',
+          name: 'FontCalculator',
+        );
+      }
       return (fontSize: defaultFontSize, needsScroll: false);
     }
 
@@ -78,13 +85,15 @@ class FontCalculator {
     }
 
     // T034: Log font size calculation result
-    developer.log(
-      'Calculated: screen=${screenWidth.toStringAsFixed(1)}px, '
-      'pane=${effectivePaneWidth}chars, '
-      'fontSize=${result.fontSize.toStringAsFixed(2)}pt, '
-      'scroll=${result.needsScroll}',
-      name: 'FontCalculator',
-    );
+    if (kDebugMode) {
+      developer.log(
+        'Calculated: screen=${screenWidth.toStringAsFixed(1)}px, '
+        'pane=${effectivePaneWidth}chars, '
+        'fontSize=${result.fontSize.toStringAsFixed(2)}pt, '
+        'scroll=${result.needsScroll}',
+        name: 'FontCalculator',
+      );
+    }
 
     return result;
   }
@@ -123,10 +132,12 @@ class FontCalculator {
     // Save to cache
     _charWidthRatioCache[fontFamily] = ratio;
 
-    developer.log(
-      'Cached char width ratio for "$fontFamily": $ratio',
-      name: 'FontCalculator',
-    );
+    if (kDebugMode) {
+      developer.log(
+        'Cached char width ratio for "$fontFamily": $ratio',
+        name: 'FontCalculator',
+      );
+    }
 
     return ratio;
   }

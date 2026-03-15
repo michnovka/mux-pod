@@ -1,5 +1,6 @@
 import 'dart:developer' as developer;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -69,6 +70,7 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
     _hostController.dispose();
     _portController.dispose();
     _usernameController.dispose();
+    _passwordController.clear();
     _passwordController.dispose();
     _tmuxPathController.dispose();
     super.dispose();
@@ -862,25 +864,37 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
   }
 
   Future<void> _save() async {
-    developer.log('_save() called', name: 'ConnectionForm');
+    if (kDebugMode) {
+      developer.log('_save() called', name: 'ConnectionForm');
+    }
 
     if (!_formKey.currentState!.validate()) {
-      developer.log('Form validation failed', name: 'ConnectionForm');
+      if (kDebugMode) {
+        developer.log('Form validation failed', name: 'ConnectionForm');
+      }
       return;
     }
 
     setState(() => _isSaving = true);
-    developer.log('Starting save process...', name: 'ConnectionForm');
+    if (kDebugMode) {
+      developer.log('Starting save process...', name: 'ConnectionForm');
+    }
 
     try {
       final connectionId = widget.connectionId ?? const Uuid().v4();
-      developer.log('Connection ID: $connectionId (isEditing: ${widget.isEditing})', name: 'ConnectionForm');
+      if (kDebugMode) {
+        developer.log('Connection ID: $connectionId (isEditing: ${widget.isEditing})', name: 'ConnectionForm');
+      }
 
       if (_authMethod == 'password' && _passwordController.text.isNotEmpty) {
-        developer.log('Saving password to secure storage...', name: 'ConnectionForm');
+        if (kDebugMode) {
+          developer.log('Saving password to secure storage...', name: 'ConnectionForm');
+        }
         final storage = SecureStorageService();
         await storage.savePassword(connectionId, _passwordController.text);
-        developer.log('Password saved successfully', name: 'ConnectionForm');
+        if (kDebugMode) {
+          developer.log('Password saved successfully', name: 'ConnectionForm');
+        }
       }
 
       final saveTmuxPath = _tmuxPathController.text.trim();
@@ -897,25 +911,41 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
             ? ref.read(connectionsProvider.notifier).getById(connectionId)?.createdAt ?? DateTime.now()
             : DateTime.now(),
       );
-      developer.log('Connection object created: ${connection.name}', name: 'ConnectionForm');
+      if (kDebugMode) {
+        developer.log('Connection object created: ${connection.name}', name: 'ConnectionForm');
+      }
 
       if (widget.isEditing) {
-        developer.log('Updating existing connection...', name: 'ConnectionForm');
+        if (kDebugMode) {
+          developer.log('Updating existing connection...', name: 'ConnectionForm');
+        }
         await ref.read(connectionsProvider.notifier).update(connection);
-        developer.log('Connection updated successfully', name: 'ConnectionForm');
+        if (kDebugMode) {
+          developer.log('Connection updated successfully', name: 'ConnectionForm');
+        }
       } else {
-        developer.log('Adding new connection...', name: 'ConnectionForm');
+        if (kDebugMode) {
+          developer.log('Adding new connection...', name: 'ConnectionForm');
+        }
         await ref.read(connectionsProvider.notifier).add(connection);
-        developer.log('Connection added successfully', name: 'ConnectionForm');
+        if (kDebugMode) {
+          developer.log('Connection added successfully', name: 'ConnectionForm');
+        }
       }
 
-      developer.log('Save completed, popping navigator...', name: 'ConnectionForm');
+      if (kDebugMode) {
+        developer.log('Save completed, popping navigator...', name: 'ConnectionForm');
+      }
       if (mounted) {
         Navigator.of(context).pop(true);
-        developer.log('Navigator popped', name: 'ConnectionForm');
+        if (kDebugMode) {
+          developer.log('Navigator popped', name: 'ConnectionForm');
+        }
       }
     } catch (e, stackTrace) {
-      developer.log('Error saving connection: $e', name: 'ConnectionForm', error: e, stackTrace: stackTrace);
+      if (kDebugMode) {
+        developer.log('Error saving connection: $e', name: 'ConnectionForm', error: e, stackTrace: stackTrace);
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -927,7 +957,9 @@ class _ConnectionFormScreenState extends ConsumerState<ConnectionFormScreen> {
     } finally {
       if (mounted) {
         setState(() => _isSaving = false);
-        developer.log('_isSaving set to false', name: 'ConnectionForm');
+        if (kDebugMode) {
+          developer.log('_isSaving set to false', name: 'ConnectionForm');
+        }
       }
     }
   }

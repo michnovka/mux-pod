@@ -206,7 +206,9 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
     try {
       await sshClient.dispose();
     } catch (e) {
-      debugPrint('Failed to dispose alert refresh client: $e');
+      if (kDebugMode) {
+        debugPrint('Failed to dispose alert refresh client: $e');
+      }
     }
   }
 
@@ -258,7 +260,9 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
       return (panes: _extractAlertPanes(connection, sessions), error: null);
     } catch (e) {
       final message = 'Failed to fetch alert panes for ${connection.name}: $e';
-      debugPrint(message);
+      if (kDebugMode) {
+        debugPrint(message);
+      }
       return (panes: const <AlertPane>[], error: message);
     } finally {
       await _disposeClient(sshClient);
@@ -294,7 +298,9 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
           .exec(TmuxCommands.selectWindow(alert.sessionName, alert.windowIndex))
           .timeout(config.commandTimeout);
     } catch (e) {
-      debugPrint('Failed to clear window flag: $e');
+      if (kDebugMode) {
+        debugPrint('Failed to clear window flag: $e');
+      }
     } finally {
       await _disposeClient(sshClient);
     }
@@ -328,7 +334,9 @@ class AlertPanesNotifier extends Notifier<AlertPanesState> {
         } catch (e) {
           final message =
               'Failed to fetch alert panes for ${connection.name}: $e';
-          debugPrint(message);
+          if (kDebugMode) {
+            debugPrint(message);
+          }
           results[index] = (panes: const <AlertPane>[], error: message);
         }
       };

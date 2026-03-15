@@ -1,5 +1,6 @@
 import 'dart:developer' as developer;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -40,10 +41,12 @@ class ConnectionsScreen extends ConsumerWidget {
     final isSearchVisible = ref.watch(_searchVisibleProvider);
     final searchQuery = ref.watch(connectionSearchProvider);
 
-    developer.log(
-      'ConnectionsScreen.build() - connections: ${connectionsState.connections.length}, isLoading: ${connectionsState.isLoading}',
-      name: 'ConnectionsScreen',
-    );
+    if (kDebugMode) {
+      developer.log(
+        'ConnectionsScreen.build() - connections: ${connectionsState.connections.length}, isLoading: ${connectionsState.isLoading}',
+        name: 'ConnectionsScreen',
+      );
+    }
 
     return Scaffold(
       body: CustomScrollView(
@@ -411,27 +414,39 @@ class ConnectionsScreen extends ConsumerWidget {
   }
 
   void _addConnection(BuildContext context, WidgetRef ref) async {
-    developer.log('_addConnection() - navigating to ConnectionFormScreen', name: 'ConnectionsScreen');
+    if (kDebugMode) {
+      developer.log('_addConnection() - navigating to ConnectionFormScreen', name: 'ConnectionsScreen');
+    }
     final result = await Navigator.of(context).push<bool>(
       MaterialPageRoute(builder: (context) => const ConnectionFormScreen()),
     );
-    developer.log('_addConnection() - returned with result: $result', name: 'ConnectionsScreen');
+    if (kDebugMode) {
+      developer.log('_addConnection() - returned with result: $result', name: 'ConnectionsScreen');
+    }
     if (result == true) {
-      developer.log('_addConnection() - invalidating connectionsProvider', name: 'ConnectionsScreen');
+      if (kDebugMode) {
+        developer.log('_addConnection() - invalidating connectionsProvider', name: 'ConnectionsScreen');
+      }
       ref.invalidate(connectionsProvider);
     }
   }
 
   void _editConnection(BuildContext context, WidgetRef ref, Connection connection) async {
-    developer.log('_editConnection() - navigating to ConnectionFormScreen for ${connection.id}', name: 'ConnectionsScreen');
+    if (kDebugMode) {
+      developer.log('_editConnection() - navigating to ConnectionFormScreen for ${connection.id}', name: 'ConnectionsScreen');
+    }
     final result = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (context) => ConnectionFormScreen(connectionId: connection.id),
       ),
     );
-    developer.log('_editConnection() - returned with result: $result', name: 'ConnectionsScreen');
+    if (kDebugMode) {
+      developer.log('_editConnection() - returned with result: $result', name: 'ConnectionsScreen');
+    }
     if (result == true) {
-      developer.log('_editConnection() - invalidating connectionsProvider', name: 'ConnectionsScreen');
+      if (kDebugMode) {
+        developer.log('_editConnection() - invalidating connectionsProvider', name: 'ConnectionsScreen');
+      }
       ref.invalidate(connectionsProvider);
     }
   }
@@ -706,16 +721,22 @@ class _ConnectionCardState extends ConsumerState<_ConnectionCard> {
       );
 
       final cmd = TmuxCommands.listSessions();
-      debugPrint('_fetchSessions: tmuxPath=${sshClient.tmuxPath}, cmd="$cmd"');
+      if (kDebugMode) {
+        debugPrint('_fetchSessions: tmuxPath=${sshClient.tmuxPath}, cmd="$cmd"');
+      }
       final result = await sshClient.execWithExitCode(cmd);
-      debugPrint('_fetchSessions: stdout="${result.stdout.trim()}", stderr="${result.stderr.trim()}", exitCode=${result.exitCode}');
+      if (kDebugMode) {
+        debugPrint('_fetchSessions: exitCode=${result.exitCode}, stdoutLen=${result.stdout.trim().length}');
+      }
       if (result.exitCode != null && result.exitCode != 0) {
         throw SshConnectionError(
           result.stderr.isNotEmpty ? result.stderr.trim() : 'tmux command failed (exit code: ${result.exitCode})',
         );
       }
       final sessions = TmuxParser.parseSessions(result.stdout);
-      debugPrint('_fetchSessions: parsed ${sessions.length} sessions');
+      if (kDebugMode) {
+        debugPrint('_fetchSessions: parsed ${sessions.length} sessions');
+      }
 
       // Disconnect
       await sshClient.disconnect();

@@ -13,7 +13,6 @@ class AppSettings {
   final bool darkMode;
   final double fontSize;
   final String fontFamily;
-  final bool requireBiometricAuth;
   final bool enableNotifications;
   final bool enableVibration;
   final bool keepScreenOn;
@@ -34,7 +33,6 @@ class AppSettings {
     this.darkMode = true,
     this.fontSize = 14.0,
     this.fontFamily = 'JetBrains Mono',
-    this.requireBiometricAuth = false,
     this.enableNotifications = true,
     this.enableVibration = true,
     this.keepScreenOn = true,
@@ -50,7 +48,6 @@ class AppSettings {
     bool? darkMode,
     double? fontSize,
     String? fontFamily,
-    bool? requireBiometricAuth,
     bool? enableNotifications,
     bool? enableVibration,
     bool? keepScreenOn,
@@ -65,7 +62,6 @@ class AppSettings {
       darkMode: darkMode ?? this.darkMode,
       fontSize: fontSize ?? this.fontSize,
       fontFamily: fontFamily ?? this.fontFamily,
-      requireBiometricAuth: requireBiometricAuth ?? this.requireBiometricAuth,
       enableNotifications: enableNotifications ?? this.enableNotifications,
       enableVibration: enableVibration ?? this.enableVibration,
       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
@@ -83,7 +79,6 @@ class AppSettings {
       'darkMode': darkMode,
       'fontSize': fontSize,
       'fontFamily': fontFamily,
-      'requireBiometricAuth': requireBiometricAuth,
       'enableNotifications': enableNotifications,
       'enableVibration': enableVibration,
       'keepScreenOn': keepScreenOn,
@@ -101,7 +96,6 @@ class AppSettings {
       darkMode: json['darkMode'] as bool? ?? true,
       fontSize: (json['fontSize'] as num?)?.toDouble() ?? 14.0,
       fontFamily: json['fontFamily'] as String? ?? 'JetBrains Mono',
-      requireBiometricAuth: json['requireBiometricAuth'] as bool? ?? false,
       enableNotifications: json['enableNotifications'] as bool? ?? true,
       enableVibration: json['enableVibration'] as bool? ?? true,
       keepScreenOn: json['keepScreenOn'] as bool? ?? true,
@@ -121,7 +115,6 @@ class SettingsNotifier extends Notifier<AppSettings> {
   static const String _darkModeKey = 'settings_dark_mode';
   static const String _fontSizeKey = 'settings_font_size';
   static const String _fontFamilyKey = 'settings_font_family';
-  static const String _biometricKey = 'settings_biometric_auth';
   static const String _notificationsKey = 'settings_notifications';
   static const String _vibrationKey = 'settings_vibration';
   static const String _keepScreenOnKey = 'settings_keep_screen_on';
@@ -135,7 +128,7 @@ class SettingsNotifier extends Notifier<AppSettings> {
     _darkModeKey,
     _fontSizeKey,
     _fontFamilyKey,
-    _biometricKey,
+    'settings_biometric_auth', // removed setting; still needs cleanup
     _notificationsKey,
     _vibrationKey,
     _keepScreenOnKey,
@@ -210,7 +203,6 @@ class SettingsNotifier extends Notifier<AppSettings> {
       darkMode: prefs.getBool(_darkModeKey) ?? true,
       fontSize: prefs.getDouble(_fontSizeKey) ?? 14.0,
       fontFamily: prefs.getString(_fontFamilyKey) ?? 'JetBrains Mono',
-      requireBiometricAuth: prefs.getBool(_biometricKey) ?? false,
       enableNotifications: prefs.getBool(_notificationsKey) ?? true,
       enableVibration: prefs.getBool(_vibrationKey) ?? true,
       keepScreenOn: prefs.getBool(_keepScreenOnKey) ?? true,
@@ -300,13 +292,6 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> setFontFamily(String value) async {
     await _waitForInitialLoad();
     state = state.copyWith(fontFamily: value);
-    await _saveSettings();
-  }
-
-  /// Set biometric authentication requirement
-  Future<void> setRequireBiometricAuth(bool value) async {
-    await _waitForInitialLoad();
-    state = state.copyWith(requireBiometricAuth: value);
     await _saveSettings();
   }
 
