@@ -40,6 +40,23 @@ void main() {
       expect(overlap, 2);
     });
 
+    test('finds lenient overlap when wrapped flag differs at the seam', () {
+      final overlap = findTerminalScrollbackOverlapLenient(
+        olderLines: [
+          debugCreateTerminalBufferLine('older-1'),
+          debugCreateTerminalBufferLine('shared-1', wrapped: true),
+          debugCreateTerminalBufferLine('shared-2'),
+        ],
+        newerLines: [
+          debugCreateTerminalBufferLine('shared-1'),
+          debugCreateTerminalBufferLine('shared-2'),
+          debugCreateTerminalBufferLine('newer-1'),
+        ],
+      );
+
+      expect(overlap, 2);
+    });
+
     test('prepends only missing scrollback and preserves current lines', () {
       final terminal = buildTerminal([
         'shared-1',
@@ -70,6 +87,54 @@ void main() {
           'newer-2',
         ],
       );
+    });
+
+    test('prepends scrollback when seam differs only in row metadata', () {
+      final terminal = buildTerminal([
+        'shared-1',
+        'shared-2',
+        'newer-1',
+      ]);
+
+      final applied = prependTerminalScrollback(
+        terminal: terminal,
+        fullSnapshotLines: [
+          debugCreateTerminalBufferLine('older-1'),
+          debugCreateTerminalBufferLine('shared-1', wrapped: true),
+          debugCreateTerminalBufferLine('shared-2'),
+          debugCreateTerminalBufferLine('newer-1'),
+        ],
+      );
+
+      expect(applied, isTrue);
+      expect(
+        lineTexts(terminal),
+        ['older-1', 'shared-1', 'shared-2', 'newer-1'],
+      );
+    });
+
+    test('notifies terminal listeners after applying backfill', () {
+      final terminal = buildTerminal([
+        'shared-1',
+        'shared-2',
+        'newer-1',
+      ]);
+      var notifications = 0;
+      terminal.addListener(() {
+        notifications += 1;
+      });
+
+      final applied = prependTerminalScrollback(
+        terminal: terminal,
+        fullSnapshotLines: [
+          debugCreateTerminalBufferLine('older-1'),
+          debugCreateTerminalBufferLine('shared-1'),
+          debugCreateTerminalBufferLine('shared-2'),
+        ],
+      );
+
+      expect(applied, isTrue);
+      expect(notifications, 1);
     });
 
     test('skips merge when there is no safe overlap', () {

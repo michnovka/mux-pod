@@ -19,6 +19,33 @@ int findTerminalScrollbackOverlap({
   required List<BufferLine> newerLines,
   int maxLinesToCheck = 200,
 }) {
+  return _findTerminalScrollbackOverlap(
+    olderLines: olderLines,
+    newerLines: newerLines,
+    maxLinesToCheck: maxLinesToCheck,
+    lineMatches: _sameBufferLine,
+  );
+}
+
+int findTerminalScrollbackOverlapLenient({
+  required List<BufferLine> olderLines,
+  required List<BufferLine> newerLines,
+  int maxLinesToCheck = 200,
+}) {
+  return _findTerminalScrollbackOverlap(
+    olderLines: olderLines,
+    newerLines: newerLines,
+    maxLinesToCheck: maxLinesToCheck,
+    lineMatches: _sameBufferLineLenient,
+  );
+}
+
+int _findTerminalScrollbackOverlap({
+  required List<BufferLine> olderLines,
+  required List<BufferLine> newerLines,
+  required bool Function(BufferLine left, BufferLine right) lineMatches,
+  int maxLinesToCheck = 200,
+}) {
   if (olderLines.isEmpty || newerLines.isEmpty) {
     return 0;
   }
@@ -29,18 +56,18 @@ int findTerminalScrollbackOverlap({
   );
 
   for (var overlap = maxOverlap; overlap >= 1; overlap--) {
-    var matches = true;
+    var overlapMatches = true;
     final olderStart = olderLines.length - overlap;
     for (var index = 0; index < overlap; index++) {
-      if (!_sameBufferLine(
+      if (!lineMatches(
         olderLines[olderStart + index],
         newerLines[index],
       )) {
-        matches = false;
+        overlapMatches = false;
         break;
       }
     }
-    if (matches) {
+    if (overlapMatches) {
       return overlap;
     }
   }
@@ -62,6 +89,7 @@ bool prependTerminalScrollback({
     terminal.mainBuffer.lines.replaceWith(
       cloneTerminalBufferLines(fullSnapshotLines),
     );
+    terminal.notifyListeners();
     return true;
   }
 
@@ -71,11 +99,23 @@ bool prependTerminalScrollback({
     newerLines: currentLines,
     maxLinesToCheck: maxLinesToCheck,
   );
-  if (overlap <= 0) {
+  final effectiveOverlap =
+      overlap > 0
+      ? overlap
+      : (() {
+          final lenientOverlap = findTerminalScrollbackOverlapLenient(
+            olderLines: normalizedSnapshotLines,
+            newerLines: currentLines,
+            maxLinesToCheck: maxLinesToCheck,
+          );
+          final minimumLenientOverlap = math.min(currentLines.length, 8);
+          return lenientOverlap >= minimumLenientOverlap ? lenientOverlap : 0;
+        })();
+  if (effectiveOverlap <= 0) {
     return false;
   }
 
-  final prefixCount = normalizedSnapshotLines.length - overlap;
+  final prefixCount = normalizedSnapshotLines.length - effectiveOverlap;
   if (prefixCount <= 0) {
     return false;
   }
@@ -85,6 +125,7 @@ bool prependTerminalScrollback({
     ...currentLines,
   ];
   terminal.mainBuffer.lines.replaceWith(mergedLines);
+  terminal.notifyListeners();
   return true;
 }
 
@@ -96,6 +137,14 @@ bool _sameBufferLine(BufferLine left, BufferLine right) {
   return left.isWrapped == right.isWrapped &&
       left.length == right.length &&
       left.getText(0, left.length) == right.getText(0, right.length);
+}
+
+bool _sameBufferLineLenient(BufferLine left, BufferLine right) {
+  return _normalizedComparableText(left) == _normalizedComparableText(right);
+}
+
+String _normalizedComparableText(BufferLine line) {
+  return line.getText(0, line.length).replaceFirst(RegExp(r'\s+$'), '');
 }
 
 BufferLine debugCreateTerminalBufferLine(

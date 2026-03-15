@@ -42,6 +42,8 @@ enum TerminalMode { normal, select }
 
 enum _ConnectionIndicatorMode { latency, bandwidth }
 
+enum _PendingLiveUpdateKind { none, lines, updated }
+
 class _PaneSnapshotPayload {
   final String activeContent;
   final String mainContent;
@@ -160,6 +162,28 @@ class _TerminalLoadMetrics {
   }
 }
 
+@immutable
+class _PendingLiveUpdateState {
+  final _PendingLiveUpdateKind kind;
+  final int lineCount;
+
+  const _PendingLiveUpdateState._({
+    required this.kind,
+    required this.lineCount,
+  });
+
+  const _PendingLiveUpdateState.none()
+    : this._(kind: _PendingLiveUpdateKind.none, lineCount: 0);
+
+  const _PendingLiveUpdateState.lines(int count)
+    : this._(kind: _PendingLiveUpdateKind.lines, lineCount: count);
+
+  const _PendingLiveUpdateState.updated()
+    : this._(kind: _PendingLiveUpdateKind.updated, lineCount: 0);
+
+  bool get hasPending => kind != _PendingLiveUpdateKind.none;
+}
+
 class _TerminalLoadTrace {
   final String reason;
   final bool refreshTree;
@@ -267,7 +291,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   final _terminalController = TerminalController();
   int _terminalScrollbackLines = AppSettings().scrollbackLines;
   final Map<String, _PaneRenderCacheEntry> _paneRenderCache = {};
-  final _historyPendingLinesNotifier = ValueNotifier<int>(0);
+  final _pendingLiveUpdateNotifier = ValueNotifier<_PendingLiveUpdateState>(
+    const _PendingLiveUpdateState.none(),
+  );
 
   // Connection state (managed locally)
   bool _isConnecting = false;
@@ -306,6 +332,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   int _lastBandwidthSampleTotalBytes = 0;
   DateTime? _lastBandwidthSampleAt;
   DateTime? _lastLatencySampleAt;
+  double? _pendingHistoryViewportAnchorPixels;
+  bool _historyViewportAnchorScheduled = false;
   bool _shouldRefreshTreeAfterControlSync = false;
   bool _shouldResyncAfterControlRefresh = false;
   bool _isDisposed = false;
@@ -789,7 +817,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _viewNotifier.value = emptyView;
     _hasInitialScrolled = false;
     _isFollowingLiveTail = true;
-    _historyPendingLinesNotifier.value = 0;
+    _clearPendingLiveUpdates();
   }
 
   bool _showActivePaneFromCacheOrPlaceholder({
@@ -916,14 +944,14 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   void _handleLiveFollowChanged(bool followBottom) {
     if (_isFollowingLiveTail == followBottom) {
-      if (followBottom && _historyPendingLinesNotifier.value != 0) {
-        _historyPendingLinesNotifier.value = 0;
+      if (followBottom && _pendingLiveUpdateNotifier.value.hasPending) {
+        _clearPendingLiveUpdates();
       }
       return;
     }
 
     if (followBottom) {
-      _historyPendingLinesNotifier.value = 0;
+      _clearPendingLiveUpdates();
     }
 
     if (!mounted || _isDisposed) {
@@ -937,27 +965,130 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   void _jumpToLive() {
-    _historyPendingLinesNotifier.value = 0;
+    _clearPendingLiveUpdates();
     _terminalScrollController.armUnsuppressedStickToBottom();
     _paneTerminalViewKey.currentState?.scrollToBottom();
   }
 
-  void _recordPendingLiveLinesFromTerminalAdvance({
-    required int beforeAbsoluteCursorY,
+  void _recordPendingLiveUpdate({
+    required String data,
+    required int beforeScrollBack,
   }) {
-    if (_terminal.isUsingAltBuffer || _isFollowingLiveTail) {
+    if (_terminal.isUsingAltBuffer || _isFollowingLiveTail || data.isEmpty) {
       return;
     }
 
-    final afterAbsoluteCursorY = _terminal.buffer.absoluteCursorY;
-    final delta = afterAbsoluteCursorY - beforeAbsoluteCursorY;
-    if (delta > 0) {
-      _historyPendingLinesNotifier.value += delta;
+    final delta = _terminal.buffer.scrollBack - beforeScrollBack;
+    if (!_isCountableAppendOnlyOutput(data) || delta <= 0) {
+      _pendingLiveUpdateNotifier.value = const _PendingLiveUpdateState.updated();
+      return;
     }
+
+    final currentState = _pendingLiveUpdateNotifier.value;
+    if (currentState.kind == _PendingLiveUpdateKind.updated) {
+      return;
+    }
+
+    final currentCount = currentState.kind == _PendingLiveUpdateKind.lines
+        ? currentState.lineCount
+        : 0;
+    _pendingLiveUpdateNotifier.value = _PendingLiveUpdateState.lines(
+      currentCount + delta,
+    );
+  }
+
+  void _clearPendingLiveUpdates() {
+    if (_pendingLiveUpdateNotifier.value.kind ==
+            _PendingLiveUpdateKind.none &&
+        _pendingLiveUpdateNotifier.value.lineCount == 0) {
+      return;
+    }
+    _pendingLiveUpdateNotifier.value = const _PendingLiveUpdateState.none();
+  }
+
+  bool _isCountableAppendOnlyOutput(String data) {
+    for (var index = 0; index < data.length; index += 1) {
+      final codeUnit = data.codeUnitAt(index);
+
+      if (codeUnit == 0x08) {
+        return false;
+      }
+
+      if (codeUnit == 0x0d) {
+        final nextIsLineFeed =
+            index + 1 < data.length && data.codeUnitAt(index + 1) == 0x0a;
+        if (!nextIsLineFeed) {
+          return false;
+        }
+        continue;
+      }
+
+      if (codeUnit != 0x1b) {
+        continue;
+      }
+
+      if (index + 1 >= data.length || data.codeUnitAt(index + 1) != 0x5b) {
+        return false;
+      }
+
+      var sequenceIndex = index + 2;
+      while (sequenceIndex < data.length) {
+        final sequenceCodeUnit = data.codeUnitAt(sequenceIndex);
+        if (sequenceCodeUnit >= 0x40 && sequenceCodeUnit <= 0x7e) {
+          if (sequenceCodeUnit != 0x6d) {
+            return false;
+          }
+          index = sequenceIndex;
+          break;
+        }
+        sequenceIndex += 1;
+      }
+
+      if (sequenceIndex >= data.length) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  void _preserveHistoryViewportAnchor(double pixels) {
+    if (_isFollowingLiveTail) {
+      return;
+    }
+
+    _pendingHistoryViewportAnchorPixels = pixels;
+    if (_historyViewportAnchorScheduled) {
+      return;
+    }
+
+    _historyViewportAnchorScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _historyViewportAnchorScheduled = false;
+
+      if (!mounted || _isDisposed || _isFollowingLiveTail) {
+        return;
+      }
+
+      final desiredPixels = _pendingHistoryViewportAnchorPixels;
+      _pendingHistoryViewportAnchorPixels = null;
+      if (desiredPixels == null || !_terminalScrollController.hasClients) {
+        return;
+      }
+
+      final position = _terminalScrollController.position;
+      final target = desiredPixels.clamp(
+        position.minScrollExtent,
+        position.maxScrollExtent,
+      );
+      if ((position.pixels - target).abs() > 0.5) {
+        position.jumpTo(target);
+      }
+    });
   }
 
   void _resetTransientTerminalUiBeforeSwitch() {
-    _historyPendingLinesNotifier.value = 0;
+    _clearPendingLiveUpdates();
     _isFollowingLiveTail = true;
   }
 
@@ -1435,17 +1566,23 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     _recordFirstLiveOutputIfNeeded(paneId);
-    final cursorBeforeWrite = _terminal.buffer.absoluteCursorY;
-    final shouldAutoScroll =
-        _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
+    final scrollBackBeforeWrite = _terminal.buffer.scrollBack;
+    final paneViewState = _paneTerminalViewKey.currentState;
+    final shouldAutoScroll = paneViewState?.shouldAutoFollow ?? true;
+    final shouldPreserveHistoryViewport =
+        !shouldAutoScroll && !(paneViewState?.isUserScrollInProgress ?? false);
+    final historyViewportPixels = shouldPreserveHistoryViewport &&
+            _terminalScrollController.hasClients
+        ? _terminalScrollController.position.pixels
+        : null;
     _terminal.write(data);
-    _recordPendingLiveLinesFromTerminalAdvance(
-      beforeAbsoluteCursorY: cursorBeforeWrite,
-    );
+    _recordPendingLiveUpdate(data: data, beforeScrollBack: scrollBackBeforeWrite);
     if ((shouldAutoScroll || !_hasInitialScrolled) &&
         !_terminal.isInSynchronizedUpdate) {
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
+    } else if (historyViewportPixels != null) {
+      _preserveHistoryViewportAnchor(historyViewportPixels);
     }
   }
 
@@ -1508,15 +1645,24 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if (activePaneId != null) {
       _recordFirstLiveOutputIfNeeded(activePaneId);
     }
-    final cursorBeforeWrite = _terminal.buffer.absoluteCursorY;
-    final shouldAutoScroll =
-        _paneTerminalViewKey.currentState?.shouldAutoFollow ?? true;
+    final scrollBackBeforeWrite = _terminal.buffer.scrollBack;
+    final paneViewState = _paneTerminalViewKey.currentState;
+    final shouldAutoScroll = paneViewState?.shouldAutoFollow ?? true;
+    final shouldPreserveHistoryViewport =
+        !shouldAutoScroll && !(paneViewState?.isUserScrollInProgress ?? false);
+    final historyViewportPixels = shouldPreserveHistoryViewport &&
+            _terminalScrollController.hasClients
+        ? _terminalScrollController.position.pixels
+        : null;
     _terminal.write(bufferedOutput);
-    _recordPendingLiveLinesFromTerminalAdvance(
-      beforeAbsoluteCursorY: cursorBeforeWrite,
+    _recordPendingLiveUpdate(
+      data: bufferedOutput,
+      beforeScrollBack: scrollBackBeforeWrite,
     );
     if (shouldAutoScroll && !_terminal.isInSynchronizedUpdate) {
       _paneTerminalViewKey.currentState?.scrollToBottom();
+    } else if (historyViewportPixels != null) {
+      _preserveHistoryViewportAnchor(historyViewportPixels);
     }
   }
 
@@ -1662,6 +1808,7 @@ $metadataCommand
       final activePaneId = ref.read(tmuxProvider).activePaneId;
       final cacheEntry = _paneRenderCache[paneId];
       final targetStillRelevant =
+          identical(_terminal, targetTerminal) ||
           activePaneId == paneId ||
           (cacheEntry != null && identical(cacheEntry.terminal, targetTerminal));
       if (!targetStillRelevant) {
@@ -2277,7 +2424,7 @@ $metadataCommand
     _viewNotifier.dispose();
     _latencyNotifier.dispose();
     _bandwidthNotifier.dispose();
-    _historyPendingLinesNotifier.dispose();
+    _pendingLiveUpdateNotifier.dispose();
     // Dispose scroll controller
     _terminalScrollController.dispose();
     _terminalController.dispose();
@@ -2426,12 +2573,20 @@ $metadataCommand
     return Positioned(
       right: 12,
       bottom: 12,
-      child: ValueListenableBuilder<int>(
-        valueListenable: _historyPendingLinesNotifier,
-        builder: (context, pendingLines, _) {
-          if (_isFollowingLiveTail && pendingLines <= 0) {
+      child: ValueListenableBuilder<_PendingLiveUpdateState>(
+        valueListenable: _pendingLiveUpdateNotifier,
+        builder: (context, pendingUpdate, _) {
+          if (_isFollowingLiveTail && !pendingUpdate.hasPending) {
             return const SizedBox.shrink();
           }
+
+          final label = switch (pendingUpdate.kind) {
+            _PendingLiveUpdateKind.none => 'Jump to live',
+            _PendingLiveUpdateKind.lines =>
+              'Jump to live · ${pendingUpdate.lineCount} '
+              '${pendingUpdate.lineCount == 1 ? 'new line' : 'new lines'}',
+            _PendingLiveUpdateKind.updated => 'Jump to live · updated',
+          };
 
           return Material(
             color: Colors.transparent,
@@ -2460,9 +2615,7 @@ $metadataCommand
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      pendingLines > 0
-                          ? 'Jump to live · $pendingLines new'
-                          : 'Jump to live',
+                      label,
                       style: GoogleFonts.jetBrainsMono(
                         fontSize: 12,
                         fontWeight: FontWeight.w700,
