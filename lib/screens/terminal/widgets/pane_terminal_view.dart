@@ -356,6 +356,8 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
 
   bool get shouldAutoFollow => _followBottom && !_isUserScrollInProgress;
 
+  bool get isUserScrollInProgress => _isUserScrollInProgress;
+
   void _setFollowBottom(bool value, {bool notify = true}) {
     if (_followBottom == value) {
       return;
@@ -379,7 +381,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     if (notification is ScrollStartNotification &&
         notification.dragDetails != null) {
       _isUserScrollInProgress = true;
-      _setFollowBottom(false);
       return false;
     }
 
@@ -392,7 +393,12 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       return false;
     }
 
-    if (!_isUserScrollInProgress && isNearBottom) {
+    if (_isUserScrollInProgress) {
+      _setFollowBottom(isNearBottom);
+      return false;
+    }
+
+    if (isNearBottom) {
       _setFollowBottom(true);
     }
 

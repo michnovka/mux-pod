@@ -1029,6 +1029,16 @@ class SshClient {
     }
   }
 
+  /// Execute a command through a dedicated non-PTY exec session.
+  ///
+  /// This bypasses the marker-delimited persistent shell and is preferred for
+  /// snapshot-style commands that can return large ANSI payloads. It avoids the
+  /// persistent shell's PTY/marker transport and preserves the raw command
+  /// output as closely as possible.
+  Future<String> execDirect(String command, {Duration? timeout}) {
+    return exec(command, timeout: timeout);
+  }
+
   /// Execute a command via the dedicated input shell.
   ///
   /// Used by the terminal screen to avoid contention with polling and control

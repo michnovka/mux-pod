@@ -270,6 +270,46 @@ void main() {
       expect(followStates, contains(false));
     });
 
+    testWidgets('keeps follow-bottom enabled for a small near-bottom drag', (
+      tester,
+    ) async {
+      final terminal = Terminal(maxLines: 200, reflowEnabled: false);
+      final paneKey = GlobalKey<PaneTerminalViewState>();
+      final verticalScrollController = ScrollController();
+      final followStates = <bool>[];
+
+      for (var index = 0; index < 80; index += 1) {
+        terminal.write('line $index\r\n');
+      }
+
+      await tester.pumpWidget(
+        buildHarness(
+          paneWidth: 80,
+          paneHeight: 24,
+          terminal: terminal,
+          paneKey: paneKey,
+          verticalScrollController: verticalScrollController,
+          onFollowBottomChanged: followStates.add,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.dragFrom(
+        tester.getCenter(find.byType(PaneTerminalView)),
+        const Offset(0, 12),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 350));
+
+      expect(
+        verticalScrollController.position.maxScrollExtent -
+            verticalScrollController.position.pixels,
+        lessThanOrEqualTo(32),
+      );
+      expect(paneKey.currentState?.shouldAutoFollow, isTrue);
+      expect(followStates, isNot(contains(false)));
+    });
+
     testWidgets('coalesces repeated bottom snaps into one pending callback', (
       tester,
     ) async {

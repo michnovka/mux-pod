@@ -308,6 +308,9 @@ class TmuxCommands {
   ///
   /// Output format:
   /// `alternate_on,cursor_x,cursor_y,pane_width,pane_height,insert_flag,keypad_cursor_flag,keypad_flag,wrap_flag,cursor_flag,origin_flag,scroll_region_upper,scroll_region_lower`
+  ///
+  /// tmux `wrap_flag` is the pane's current wrap-pending state at the cursor,
+  /// not the DEC auto-wrap mode.
   static String getPaneSnapshotMetadata(String target) {
     return 'tmux display-message -p -t ${_escapeArg(target)} '
         '"#{alternate_on},#{cursor_x},#{cursor_y},#{pane_width},#{pane_height},#{insert_flag},#{keypad_cursor_flag},#{keypad_flag},#{wrap_flag},#{cursor_flag},#{origin_flag},#{scroll_region_upper},#{scroll_region_lower}"';

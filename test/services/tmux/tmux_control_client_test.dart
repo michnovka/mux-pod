@@ -261,5 +261,31 @@ void main() {
       expect(outputs, hasLength(1));
       expect(outputs.single, (paneId: '%1', data: 'é\n'));
     });
+
+    test('preserves utf8 split across separate output notifications', () {
+      final outputs = <({String paneId, String data})>[];
+      final client = TmuxControlClient(
+        SshClient(),
+        onPaneOutput: (paneId, data) {
+          outputs.add((paneId: paneId, data: data));
+        },
+      );
+
+      client.debugAddBytes(
+        Uint8List.fromList(<int>[
+          ...ascii.encode('%output %1 '),
+          0xE2,
+          0x0A,
+          ...ascii.encode('%output %1 '),
+          0x94,
+          0x80,
+          ...ascii.encode(r'\012'),
+          0x0A,
+        ]),
+      );
+
+      expect(outputs, hasLength(1));
+      expect(outputs.single, (paneId: '%1', data: '─\n'));
+    });
   });
 }

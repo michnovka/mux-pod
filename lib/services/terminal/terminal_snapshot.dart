@@ -13,6 +13,7 @@ class TerminalSnapshotFrame {
   final bool cursorKeysMode;
   final bool appKeypadMode;
   final bool autoWrapMode;
+  final bool pendingWrap;
   final bool cursorVisible;
   final bool originMode;
   final int? scrollRegionUpper;
@@ -30,6 +31,7 @@ class TerminalSnapshotFrame {
     this.cursorKeysMode = false,
     this.appKeypadMode = false,
     this.autoWrapMode = true,
+    this.pendingWrap = false,
     this.cursorVisible = true,
     this.originMode = false,
     this.scrollRegionUpper,
@@ -48,6 +50,7 @@ class TerminalSnapshotFrame {
     bool? cursorKeysMode,
     bool? appKeypadMode,
     bool? autoWrapMode,
+    bool? pendingWrap,
     bool? cursorVisible,
     bool? originMode,
     int? scrollRegionUpper,
@@ -65,6 +68,7 @@ class TerminalSnapshotFrame {
       cursorKeysMode: cursorKeysMode ?? this.cursorKeysMode,
       appKeypadMode: appKeypadMode ?? this.appKeypadMode,
       autoWrapMode: autoWrapMode ?? this.autoWrapMode,
+      pendingWrap: pendingWrap ?? this.pendingWrap,
       cursorVisible: cursorVisible ?? this.cursorVisible,
       originMode: originMode ?? this.originMode,
       scrollRegionUpper: scrollRegionUpper ?? this.scrollRegionUpper,
@@ -169,6 +173,9 @@ void _applyTerminalModes(
     terminal.useMainBuffer();
   }
   terminal.setCursor(frame.cursorX, frame.cursorY);
+  if (frame.pendingWrap) {
+    terminal.buffer.cursorGoForward();
+  }
   terminal.setOriginMode(frame.originMode);
 }
 
