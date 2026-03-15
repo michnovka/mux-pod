@@ -1679,7 +1679,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
           label: 'Go',
           textColor: Colors.white,
           onPressed: () {
-            _lastBellWindowIndex = null;
             messenger.hideCurrentSnackBar();
             _selectWindow(session.name, bellWindow!.index);
           },
@@ -3010,7 +3009,6 @@ $metadataCommand
     final sshClient = ref.read(sshProvider.notifier).client;
     if (sshClient == null || !sshClient.isConnected || _isSwitchingPane) return;
 
-    _lastBellWindowIndex = null;
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
     _resetTransientTerminalUiBeforeSwitch();
     final previousSelection = _TmuxTargetSelection.fromState(
