@@ -127,6 +127,7 @@ class SettingsNotifier extends Notifier<AppSettings> {
     _darkModeKey,
     _fontSizeKey,
     _fontFamilyKey,
+    'settings_biometric_auth', // removed setting; still needs cleanup
     _notificationsKey,
     _vibrationKey,
     _keepScreenOnKey,
