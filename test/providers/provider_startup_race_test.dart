@@ -7,6 +7,7 @@ import 'package:flutter_muxpod/providers/connection_provider.dart';
 import 'package:flutter_muxpod/providers/key_provider.dart';
 import 'package:flutter_muxpod/providers/settings_provider.dart';
 import 'package:flutter_muxpod/providers/shared_preferences_provider.dart';
+import 'package:flutter_muxpod/services/storage/versioned_json_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 Future<void> _waitForCondition(
@@ -24,6 +25,9 @@ Future<void> _waitForCondition(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  String encodeEnvelope(Object? data) =>
+      jsonEncode({'version': sharedPreferencesSchemaVersion1, 'data': data});
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
@@ -53,6 +57,20 @@ void main() {
       expect(settings.darkMode, isFalse);
       expect(settings.fontSize, 18.0);
       expect(settings.directInputEnabled, isTrue);
+
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('settings');
+      expect(raw, isNotNull);
+      final stored = jsonDecode(raw!) as Map<String, dynamic>;
+      expect(stored['version'], sharedPreferencesSchemaVersion1);
+      expect((stored['data'] as Map<String, dynamic>)['darkMode'], isFalse);
+      expect(
+        (stored['data'] as Map<String, dynamic>)['directInputEnabled'],
+        isTrue,
+      );
+      expect(prefs.containsKey('settings_dark_mode'), isFalse);
+      expect(prefs.containsKey('settings_font_size'), isFalse);
+      expect(prefs.containsKey('settings_direct_input_enabled'), isFalse);
     },
   );
 
@@ -94,6 +112,13 @@ void main() {
           .map((key) => key.id)
           .toSet();
       expect(keyIds, {existingKey.id, addedKey.id});
+
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('ssh_keys_meta');
+      expect(raw, isNotNull);
+      final stored = jsonDecode(raw!) as Map<String, dynamic>;
+      expect(stored['version'], sharedPreferencesSchemaVersion1);
+      expect(stored['data'], hasLength(2));
     },
   );
 
@@ -140,6 +165,13 @@ void main() {
           .map((session) => session.key)
           .toSet();
       expect(keys, {existingSession.key, 'conn-2:new-session'});
+
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('active_sessions');
+      expect(raw, isNotNull);
+      final stored = jsonDecode(raw!) as Map<String, dynamic>;
+      expect(stored['version'], sharedPreferencesSchemaVersion1);
+      expect(stored['data'], hasLength(2));
     },
   );
 
@@ -175,9 +207,21 @@ void main() {
     'settings build loads synchronously when shared preferences are preloaded',
     () async {
       SharedPreferences.setMockInitialValues({
-        'settings_dark_mode': false,
-        'settings_font_size': 18.0,
-        'settings_direct_input_enabled': true,
+        'settings': encodeEnvelope({
+          'darkMode': false,
+          'fontSize': 18.0,
+          'directInputEnabled': true,
+          'fontFamily': 'JetBrains Mono',
+          'requireBiometricAuth': false,
+          'enableNotifications': true,
+          'enableVibration': true,
+          'keepScreenOn': true,
+          'scrollbackLines': 10000,
+          'minFontSize': 8.0,
+          'autoFitEnabled': true,
+          'showTerminalCursor': true,
+          'invertPaneNavigation': false,
+        }),
       });
       final prefs = await SharedPreferences.getInstance();
 
@@ -308,10 +352,12 @@ void main() {
 
       final raw = prefs.getString('active_sessions');
       expect(raw, isNotNull);
-      final stored = jsonDecode(raw!) as List<dynamic>;
-      expect(stored, hasLength(1));
+      final stored = jsonDecode(raw!) as Map<String, dynamic>;
+      expect(stored['version'], sharedPreferencesSchemaVersion1);
+      final data = stored['data'] as List<dynamic>;
+      expect(data, hasLength(1));
       expect(
-        (stored[0] as Map<String, dynamic>)['sessionName'],
+        (data[0] as Map<String, dynamic>)['sessionName'],
         'persist-session',
       );
     },

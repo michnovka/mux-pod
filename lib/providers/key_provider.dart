@@ -1,11 +1,11 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/keychain/secure_storage.dart';
 import '../services/keychain/ssh_key_service.dart';
+import '../services/storage/versioned_json_storage.dart';
 import 'shared_preferences_provider.dart';
 
 /// Enum indicating the origin of the key
@@ -140,9 +140,15 @@ class KeysNotifier extends Notifier<KeysState> {
         return const KeysState();
       }
 
-      final jsonList = jsonDecode(jsonString) as List<dynamic>;
-      final keys = jsonList
-          .map((json) => SshKeyMeta.fromJson(json as Map<String, dynamic>))
+      final loaded = decodeVersionedJsonEnvelope<List<SshKeyMeta>>(
+        raw: jsonString,
+        storageKey: _storageKey,
+        versionReaders: {
+          sharedPreferencesSchemaVersion1: (data) => _decodeKeysList(data),
+        },
+        legacyReader: (legacy) => _decodeKeysList(legacy),
+      );
+      final keys = loaded.value
           .toList();
 
       keys.sort((a, b) => b.createdAt.compareTo(a.createdAt));
@@ -150,6 +156,13 @@ class KeysNotifier extends Notifier<KeysState> {
     } catch (e) {
       return KeysState(error: e.toString());
     }
+  }
+
+  List<SshKeyMeta> _decodeKeysList(Object? data) {
+    final jsonList = data as List<dynamic>;
+    return jsonList
+        .map((json) => SshKeyMeta.fromJson(json as Map<String, dynamic>))
+        .toList();
   }
 
   Future<SharedPreferences> _getPrefs() async {
@@ -180,7 +193,7 @@ class KeysNotifier extends Notifier<KeysState> {
   Future<void> _saveKeys() async {
     final prefs = await _getPrefs();
     final jsonList = state.keys.map((k) => k.toJson()).toList();
-    await prefs.setString(_storageKey, jsonEncode(jsonList));
+    await prefs.setString(_storageKey, encodeVersionedJsonEnvelope(jsonList));
   }
 
   /// Add a key

@@ -1,9 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/storage/versioned_json_storage.dart';
 import '../services/tmux/tmux_parser.dart';
 import 'shared_preferences_provider.dart';
 
@@ -171,14 +171,28 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
         return const ActiveSessionsState();
       }
 
-      final jsonList = jsonDecode(jsonStr) as List<dynamic>;
-      final sessions = jsonList
-          .map((json) => ActiveSession.fromJson(json as Map<String, dynamic>))
+      final loaded = decodeVersionedJsonEnvelope<List<ActiveSession>>(
+        raw: jsonStr,
+        storageKey: _storageKey,
+        versionReaders: {
+          sharedPreferencesSchemaVersion1: (data) =>
+              _decodeActiveSessionsList(data),
+        },
+        legacyReader: (legacy) => _decodeActiveSessionsList(legacy),
+      );
+      final sessions = loaded.value
           .toList();
       return ActiveSessionsState(sessions: sessions);
     } catch (e) {
       return const ActiveSessionsState();
     }
+  }
+
+  List<ActiveSession> _decodeActiveSessionsList(Object? data) {
+    final jsonList = data as List<dynamic>;
+    return jsonList
+        .map((json) => ActiveSession.fromJson(json as Map<String, dynamic>))
+        .toList();
   }
 
   Future<SharedPreferences> _getPrefs() async {
@@ -212,7 +226,7 @@ class ActiveSessionsNotifier extends Notifier<ActiveSessionsState> {
     try {
       final prefs = await _getPrefs();
       final jsonList = state.sessions.map((s) => s.toJson()).toList();
-      await prefs.setString(_storageKey, jsonEncode(jsonList));
+      await prefs.setString(_storageKey, encodeVersionedJsonEnvelope(jsonList));
     } catch (e) {
       // Ignore save errors
     }

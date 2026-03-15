@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_muxpod/services/storage/versioned_json_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:flutter_muxpod/services/keychain/known_hosts_service.dart';
@@ -13,6 +15,9 @@ void main() {
     final prefs = await SharedPreferences.getInstance();
     service = KnownHostsService(prefs);
   });
+
+  String encodeEnvelope(Object? data) =>
+      jsonEncode({'version': sharedPreferencesSchemaVersion1, 'data': data});
 
   group('formatFingerprint', () {
     test('converts bytes to colon-separated hex', () {
@@ -143,6 +148,61 @@ void main() {
       final (status, _) =
           service2.lookup('example.com', 22, 'ssh-ed25519', 'aa:bb:cc');
       expect(status, HostKeyStatus.trusted);
+    });
+
+    test('writes known hosts in a versioned envelope', () async {
+      await service.save('example.com', 22, 'ssh-ed25519', 'aa:bb:cc');
+
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('known_hosts');
+      expect(raw, isNotNull);
+
+      final stored = jsonDecode(raw!) as Map<String, dynamic>;
+      expect(stored['version'], sharedPreferencesSchemaVersion1);
+      expect(
+        (stored['data'] as Map<String, dynamic>).containsKey('example.com:22'),
+        isTrue,
+      );
+    });
+
+    test('loads legacy unversioned known hosts entries', () async {
+      final legacyEntry = KnownHostEntry(
+        keyType: 'ssh-ed25519',
+        fingerprint: 'aa:bb:cc',
+        addedAt: DateTime.utc(2026, 3, 15),
+      );
+      SharedPreferences.setMockInitialValues({
+        'known_hosts': jsonEncode({'example.com:22': legacyEntry.toJson()}),
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final legacyService = KnownHostsService(prefs);
+
+      final (status, entry) =
+          legacyService.lookup('example.com', 22, 'ssh-ed25519', 'aa:bb:cc');
+
+      expect(status, HostKeyStatus.trusted);
+      expect(entry, isNotNull);
+      expect(entry!.fingerprint, legacyEntry.fingerprint);
+    });
+
+    test('loads versioned known hosts entries', () async {
+      final entry = KnownHostEntry(
+        keyType: 'ssh-ed25519',
+        fingerprint: 'aa:bb:cc',
+        addedAt: DateTime.utc(2026, 3, 15),
+      );
+      SharedPreferences.setMockInitialValues({
+        'known_hosts': encodeEnvelope({'example.com:22': entry.toJson()}),
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final versionedService = KnownHostsService(prefs);
+
+      final (status, loadedEntry) =
+          versionedService.lookup('example.com', 22, 'ssh-ed25519', 'aa:bb:cc');
+
+      expect(status, HostKeyStatus.trusted);
+      expect(loadedEntry, isNotNull);
+      expect(loadedEntry!.fingerprint, entry.fingerprint);
     });
   });
 

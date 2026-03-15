@@ -1,7 +1,8 @@
-import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../storage/versioned_json_storage.dart';
 
 /// Result of looking up a host in the known hosts store.
 enum HostKeyStatus { trusted, unknown, changed }
@@ -117,22 +118,33 @@ class KnownHostsService {
     if (raw == null) return {};
 
     try {
-      final decoded = jsonDecode(raw) as Map<String, dynamic>;
-      return decoded.map(
-        (key, value) => MapEntry(
-          key,
-          KnownHostEntry.fromJson(value as Map<String, dynamic>),
-        ),
-      );
+      return decodeVersionedJsonEnvelope<Map<String, KnownHostEntry>>(
+        raw: raw,
+        storageKey: _storageKey,
+        versionReaders: {
+          sharedPreferencesSchemaVersion1: (data) =>
+              _decodeEntries(data as Map<String, dynamic>),
+        },
+        legacyReader: (legacy) => _decodeEntries(legacy as Map<String, dynamic>),
+      ).value;
     } catch (_) {
       return {};
     }
   }
 
   Future<void> _saveEntries(Map<String, KnownHostEntry> entries) async {
-    final encoded = jsonEncode(
+    final encoded = encodeVersionedJsonEnvelope(
       entries.map((key, entry) => MapEntry(key, entry.toJson())),
     );
     await _prefs.setString(_storageKey, encoded);
+  }
+
+  Map<String, KnownHostEntry> _decodeEntries(Map<String, dynamic> decoded) {
+    return decoded.map(
+      (key, value) => MapEntry(
+        key,
+        KnownHostEntry.fromJson(value as Map<String, dynamic>),
+      ),
+    );
   }
 }
