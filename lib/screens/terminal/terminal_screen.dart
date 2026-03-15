@@ -23,6 +23,7 @@ import '../../services/ssh/input_queue.dart';
 import '../../services/ssh/ssh_client.dart'
     show SshConnectOptions, SshHostKeyError;
 import '../../services/terminal/bounded_text_buffer.dart';
+import '../../services/terminal/font_calculator.dart';
 import '../../services/terminal/terminal_image_attachment.dart';
 import '../../services/terminal/terminal_output_normalizer.dart';
 import '../../services/terminal/terminal_scrollback_merge.dart';
@@ -4391,16 +4392,24 @@ $metadataCommand
                                 );
                               case 'resize':
                                 final settings = ref.read(settingsProvider);
-                                final displayState =
-                                    ref.read(terminalDisplayProvider);
+                                final liveScreenWidth =
+                                    MediaQuery.of(context).size.width;
+                                final liveFontSize = settings.autoFitEnabled
+                                    ? FontCalculator.calculate(
+                                        screenWidth: liveScreenWidth,
+                                        paneCharWidth: pane.width,
+                                        fontFamily: settings.fontFamily,
+                                        minFontSize: settings.minFontSize,
+                                      ).fontSize
+                                    : settings.fontSize;
                                 final result =
                                     await showDialog<ViewportResizeResult>(
                                   context: context,
                                   builder: (_) => ViewportResizeDialog(
                                     currentColumns: pane.width,
                                     currentRows: pane.height,
-                                    availableWidth: displayState.screenWidth,
-                                    fontSize: displayState.effectiveFontSize,
+                                    availableWidth: liveScreenWidth,
+                                    fontSize: liveFontSize,
                                     fontFamily: settings.fontFamily,
                                   ),
                                 );
@@ -4419,11 +4428,15 @@ $metadataCommand
                                         );
                                   await _execTmuxManagement(colCmd);
                                   if (result.rows != null && mounted) {
-                                    final rowCmd =
-                                        TmuxCommands.resizePaneRows(
-                                      pane.id,
-                                      result.rows!,
-                                    );
+                                    final rowCmd = isSinglePane
+                                        ? TmuxCommands.resizeWindowRows(
+                                            '${tmuxState.activeSessionName}:${window.index}',
+                                            result.rows!,
+                                          )
+                                        : TmuxCommands.resizePaneRows(
+                                            pane.id,
+                                            result.rows!,
+                                          );
                                     await _execTmuxManagement(rowCmd);
                                   }
                                 }

@@ -89,6 +89,19 @@ void main() {
     });
   });
 
+  group('TmuxCommands.resizeWindowRows', () {
+    test('generates correct resize-window -y command', () {
+      final command = TmuxCommands.resizeWindowRows('main:0', 50);
+      expect(command, equals('tmux resize-window -t main:0 -y 50'));
+    });
+
+    test('escapes special characters in target', () {
+      final command = TmuxCommands.resizeWindowRows('my session:0', 24);
+      expect(command, contains('"my session:0"'));
+      expect(command, contains('-y 24'));
+    });
+  });
+
   group('TmuxCommands.capturePane', () {
     test('can join wrapped lines for snapshot replay', () {
       final command = TmuxCommands.capturePane(

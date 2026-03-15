@@ -244,6 +244,11 @@ class TmuxCommands {
     return 'tmux resize-window -t ${_escapeArg(target)} -x $columns';
   }
 
+  /// Resize a window to specific row height
+  static String resizeWindowRows(String target, int rows) {
+    return 'tmux resize-window -t ${_escapeArg(target)} -y $rows';
+  }
+
   // ===== Input and key sending =====
 
   /// Send keys
