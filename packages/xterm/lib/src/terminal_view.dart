@@ -317,6 +317,7 @@ class TerminalViewState extends State<TerminalView> {
       terminalView: this,
       terminalController: _controller,
       onTapUp: _onTapUp,
+      onSingleTapUp: _onSingleTapConfirmed,
       onTapDown: _onTapDown,
       onSecondaryTapDown:
           widget.onSecondaryTapDown != null ? _onSecondaryTapDown : null,
@@ -368,11 +369,17 @@ class TerminalViewState extends State<TerminalView> {
     if (_controller.selection != null) {
       _controller.clearSelection();
     } else {
-      if (!widget.hardwareKeyboardOnly) {
-        _customTextEditKey.currentState?.requestKeyboard();
-      } else {
-        _focusNode.requestFocus();
-      }
+      // Only request focus here — not the keyboard.  The soft keyboard is
+      // requested in _onSingleTapConfirmed() once the gesture system
+      // confirms a short tap, so that long-presses and drags don't
+      // trigger a keyboard show/hide cycle.
+      _focusNode.requestFocus();
+    }
+  }
+
+  void _onSingleTapConfirmed(TapUpDetails details) {
+    if (!widget.hardwareKeyboardOnly) {
+      _customTextEditKey.currentState?.requestKeyboard();
     }
   }
 
