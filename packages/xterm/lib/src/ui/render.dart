@@ -533,6 +533,10 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         }
 
         _paintSegment(canvas, segment, highlight.color);
+
+        if (highlight.underline) {
+          _paintSegmentUnderline(canvas, segment, highlight.color);
+        }
       }
     }
   }
@@ -548,5 +552,28 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     );
 
     _painter.paintHighlight(canvas, startOffset, end - start, color);
+  }
+
+  void _paintSegmentUnderline(
+    Canvas canvas,
+    BufferSegment segment,
+    Color color,
+  ) {
+    final start = segment.start ?? 0;
+    final end = segment.end ?? _terminal.viewWidth;
+
+    final y =
+        segment.line * _painter.cellSize.height + _lineOffset +
+        _painter.cellSize.height - 1;
+
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1;
+
+    canvas.drawLine(
+      Offset(start * _painter.cellSize.width, y),
+      Offset(end * _painter.cellSize.width, y),
+      paint,
+    );
   }
 }

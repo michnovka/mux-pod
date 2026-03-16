@@ -39,6 +39,15 @@ class SettingsScreen extends ConsumerWidget {
                   },
                 ),
                 SwitchListTile(
+                  secondary: const Icon(Icons.link),
+                  title: const Text('URL Detection'),
+                  subtitle: const Text('Detect and highlight URLs in terminal output'),
+                  value: settings.enableUrlDetection,
+                  onChanged: (value) {
+                    ref.read(settingsProvider.notifier).setEnableUrlDetection(value);
+                  },
+                ),
+                SwitchListTile(
                   secondary: const Icon(Icons.fit_screen),
                   title: const Text('Auto Fit'),
                   subtitle: const Text('Fit terminal width to screen'),
