@@ -286,6 +286,10 @@ class IndexAwareCircularBuffer<T extends IndexedItem> {
   /// trimmed.
   bool get isFull => length == maxLength;
 
+  /// The total number of elements that have been dropped from the start of the
+  /// buffer due to overflow.  Monotonically increasing.
+  int get droppedCount => _absoluteStartIndex;
+
   /// Returns a list containing all elements in the list.
   List<T> toList() {
     return List<T>.generate(length, (index) => this[index]);
