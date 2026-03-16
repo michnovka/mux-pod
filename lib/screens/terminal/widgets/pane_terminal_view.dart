@@ -97,6 +97,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   final List<TerminalHighlight> _urlHighlights = [];
   Timer? _urlScanTimer;
   VoidCallback? _terminalUrlListener;
+  double _effectiveFontSize = 14.0; // updated each build with real value
 
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
   Offset _twoFingerPanStart = Offset.zero;
@@ -745,11 +746,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   }
 
   double _estimateCellHeight() {
-    // Use the terminal's line height. A rough estimate based on font size
-    // is sufficient since this is only for viewport range calculation.
-    final settings = ref.read(settingsProvider);
-    final fontSize = settings.fontSize * _currentScale;
-    return fontSize * 1.4; // matches TerminalStyle height: 1.4
+    return _effectiveFontSize * 1.4; // matches TerminalStyle height: 1.4
   }
 
   void _clearUrlHighlights() {
@@ -1067,6 +1064,15 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
             : settings.fontSize;
 
         final fontSize = baseFontSize * _currentScale;
+
+        // Track the effective font size so _estimateCellHeight() uses the
+        // real rendered size, not the raw setting (which differs under
+        // auto-fit).  Schedule a rescan when it changes.
+        if ((_effectiveFontSize - fontSize).abs() > 0.01) {
+          _effectiveFontSize = fontSize;
+          _scheduleUrlScan();
+        }
+
         final terminalWidth = FontCalculator.calculateTerminalWidth(
           paneCharWidth: widget.paneWidth,
           fontSize: fontSize,
