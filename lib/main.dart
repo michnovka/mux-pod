@@ -23,7 +23,9 @@ void main() async {
   // Initialize version info
   await VersionInfo.initialize();
 
-  // Initialize bell notification service
+  // Initialize bell notification service.
+  // The fallback tap handler is only reached when no active TerminalScreen
+  // consumes the tap (see BellNotificationService.activeTerminalHandler).
   final bellService = BellNotificationService();
   await bellService.initialize();
   bellService.onNotificationTap = _handleBellNotificationTap;
@@ -56,18 +58,33 @@ void main() async {
   });
 }
 
+/// Fallback handler when no active TerminalScreen consumed the notification
+/// tap (cold-start or user is on the home/connections screen).
+///
+/// Opens a TerminalScreen with [TerminalScreen.fromNotification] set so that
+/// [_connectAndSetup] will NOT create a brand-new tmux session if the
+/// payload's session has been renamed or killed since the notification was
+/// posted.
 void _handleBellNotificationTap(Map<String, dynamic> payload) {
   final connectionId = payload['connectionId'] as String?;
   final sessionName = payload['sessionName'] as String?;
   final windowIndex = payload['windowIndex'] as int?;
   if (connectionId == null) return;
 
-  navigatorKey.currentState?.push(
+  final navigator = navigatorKey.currentState;
+  if (navigator == null) return;
+
+  // Pop any existing TerminalScreen to avoid stacking two instances that
+  // share the global sshProvider/tmuxProvider state.
+  navigator.popUntil((route) => route.isFirst);
+
+  navigator.push(
     MaterialPageRoute(
       builder: (_) => TerminalScreen(
         connectionId: connectionId,
         sessionName: sessionName,
         lastWindowIndex: windowIndex,
+        fromNotification: true,
       ),
     ),
   );

@@ -20,7 +20,12 @@ class BellNotificationService {
   bool _isInitialized = false;
   BellNotificationTapCallback? _onTap;
 
-  /// Set the callback invoked when a notification is tapped.
+  /// Handler registered by the active terminal screen.
+  /// Returns true if the tap was consumed (e.g. same connection, navigated
+  /// to the target window).  Falls through to [_onTap] when null or false.
+  bool Function(Map<String, dynamic> payload)? activeTerminalHandler;
+
+  /// Set the fallback callback invoked when no terminal screen handles the tap.
   set onNotificationTap(BellNotificationTapCallback? callback) {
     _onTap = callback;
   }
@@ -76,6 +81,8 @@ class BellNotificationService {
     if (response.payload == null) return;
     try {
       final payload = jsonDecode(response.payload!) as Map<String, dynamic>;
+      // Let the active terminal screen handle the tap if possible.
+      if (activeTerminalHandler?.call(payload) == true) return;
       _onTap?.call(payload);
     } catch (e) {
       developer.log(
