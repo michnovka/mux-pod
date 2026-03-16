@@ -97,7 +97,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   final List<TerminalHighlight> _urlHighlights = [];
   Timer? _urlScanTimer;
   VoidCallback? _terminalUrlListener;
-  double _effectiveFontSize = 14.0; // updated each build with real value
 
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
   Offset _twoFingerPanStart = Offset.zero;
@@ -127,11 +126,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   void didUpdateWidget(covariant PaneTerminalView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.verticalScrollController != widget.verticalScrollController) {
-      // Migrate scroll listener for URL detection.
-      final oldVsc = oldWidget.verticalScrollController ??
-          _internalVerticalScrollController;
-      oldVsc?.removeListener(_scheduleUrlScan);
-
       if (oldWidget.verticalScrollController == null) {
         _internalVerticalScrollController?.dispose();
       }
@@ -140,8 +134,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       } else {
         _internalVerticalScrollController = null;
       }
-
-      _verticalScrollController.addListener(_scheduleUrlScan);
     }
     if (oldWidget.terminalController != widget.terminalController) {
       oldWidget.terminalController.removeListener(_handleSelectionChanged);
@@ -180,7 +172,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       _baseScale = 1.0;
     });
     widget.onZoomChanged?.call(1.0);
-    _scheduleUrlScan();
   }
 
   void scrollToBottom() {
@@ -239,12 +230,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     if (scaleChanged) {
       widget.onZoomChanged?.call(effectiveState.zoomScale);
     }
-
-    // URL highlights depend on viewport position and zoom — rescan after
-    // the viewport settles (the scroll listener will also fire, but this
-    // covers the scale-only path and the initial restore before scroll
-    // controller has clients).
-    _scheduleUrlScan();
 
     if (effectiveState.followBottom) {
       scrollToBottom();
@@ -612,7 +597,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       _currentScale = newScale;
     });
     widget.onZoomChanged?.call(newScale);
-    _scheduleUrlScan();
   }
 
   void _endTwoFingerGesture() {
@@ -664,13 +648,11 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   void _setupUrlDetection() {
     _terminalUrlListener = _scheduleUrlScan;
     widget.terminal.addListener(_terminalUrlListener!);
-    _verticalScrollController.addListener(_scheduleUrlScan);
   }
 
   void _teardownUrlDetection() {
     _urlScanTimer?.cancel();
     _urlScanTimer = null;
-    _verticalScrollController.removeListener(_scheduleUrlScan);
     if (_terminalUrlListener != null) {
       widget.terminal.removeListener(_terminalUrlListener!);
       _terminalUrlListener = null;
@@ -699,24 +681,11 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     final lineCount = buffer.lines.length;
     if (lineCount == 0) return;
 
-    // Compute visible line range from scroll position.
-    final cellHeight = _estimateCellHeight();
-    final scrollOffset = _verticalScrollController.hasClients
-        ? _verticalScrollController.position.pixels
-        : 0.0;
-    final viewportHeight = _verticalScrollController.hasClients
-        ? _verticalScrollController.position.viewportDimension
-        : 500.0;
-
-    final firstLine = (scrollOffset / cellHeight).floor() - 5;
-    final lastLine =
-        ((scrollOffset + viewportHeight) / cellHeight).ceil() + 5;
-
-    final newUrls = TerminalUrlDetector.scanLines(
-      buffer,
-      firstLine.clamp(0, lineCount - 1),
-      lastLine.clamp(0, lineCount - 1),
-    );
+    // Scan the entire buffer — the regex is fast (microseconds even at 10K
+    // lines) and the paint path already filters highlights to visible lines.
+    // This avoids fragile cell-height estimation that diverges from the
+    // actual rendered size computed by TerminalPainter._measureCharSize().
+    final newUrls = TerminalUrlDetector.scanLines(buffer, 0, lineCount - 1);
 
     // Diff: only update if URLs changed.
     if (_urlsEqual(newUrls, _detectedUrls)) return;
@@ -743,10 +712,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       );
       _urlHighlights.add(highlight);
     }
-  }
-
-  double _estimateCellHeight() {
-    return _effectiveFontSize * 1.4; // matches TerminalStyle height: 1.4
   }
 
   void _clearUrlHighlights() {
@@ -1038,16 +1003,10 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
 
-    // Re-run URL detection when settings that affect it change (toggle,
-    // font size / family / auto-fit — all influence cell height or whether
-    // detection is enabled).
+    // Re-run URL detection when the toggle changes.
     ref.listen(settingsProvider, (prev, next) {
       if (prev == null) return;
-      if (prev.enableUrlDetection != next.enableUrlDetection ||
-          prev.fontSize != next.fontSize ||
-          prev.fontFamily != next.fontFamily ||
-          prev.autoFitEnabled != next.autoFitEnabled ||
-          prev.minFontSize != next.minFontSize) {
+      if (prev.enableUrlDetection != next.enableUrlDetection) {
         _scheduleUrlScan();
       }
     });
@@ -1064,15 +1023,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
             : settings.fontSize;
 
         final fontSize = baseFontSize * _currentScale;
-
-        // Track the effective font size so _estimateCellHeight() uses the
-        // real rendered size, not the raw setting (which differs under
-        // auto-fit).  Schedule a rescan when it changes.
-        if ((_effectiveFontSize - fontSize).abs() > 0.01) {
-          _effectiveFontSize = fontSize;
-          _scheduleUrlScan();
-        }
-
         final terminalWidth = FontCalculator.calculateTerminalWidth(
           paneCharWidth: widget.paneWidth,
           fontSize: fontSize,
