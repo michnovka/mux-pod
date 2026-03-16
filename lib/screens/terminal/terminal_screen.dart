@@ -1654,6 +1654,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             _terminalScrollController.hasClients
         ? _terminalScrollController.position.pixels
         : null;
+    final droppedBefore = _terminal.buffer.lines.droppedCount;
     _terminal.write(data);
     _recordPendingLiveUpdate(data: data, beforeScrollBack: scrollBackBeforeWrite);
     if ((shouldAutoScroll || !_hasInitialScrolled) &&
@@ -1661,7 +1662,27 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _hasInitialScrolled = true;
       _paneTerminalViewKey.currentState?.scrollToBottom();
     } else if (historyViewportPixels != null) {
-      _preserveHistoryViewportAnchor(historyViewportPixels);
+      // When the scrollback buffer is at capacity, writing new output evicts
+      // old lines from the top.  The content that was at pixel P is now at
+      // P - evictedLines * lineHeight.  Apply the correction synchronously
+      // via correctBy() so the upcoming layout pass renders the right content
+      // (a post-frame jumpTo alone would cause a one-frame glitch).
+      final evicted = _terminal.buffer.lines.droppedCount - droppedBefore;
+      double adjustedPixels = historyViewportPixels;
+      if (evicted > 0) {
+        final scrollBack = _terminal.buffer.scrollBack;
+        if (scrollBack > 0 && _terminalScrollController.hasClients) {
+          final position = _terminalScrollController.position;
+          final lineHeight = position.maxScrollExtent / scrollBack;
+          adjustedPixels = (historyViewportPixels - evicted * lineHeight)
+              .clamp(0.0, position.maxScrollExtent);
+          final correction = adjustedPixels - position.pixels;
+          if (correction.abs() > 0.5) {
+            position.correctBy(correction);
+          }
+        }
+      }
+      _preserveHistoryViewportAnchor(adjustedPixels);
     }
   }
 
