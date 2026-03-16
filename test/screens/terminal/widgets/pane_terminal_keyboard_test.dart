@@ -42,8 +42,15 @@ void main() {
     );
   }
 
+  /// Flush the 500ms URL scan debounce timer.
+  Future<void> flushTimers(WidgetTester tester) async {
+    await tester.pump(const Duration(milliseconds: 600));
+  }
+
   group('PaneTerminalView keyboard behavior', () {
-    testWidgets('tap re-opens keyboard after it was closed', (tester) async {
+    testWidgets('single tap opens keyboard via onSingleTapUp', (
+      tester,
+    ) async {
       final terminal = Terminal(maxLines: 100, reflowEnabled: false);
       final controller = TerminalController();
 
@@ -56,19 +63,17 @@ void main() {
         find.byType(TerminalView),
       );
 
-      // Autofocus opens connection — close it to simulate hidden keyboard
+      // Close keyboard opened by autofocus
       terminalViewState.closeKeyboard();
       await tester.pumpAndSettle();
       expect(terminalViewState.hasInputConnection, isFalse);
 
-      // Tap should reopen
+      // Single tap should open keyboard (via onSingleTapUp)
       await tester.tap(find.byType(TerminalView));
       await tester.pumpAndSettle();
 
       expect(terminalViewState.hasInputConnection, isTrue);
-
-      // Flush URL scan debounce timer
-      await tester.pump(const Duration(milliseconds: 600));
+      await flushTimers(tester);
     });
 
     testWidgets('tap keeps keyboard open when already connected', (
@@ -86,7 +91,7 @@ void main() {
         find.byType(TerminalView),
       );
 
-      // Keyboard is already open from autofocus
+      // Keyboard already open from autofocus
       expect(terminalViewState.hasInputConnection, isTrue);
 
       // Tap should keep it open
@@ -94,12 +99,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(terminalViewState.hasInputConnection, isTrue);
 
-      await tester.pump(const Duration(milliseconds: 600));
+      await flushTimers(tester);
     });
 
-    testWidgets('long-press closes keyboard that was opened by tap-down', (
-      tester,
-    ) async {
+    testWidgets('long-press does not open keyboard', (tester) async {
       final terminal = Terminal(maxLines: 100, reflowEnabled: false);
       final controller = TerminalController();
 
@@ -117,14 +120,12 @@ void main() {
       await tester.pumpAndSettle();
       expect(terminalViewState.hasInputConnection, isFalse);
 
-      // Long-press: tap-down re-opens keyboard, but long-press handler
-      // should close it because it was hidden before tap-down
+      // Long-press should NOT open keyboard
       await tester.longPress(find.byType(TerminalView));
       await tester.pumpAndSettle();
 
       expect(terminalViewState.hasInputConnection, isFalse);
-
-      await tester.pump(const Duration(milliseconds: 600));
+      await flushTimers(tester);
     });
 
     testWidgets('long-press keeps keyboard when it was already open', (
@@ -150,8 +151,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(terminalViewState.hasInputConnection, isTrue);
-
-      await tester.pump(const Duration(milliseconds: 600));
+      await flushTimers(tester);
     });
 
     testWidgets('onTapUp and onLongPressStart are wired for URL detection', (
@@ -170,6 +170,8 @@ void main() {
       );
       expect(terminalView.onTapUp, isNotNull);
       expect(terminalView.onLongPressStart, isNotNull);
+
+      await flushTimers(tester);
     });
   });
 }
