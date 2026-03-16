@@ -1096,6 +1096,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   void _preserveHistoryViewportAnchor(double pixels) {
     if (_isFollowingLiveTail) {
+      _terminalScrollController.freezePositionForHistory = false;
       return;
     }
 
@@ -1107,6 +1108,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _historyViewportAnchorScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _historyViewportAnchorScheduled = false;
+      // Layout is complete — allow normal corrections again.
+      _terminalScrollController.freezePositionForHistory = false;
 
       if (!mounted || _isDisposed || _isFollowingLiveTail) {
         return;
@@ -1654,6 +1657,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             _terminalScrollController.hasClients
         ? _terminalScrollController.position.pixels
         : null;
+    // Tell the scroll position to block framework-driven corrections
+    // (correctForNewDimensions) while we write to the terminal buffer.
+    // Without this, applyContentDimensions → adjustPositionForNewDimensions
+    // can shift the viewport toward the new bottom during layout.
+    if (shouldPreserveHistoryViewport) {
+      _terminalScrollController.freezePositionForHistory = true;
+    }
     final droppedBefore = _terminal.buffer.lines.droppedCount;
     _terminal.write(data);
     _recordPendingLiveUpdate(data: data, beforeScrollBack: scrollBackBeforeWrite);
@@ -5686,6 +5696,11 @@ class _StableScrollController extends ScrollController {
   /// above).
   bool suppressScrollToMax = false;
 
+  /// When true, the framework's `correctForNewDimensions` is blocked so
+  /// that growing content (new output) cannot shift the viewport while the
+  /// user is reading history.
+  bool freezePositionForHistory = false;
+
   int _unsuppressedStickToBottomPasses = 0;
 
   /// Total height lost by the viewport when the keyboard opened (keyboard
@@ -5756,6 +5771,20 @@ class _StableScrollPosition extends ScrollPositionWithSingleContext {
       maxScrollExtent: maxScrollExtent,
       viewportShrinkBudget: controller.viewportShrinkBudget,
     );
+  }
+
+  @override
+  bool correctForNewDimensions(
+    ScrollMetrics oldPosition,
+    ScrollMetrics newPosition,
+  ) {
+    // While the user is reading history, prevent the framework's
+    // adjustPositionForNewDimensions from shifting the viewport when
+    // content grows (maxScrollExtent increases).
+    if (controller.freezePositionForHistory) {
+      return true; // signal "handled" — no correction needed
+    }
+    return super.correctForNewDimensions(oldPosition, newPosition);
   }
 
   @override
