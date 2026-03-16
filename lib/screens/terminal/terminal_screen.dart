@@ -1981,15 +1981,37 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             _terminalScrollController.hasClients
         ? _terminalScrollController.position.pixels
         : null;
+    if (shouldPreserveHistoryViewport) {
+      _terminalScrollController.freezePositionForHistory = true;
+    }
+    final droppedBefore = _terminal.buffer.lines.droppedCount;
     _terminal.write(bufferedOutput);
     _recordPendingLiveUpdate(
       data: bufferedOutput,
       beforeScrollBack: scrollBackBeforeWrite,
     );
     if (shouldAutoScroll && !_terminal.isInSynchronizedUpdate) {
+      _terminalScrollController.freezePositionForHistory = false;
       _paneTerminalViewKey.currentState?.scrollToBottom();
     } else if (historyViewportPixels != null) {
-      _preserveHistoryViewportAnchor(historyViewportPixels);
+      final evicted = _terminal.buffer.lines.droppedCount - droppedBefore;
+      double adjustedPixels = historyViewportPixels;
+      if (evicted > 0 && _terminalScrollController.hasClients) {
+        final position = _terminalScrollController.position;
+        final totalLines = _terminal.buffer.lines.length;
+        if (totalLines > 0) {
+          final lineHeight =
+              (position.maxScrollExtent + position.viewportDimension) /
+                  totalLines;
+          adjustedPixels = (historyViewportPixels - evicted * lineHeight)
+              .clamp(0.0, position.maxScrollExtent);
+          final correction = adjustedPixels - position.pixels;
+          if (correction.abs() > 0.5) {
+            position.correctBy(correction);
+          }
+        }
+      }
+      _preserveHistoryViewportAnchor(adjustedPixels);
     }
   }
 
