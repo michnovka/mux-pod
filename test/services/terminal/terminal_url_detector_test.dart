@@ -104,6 +104,33 @@ void main() {
       expect(urls[1].url, 'https://b.com/path');
     });
 
+    test('preserves balanced parentheses in URL (Wikipedia)', () {
+      final urls = TerminalUrlDetector.scanText(
+        'https://en.wikipedia.org/wiki/Function_(mathematics)',
+      );
+      expect(urls, hasLength(1));
+      expect(
+        urls[0].url,
+        'https://en.wikipedia.org/wiki/Function_(mathematics)',
+      );
+    });
+
+    test('strips unbalanced trailing paren from URL in prose', () {
+      final urls = TerminalUrlDetector.scanText(
+        '(see https://example.com)',
+      );
+      expect(urls, hasLength(1));
+      expect(urls[0].url, 'https://example.com');
+    });
+
+    test('preserves nested balanced parens in URL', () {
+      final urls = TerminalUrlDetector.scanText(
+        'https://example.com/a(b(c)d)',
+      );
+      expect(urls, hasLength(1));
+      expect(urls[0].url, 'https://example.com/a(b(c)d)');
+    });
+
     test('matches URL with path, dashes, and underscores', () {
       final urls = TerminalUrlDetector.scanText(
         'https://my-host.example.com/path_segment/file-name',

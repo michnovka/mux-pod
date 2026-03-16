@@ -126,6 +126,11 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   void didUpdateWidget(covariant PaneTerminalView oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.verticalScrollController != widget.verticalScrollController) {
+      // Migrate scroll listener for URL detection.
+      final oldVsc = oldWidget.verticalScrollController ??
+          _internalVerticalScrollController;
+      oldVsc?.removeListener(_scheduleUrlScan);
+
       if (oldWidget.verticalScrollController == null) {
         _internalVerticalScrollController?.dispose();
       }
@@ -134,6 +139,8 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       } else {
         _internalVerticalScrollController = null;
       }
+
+      _verticalScrollController.addListener(_scheduleUrlScan);
     }
     if (oldWidget.terminalController != widget.terminalController) {
       oldWidget.terminalController.removeListener(_handleSelectionChanged);
@@ -147,6 +154,9 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       _clearUrlHighlights();
       _detectedUrls = const [];
       _setupUrlDetection();
+    }
+    if (oldWidget.mode != widget.mode) {
+      _scheduleUrlScan();
     }
   }
 
@@ -593,6 +603,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       _currentScale = newScale;
     });
     widget.onZoomChanged?.call(newScale);
+    _scheduleUrlScan();
   }
 
   void _endTwoFingerGesture() {
@@ -644,11 +655,13 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   void _setupUrlDetection() {
     _terminalUrlListener = _scheduleUrlScan;
     widget.terminal.addListener(_terminalUrlListener!);
+    _verticalScrollController.addListener(_scheduleUrlScan);
   }
 
   void _teardownUrlDetection() {
     _urlScanTimer?.cancel();
     _urlScanTimer = null;
+    _verticalScrollController.removeListener(_scheduleUrlScan);
     if (_terminalUrlListener != null) {
       widget.terminal.removeListener(_terminalUrlListener!);
       _terminalUrlListener = null;
@@ -708,7 +721,11 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       if (url.start.y >= lineCount || url.end.y >= lineCount) continue;
 
       final p1 = buffer.createAnchorFromOffset(url.start);
-      final p2 = buffer.createAnchorFromOffset(url.end);
+      // Highlight range end is exclusive — advance one column past the last
+      // character so the underline/background covers the full URL.
+      final p2 = buffer.createAnchorFromOffset(
+        CellOffset(url.end.x + 1, url.end.y),
+      );
       final highlight = widget.terminalController.highlight(
         p1: p1,
         p2: p2,

@@ -31,13 +31,38 @@ class DetectedUrl {
 /// Scans terminal buffer lines for URLs.
 class TerminalUrlDetector {
   /// Matches http:// and https:// URLs.
-  /// Excludes surrounding quotes, brackets, and trailing punctuation.
+  /// Allows parentheses inside URLs (e.g. Wikipedia links) — balanced trailing
+  /// parens are trimmed in [_trimUrl] after matching.
   static final _urlPattern = RegExp(
-    r'https?://[^\s<>"' "'" r'{}\[\]|\\^`]+[^\s<>"' "'" r'{}\[\]|\\^`.,;:!?\-)}\]]',
+    r'https?://[^\s<>"' "'" r'{}\[\]|\\^`]+[^\s<>"' "'" r'{}\[\]|\\^`.,;:!?}\]]',
   );
 
   /// Expose pattern for testing.
   static RegExp get urlPattern => _urlPattern;
+
+  /// Trim unbalanced trailing punctuation from a raw regex match.
+  /// Handles cases like `(https://example.com)` where the trailing `)` is
+  /// not part of the URL, but preserves balanced parens inside the URL such as
+  /// `https://en.wikipedia.org/wiki/Foo_(bar)`.
+  static String _trimUrl(String raw) {
+    var url = raw;
+    // Repeatedly strip a trailing ')' if the URL has more closing than opening
+    // parens — that means the outermost ')' is punctuation, not URL content.
+    while (url.endsWith(')')) {
+      final open = '('.allMatches(url).length;
+      final close = ')'.allMatches(url).length;
+      if (close > open) {
+        url = url.substring(0, url.length - 1);
+      } else {
+        break;
+      }
+    }
+    // Strip any remaining trailing punctuation that slipped through the regex.
+    while (url.length > 1 && '.,:;!?'.contains(url[url.length - 1])) {
+      url = url.substring(0, url.length - 1);
+    }
+    return url;
+  }
 
   /// Scan a range of buffer lines for URLs.
   ///
@@ -91,9 +116,11 @@ class TerminalUrlDetector {
 
       // Find all URL matches.
       for (final match in _urlPattern.allMatches(joinedText)) {
-        final url = match.group(0)!;
+        final rawUrl = match.group(0)!;
+        final url = _trimUrl(rawUrl);
+        if (url.length <= 'https://'.length) continue;
         final startChar = match.start;
-        final endChar = match.end - 1; // inclusive
+        final endChar = startChar + url.length - 1; // inclusive
 
         final startPos = _charOffsetToCell(startChar, lineLengths, groupStart);
         final endPos = _charOffsetToCell(endChar, lineLengths, groupStart);
@@ -110,11 +137,13 @@ class TerminalUrlDetector {
   static List<DetectedUrl> scanText(String text, {int row = 0}) {
     final results = <DetectedUrl>[];
     for (final match in _urlPattern.allMatches(text)) {
-      final url = match.group(0)!;
+      final rawUrl = match.group(0)!;
+      final url = _trimUrl(rawUrl);
+      if (url.length <= 'https://'.length) continue;
       results.add(DetectedUrl(
         url: url,
         start: CellOffset(match.start, row),
-        end: CellOffset(match.end - 1, row),
+        end: CellOffset(match.start + url.length - 1, row),
       ));
     }
     return results;
