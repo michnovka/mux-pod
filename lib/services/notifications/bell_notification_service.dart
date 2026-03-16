@@ -44,7 +44,7 @@ class BellNotificationService {
     const initSettings = InitializationSettings(android: androidSettings);
 
     await _plugin.initialize(
-      initSettings,
+      settings: initSettings,
       onDidReceiveNotificationResponse: _handleNotificationResponse,
     );
 
@@ -122,10 +122,10 @@ class BellNotificationService {
     const details = NotificationDetails(android: androidDetails);
 
     await _plugin.show(
-      notificationId,
-      'Bell: $windowName',
-      '$connectionName > $sessionName',
-      details,
+      id: notificationId,
+      title: 'Bell: $windowName',
+      body: '$connectionName > $sessionName',
+      notificationDetails: details,
       payload: payload,
     );
   }
