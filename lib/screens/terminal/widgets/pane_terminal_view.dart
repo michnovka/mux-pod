@@ -662,7 +662,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
 
   void _scheduleUrlScan() {
     _urlScanTimer?.cancel();
-    _urlScanTimer = Timer(const Duration(milliseconds: 150), _runUrlScan);
+    _urlScanTimer = Timer(const Duration(milliseconds: 500), _runUrlScan);
   }
 
   void _runUrlScan() {
@@ -681,10 +681,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     final lineCount = buffer.lines.length;
     if (lineCount == 0) return;
 
-    // Scan the entire buffer — the regex is fast (microseconds even at 10K
-    // lines) and the paint path already filters highlights to visible lines.
-    // This avoids fragile cell-height estimation that diverges from the
-    // actual rendered size computed by TerminalPainter._measureCharSize().
     final newUrls = TerminalUrlDetector.scanLines(buffer, 0, lineCount - 1);
 
     // Diff: only update if URLs changed.
