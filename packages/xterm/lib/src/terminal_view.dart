@@ -364,11 +364,16 @@ class TerminalViewState extends State<TerminalView> {
     widget.onTapUp?.call(details, offset);
   }
 
+  bool _keyboardWasHiddenOnTapDown = false;
+
   void _onTapDown(_) {
     if (_controller.selection != null) {
       _controller.clearSelection();
     } else {
       if (!widget.hardwareKeyboardOnly) {
+        // Track whether the keyboard was hidden before this tap-down so
+        // the long-press handler can undo the keyboard show if needed.
+        _keyboardWasHiddenOnTapDown = !hasInputConnection;
         _customTextEditKey.currentState?.requestKeyboard();
       } else {
         _focusNode.requestFocus();
@@ -387,6 +392,12 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   bool _onLongPressStart(LongPressStartDetails details) {
+    // If the preceding tap-down opened the keyboard (it was hidden before),
+    // close it so that long-presses don't trigger a keyboard show/hide cycle.
+    if (_keyboardWasHiddenOnTapDown && !widget.hardwareKeyboardOnly) {
+      _customTextEditKey.currentState?.closeKeyboard();
+      _keyboardWasHiddenOnTapDown = false;
+    }
     final offset = renderTerminal.getCellOffset(details.localPosition);
     return widget.onLongPressStart?.call(details, offset) ?? false;
   }
