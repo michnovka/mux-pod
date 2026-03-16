@@ -21,7 +21,7 @@ void main() {
     VoidCallback? onToggleSelect,
     bool selectModeActive = false,
     VoidCallback? onPaste,
-    VoidCallback? onReplies,
+    VoidCallback? onSearch,
   }) {
     return MaterialApp(
       home: Scaffold(
@@ -41,7 +41,7 @@ void main() {
             onToggleSelect: onToggleSelect,
             selectModeActive: selectModeActive,
             onPaste: onPaste,
-            onReplies: onReplies,
+            onSearch: onSearch,
           ),
         ),
       ),
@@ -90,7 +90,7 @@ void main() {
       }
 
       // Action row labels
-      for (final label in const ['IMG', 'SEL', 'PASTE', 'REPLY']) {
+      for (final label in const ['IMG', 'SEL', 'PASTE', 'FIND']) {
         expect(find.text(label), findsOneWidget);
       }
     });

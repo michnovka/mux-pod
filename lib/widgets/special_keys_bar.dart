@@ -18,7 +18,7 @@ class SpecialKeysBar extends StatelessWidget {
   final VoidCallback? onToggleSelect;
   final bool selectModeActive;
   final VoidCallback? onPaste;
-  final VoidCallback? onReplies;
+  final VoidCallback? onSearch;
   final bool hapticFeedback;
 
   const SpecialKeysBar({
@@ -36,7 +36,7 @@ class SpecialKeysBar extends StatelessWidget {
     this.onToggleSelect,
     this.selectModeActive = false,
     this.onPaste,
-    this.onReplies,
+    this.onSearch,
     this.hapticFeedback = true,
   });
 
@@ -142,9 +142,9 @@ class SpecialKeysBar extends StatelessWidget {
           flex: 2,
           child: _buildActionButton(
             context,
-            icon: Icons.chat_outlined,
-            label: 'REPLY',
-            onTap: onReplies,
+            icon: Icons.search,
+            label: 'FIND',
+            onTap: onSearch,
             isActive: false,
           ),
         ),
