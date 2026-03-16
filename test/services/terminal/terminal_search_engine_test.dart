@@ -180,6 +180,86 @@ void main() {
       expect(matches[0].end, CellOffset(4, 0));
     });
 
+    test('astral-plane emoji does not shift match offsets', () {
+      final terminal = Terminal(maxLines: 1000);
+      // U+1F642 (🙂) is an astral-plane code point — 2 UTF-16 code units,
+      // width-2 in the terminal (same as CJK).
+      terminal.write('🙂a\r\n');
+
+      final matches = TerminalSearchEngine.search(
+        terminal.mainBuffer,
+        query: 'a',
+      );
+
+      expect(matches, hasLength(1));
+      // '🙂' occupies cells 0-1 (width-2), 'a' at cell 2.
+      expect(matches[0].start.x, 2);
+      expect(matches[0].end.x, 2);
+    });
+
+    test('astral-plane emoji can be found by searching for it', () {
+      final terminal = Terminal(maxLines: 1000);
+      terminal.write('x🙂y\r\n');
+
+      final matches = TerminalSearchEngine.search(
+        terminal.mainBuffer,
+        query: '🙂',
+      );
+
+      expect(matches, hasLength(1));
+      // 'x' at cell 0, '🙂' at cells 1-2 (width-2).
+      expect(matches[0].start.x, 1);
+      expect(matches[0].end.x, 2);
+    });
+
+    test('multiple astral characters before match', () {
+      final terminal = Terminal(maxLines: 1000);
+      // Three emoji then "ab".  Each emoji is 2 UTF-16 code units and
+      // width-2 in the terminal.
+      terminal.write('🙂🙂🙂ab\r\n');
+
+      final matches = TerminalSearchEngine.search(
+        terminal.mainBuffer,
+        query: 'ab',
+      );
+
+      expect(matches, hasLength(1));
+      // 3 emoji occupy cells 0-5 (2 cells each), 'a' at cell 6, 'b' at cell 7.
+      expect(matches[0].start, CellOffset(6, 0));
+      expect(matches[0].end, CellOffset(7, 0));
+    });
+
+    test('combining mark at end of line is included in search text', () {
+      final terminal = Terminal(maxLines: 1000);
+      // Write 'e' followed by combining acute accent (U+0301).
+      // The combining mark occupies its own cell with width=0, which
+      // getTrimmedLength() may exclude.
+      terminal.write('e\u0301\r\n');
+
+      // Search for the combining accent — should be found even at line end.
+      final matches = TerminalSearchEngine.search(
+        terminal.mainBuffer,
+        query: '\u0301',
+      );
+
+      expect(matches, hasLength(1));
+    });
+
+    test('combining mark mid-line has correct cell mapping', () {
+      final terminal = Terminal(maxLines: 1000);
+      // 'a' cell 0, 'e' cell 1, combining accent cell 2 (width 0), 'b' cell 3
+      terminal.write('ae\u0301b\r\n');
+
+      final matches = TerminalSearchEngine.search(
+        terminal.mainBuffer,
+        query: 'b',
+      );
+
+      expect(matches, hasLength(1));
+      expect(matches[0].start, CellOffset(3, 0));
+      expect(matches[0].end, CellOffset(3, 0));
+    });
+
     test('wrapped lines: search across wrap boundary', () {
       final terminal = Terminal(maxLines: 1000);
       // Write a string that exceeds 80 columns to force wrapping.
