@@ -12,11 +12,13 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../providers/active_session_provider.dart';
+import '../../providers/bell_notification_prefs_provider.dart';
 import '../../providers/connection_provider.dart';
 import '../../providers/known_hosts_provider.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/ssh_provider.dart';
 import '../../providers/tmux_provider.dart';
+import '../../services/notifications/bell_notification_service.dart';
 import '../../services/keychain/secure_storage.dart';
 import '../../services/network/network_monitor.dart';
 import '../../services/ssh/input_queue.dart';
@@ -1693,6 +1695,33 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     // Refresh tree to pick up the bell flag
     _scheduleControlSync(refreshTree: true);
+
+    // Fire OS notification if enabled for this window
+    final settings = ref.read(settingsProvider);
+    if (settings.enableNotifications) {
+      final windowKey = bellWindowKey(
+        widget.connectionId,
+        session.name,
+        bellWindow.index,
+      );
+      final bellPrefs = ref.read(bellNotificationPrefsProvider);
+      if (bellPrefs[windowKey] == true) {
+        // Look up connection name for the notification body
+        final connections = ref.read(connectionsProvider).connections;
+        final connName = connections
+                .where((c) => c.id == widget.connectionId)
+                .map((c) => c.name)
+                .firstOrNull ??
+            widget.connectionId;
+        BellNotificationService().showBellNotification(
+          connectionId: widget.connectionId,
+          connectionName: connName,
+          sessionName: session.name,
+          windowIndex: bellWindow.index,
+          windowName: bellWindow.name,
+        );
+      }
+    }
 
     if (!mounted) return;
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -3404,12 +3433,21 @@ $metadataCommand
                 child: Row(
                   children: [
                     // Session name (tap to switch)
-                    _buildBreadcrumbItem(
-                      currentSession,
-                      icon: Icons.folder,
-                      isActive: true,
-                      onTap: () => _showSessionSelector(tmuxState),
-                    ),
+                    Builder(builder: (_) {
+                      final sessionHasBell = tmuxState.sessions.any((s) =>
+                          s.name != tmuxState.activeSessionName &&
+                          s.windows.any((w) => w.hasBell));
+                      return _buildBreadcrumbItem(
+                        currentSession,
+                        icon: sessionHasBell
+                            ? Icons.notifications_active
+                            : Icons.folder,
+                        isActive: true,
+                        alertColor:
+                            sessionHasBell ? DesignColors.error : null,
+                        onTap: () => _showSessionSelector(tmuxState),
+                      );
+                    }),
                     _buildBreadcrumbSeparator(),
                     // Window name (tap to switch)
                     // Check if any non-active window has a bell flag
@@ -3665,12 +3703,23 @@ $metadataCommand
                       final isActive =
                           session.name == tmuxState.activeSessionName;
                       final canDelete = tmuxState.sessions.length > 1;
+                      final sessionHasBell = !isActive &&
+                          session.windows.any((w) => w.hasBell);
+                      final isDark =
+                          Theme.of(context).brightness == Brightness.dark;
                       return ListTile(
                         leading: Icon(
-                          isActive ? Icons.folder : Icons.folder_outlined,
-                          color: isActive
-                              ? colorScheme.primary
-                              : colorScheme.onSurface.withValues(alpha: 0.6),
+                          sessionHasBell
+                              ? Icons.notifications_active
+                              : (isActive
+                                  ? Icons.folder
+                                  : Icons.folder_outlined),
+                          color: sessionHasBell
+                              ? DesignColors.error
+                              : (isActive
+                                  ? colorScheme.primary
+                                  : colorScheme.onSurface
+                                      .withValues(alpha: 0.6)),
                         ),
                         title: Text(
                           session.name,
@@ -3683,13 +3732,33 @@ $metadataCommand
                                 : FontWeight.normal,
                           ),
                         ),
-                        subtitle: Text(
-                          '${session.windowCount} windows',
-                          style: TextStyle(
-                            color: colorScheme.onSurface.withValues(
-                              alpha: 0.38,
+                        subtitle: Row(
+                          children: [
+                            Text(
+                              '${session.windowCount} windows',
+                              style: TextStyle(
+                                color: colorScheme.onSurface.withValues(
+                                  alpha: 0.38,
+                                ),
+                              ),
                             ),
-                          ),
+                            if (sessionHasBell) ...[
+                              const SizedBox(width: 8),
+                              _windowFlagBadge(
+                                // Reuse badge builder with a synthetic
+                                // window that has the bell flag set.
+                                TmuxWindow(
+                                  index: 0,
+                                  name: '',
+                                  active: false,
+                                  paneCount: 0,
+                                  flags: {TmuxWindowFlag.bell},
+                                  panes: const [],
+                                ),
+                                isDark,
+                              ) ?? const SizedBox.shrink(),
+                            ],
+                          ],
                         ),
                         trailing: PopupMenuButton<String>(
                           icon: Icon(
@@ -4078,6 +4147,18 @@ $metadataCommand
                                     ),
                                   );
                                 }
+                              case 'toggle_notification':
+                                final wKey = bellWindowKey(
+                                  widget.connectionId,
+                                  freshSession.name,
+                                  window.index,
+                                );
+                                final current = ref
+                                    .read(bellNotificationPrefsProvider.notifier)
+                                    .isEnabled(wKey);
+                                ref
+                                    .read(bellNotificationPrefsProvider.notifier)
+                                    .setWindowNotification(wKey, !current);
                               case 'delete':
                                 final confirmed = await showDialog<bool>(
                                   context: context,
@@ -4097,34 +4178,61 @@ $metadataCommand
                                 }
                             }
                           },
-                          itemBuilder: (_) => [
-                            const PopupMenuItem(
-                              value: 'rename',
-                              child: ListTile(
-                                leading: Icon(Icons.edit),
-                                title: Text('Rename'),
-                                dense: true,
-                                contentPadding: EdgeInsets.zero,
+                          itemBuilder: (_) {
+                            final wKey = bellWindowKey(
+                              widget.connectionId,
+                              freshSession.name,
+                              window.index,
+                            );
+                            final notifEnabled = ref
+                                .read(bellNotificationPrefsProvider.notifier)
+                                .isEnabled(wKey);
+                            return [
+                              const PopupMenuItem(
+                                value: 'rename',
+                                child: ListTile(
+                                  leading: Icon(Icons.edit),
+                                  title: Text('Rename'),
+                                  dense: true,
+                                  contentPadding: EdgeInsets.zero,
+                                ),
                               ),
-                            ),
-                            if (canDelete)
                               PopupMenuItem(
-                                value: 'delete',
+                                value: 'toggle_notification',
                                 child: ListTile(
                                   leading: Icon(
-                                    Icons.delete,
-                                    color: DesignColors.error,
+                                    notifEnabled
+                                        ? Icons.notifications
+                                        : Icons.notifications_off,
                                   ),
                                   title: Text(
-                                    'Delete',
-                                    style:
-                                        TextStyle(color: DesignColors.error),
+                                    notifEnabled
+                                        ? 'Disable Notifications'
+                                        : 'Enable Notifications',
                                   ),
                                   dense: true,
                                   contentPadding: EdgeInsets.zero,
                                 ),
                               ),
-                          ],
+                              if (canDelete)
+                                PopupMenuItem(
+                                  value: 'delete',
+                                  child: ListTile(
+                                    leading: Icon(
+                                      Icons.delete,
+                                      color: DesignColors.error,
+                                    ),
+                                    title: Text(
+                                      'Delete',
+                                      style:
+                                          TextStyle(color: DesignColors.error),
+                                    ),
+                                    dense: true,
+                                    contentPadding: EdgeInsets.zero,
+                                  ),
+                                ),
+                            ];
+                          },
                         ),
                         onTap: () {
                           Navigator.pop(sheetContext);
