@@ -1670,6 +1670,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if ((shouldAutoScroll || !_hasInitialScrolled) &&
         !_terminal.isInSynchronizedUpdate) {
       _hasInitialScrolled = true;
+      // Clear the freeze flag — this branch auto-scrolls to bottom, so
+      // history preservation is not needed (and leaving it set would block
+      // correctForNewDimensions on the new pane indefinitely).
+      _terminalScrollController.freezePositionForHistory = false;
       _paneTerminalViewKey.currentState?.scrollToBottom();
     } else if (historyViewportPixels != null) {
       // When the scrollback buffer is at capacity, writing new output evicts
@@ -1677,13 +1681,18 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       // P - evictedLines * lineHeight.  Apply the correction synchronously
       // via correctBy() so the upcoming layout pass renders the right content
       // (a post-frame jumpTo alone would cause a one-frame glitch).
+      //
+      // Derive the exact row height from total content height / total lines
+      // so partial-row viewports don't accumulate drift.
       final evicted = _terminal.buffer.lines.droppedCount - droppedBefore;
       double adjustedPixels = historyViewportPixels;
-      if (evicted > 0) {
-        final scrollBack = _terminal.buffer.scrollBack;
-        if (scrollBack > 0 && _terminalScrollController.hasClients) {
-          final position = _terminalScrollController.position;
-          final lineHeight = position.maxScrollExtent / scrollBack;
+      if (evicted > 0 && _terminalScrollController.hasClients) {
+        final position = _terminalScrollController.position;
+        final totalLines = _terminal.buffer.lines.length;
+        if (totalLines > 0) {
+          final lineHeight =
+              (position.maxScrollExtent + position.viewportDimension) /
+                  totalLines;
           adjustedPixels = (historyViewportPixels - evicted * lineHeight)
               .clamp(0.0, position.maxScrollExtent);
           final correction = adjustedPixels - position.pixels;
