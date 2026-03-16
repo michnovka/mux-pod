@@ -29,6 +29,8 @@ import '../../services/terminal/font_calculator.dart';
 import '../../services/terminal/terminal_image_attachment.dart';
 import '../../services/terminal/terminal_output_normalizer.dart';
 import '../../services/terminal/terminal_scrollback_merge.dart';
+import '../../services/terminal/terminal_search_engine.dart';
+import '../../services/terminal/terminal_search_state.dart';
 import '../../services/terminal/terminal_snapshot.dart';
 import '../../services/terminal/xterm_input_adapter.dart';
 import '../../services/tmux/pane_navigator.dart';
@@ -45,9 +47,10 @@ import '../../providers/terminal_display_provider.dart';
 import '../settings/settings_screen.dart';
 import 'terminal_scroll_policy.dart';
 import 'widgets/pane_terminal_view.dart';
+import 'widgets/terminal_search_bar.dart';
 
 /// Terminal mode used by the mobile UI.
-enum TerminalMode { normal, select }
+enum TerminalMode { normal, select, search }
 
 enum _ConnectionIndicatorMode { latency, bandwidth }
 
@@ -369,6 +372,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   // Terminal mode
   TerminalMode _terminalMode = TerminalMode.normal;
+
+  // Search state
+  TerminalSearchState _searchState = const TerminalSearchState();
+  Timer? _searchDebounceTimer;
+  final _searchFocusNode = FocusNode();
 
   // Zoom scale
   double _zoomScale = 1.0;
@@ -713,6 +721,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   }
 
   void _reconfigureTerminal(AppSettings settings) {
+    _ensureNormalMode();
     if (_terminalScrollbackLines == settings.scrollbackLines) {
       _terminal.onOutput = _handleTerminalOutput;
       for (final entry in _paneRenderCache.values) {
@@ -1135,6 +1144,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   void _resetTransientTerminalUiBeforeSwitch() {
     _clearPendingLiveUpdates();
     _isFollowingLiveTail = true;
+    if (_terminalMode == TerminalMode.search) {
+      _dismissSearch();
+    }
   }
 
   void _prunePaneRenderCache() {
@@ -1641,6 +1653,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     }
 
     if (_terminalMode == TerminalMode.select ||
+        _terminalMode == TerminalMode.search ||
         _isResyncingPane ||
         _pauseControlOutputUntilResyncComplete) {
       _deferredStreamOutput.write(data);
@@ -1962,6 +1975,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   void _flushDeferredStreamOutput() {
     if (_deferredStreamOutput.isEmpty ||
         _terminalMode == TerminalMode.select ||
+        _terminalMode == TerminalMode.search ||
         _isResyncingPane ||
         _pauseControlOutputUntilResyncComplete) {
       return;
@@ -2522,6 +2536,7 @@ $metadataCommand
   }
 
   void _applyTerminalFrame(TerminalSnapshotFrame viewData) {
+    if (_terminalMode == TerminalMode.search) _dismissSearch();
     _terminal = createTerminalFromSnapshot(
       frame: viewData,
       maxLines: _terminalScrollbackLines,
@@ -2740,13 +2755,7 @@ $metadataCommand
         return;
       }
 
-      if (_terminalMode != TerminalMode.normal) {
-        setState(() {
-          _terminalMode = TerminalMode.normal;
-        });
-        _terminalController.clearSelection();
-        _flushDeferredStreamOutput();
-      }
+      _ensureNormalMode();
 
       _ensureTerminalViewportAtBottomForInput();
       XtermInputAdapter.sendPaste(_terminal, remotePath);
@@ -2801,6 +2810,9 @@ $metadataCommand
     _latencyNotifier.dispose();
     _bandwidthNotifier.dispose();
     _pendingLiveUpdateNotifier.dispose();
+    // Dispose search resources
+    _searchDebounceTimer?.cancel();
+    _searchFocusNode.dispose();
     // Dispose scroll controller
     _terminalScrollController.dispose();
     _terminalController.dispose();
@@ -2832,7 +2844,14 @@ $metadataCommand
       keyboardInset: keyboardInset,
     );
 
-    return Scaffold(
+    return PopScope(
+      canPop: _terminalMode == TerminalMode.normal,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) {
+          _ensureNormalMode();
+        }
+      },
+      child: Scaffold(
       key: _scaffoldKey,
       backgroundColor: Theme.of(context).scaffoldBackgroundColor,
       body: Stack(
@@ -2848,9 +2867,12 @@ $metadataCommand
               ),
               Expanded(
                 child: ColoredBox(
-                  color: _terminalMode == TerminalMode.select
-                      ? DesignColors.warning
-                      : Colors.transparent,
+                  color: switch (_terminalMode) {
+                    TerminalMode.select => DesignColors.warning,
+                    TerminalMode.search => DesignColors.primary
+                        .withValues(alpha: 0.3),
+                    TerminalMode.normal => Colors.transparent,
+                  },
                   child: Padding(
                     padding: const EdgeInsets.all(3),
                     child: Stack(
@@ -2873,9 +2895,14 @@ $metadataCommand
                                 paneHeight: viewData.paneHeight,
                                 backgroundColor: backgroundColor,
                                 foregroundColor: foregroundColor,
-                                mode: _terminalMode == TerminalMode.select
-                                    ? PaneTerminalMode.select
-                                    : PaneTerminalMode.normal,
+                                mode: switch (_terminalMode) {
+                                  TerminalMode.normal =>
+                                    PaneTerminalMode.normal,
+                                  TerminalMode.select =>
+                                    PaneTerminalMode.select,
+                                  TerminalMode.search =>
+                                    PaneTerminalMode.search,
+                                },
                                 readOnly: false,
                                 verticalScrollEnabled: true,
                                 zoomEnabled: true,
@@ -2896,17 +2923,38 @@ $metadataCommand
                             },
                           ),
                         ),
-                        // Pane indicator: directly watch tmuxProvider via Consumer
-                        Positioned(
-                          top: 8,
-                          right: 8,
-                          child: Consumer(
-                            builder: (context, ref, _) {
-                              final tmuxState = ref.watch(tmuxProvider);
-                              return _buildPaneIndicator(tmuxState);
-                            },
+                        // Pane indicator: hidden during search
+                        if (_terminalMode != TerminalMode.search)
+                          Positioned(
+                            top: 8,
+                            right: 8,
+                            child: Consumer(
+                              builder: (context, ref, _) {
+                                final tmuxState = ref.watch(tmuxProvider);
+                                return _buildPaneIndicator(tmuxState);
+                              },
+                            ),
                           ),
-                        ),
+                        // Search bar
+                        if (_terminalMode == TerminalMode.search)
+                          Positioned(
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            child: TerminalSearchBar(
+                              searchState: _searchState,
+                              focusNode: _searchFocusNode,
+                              onQueryChanged: _onSearchQueryChanged,
+                              onNextMatch: _nextSearchMatch,
+                              onPreviousMatch: _previousSearchMatch,
+                              onClose: _dismissSearch,
+                              onToggleCaseSensitive:
+                                  _toggleSearchCaseSensitive,
+                              onToggleRegex: _toggleSearchRegex,
+                            ),
+                          ),
+                        // Jump-to-live: only in normal mode (frozen buffer
+                        // in search, already hidden in select).
                         if (_terminalMode == TerminalMode.normal)
                           _buildJumpToLiveOverlay(),
                       ],
@@ -2914,8 +2962,9 @@ $metadataCommand
                   ),
                 ),
               ),
-              // SpecialKeysBar: only shown when the on-screen keyboard is visible
-              if (keyboardVisible)
+              // SpecialKeysBar: shown when keyboard visible and not in search
+              if (keyboardVisible &&
+                  _terminalMode != TerminalMode.search)
                 SpecialKeysBar(
                   onLiteralKeyPressed: _sendLiteralKey,
                   onSpecialKeyPressed: _sendSpecialKey,
@@ -2932,6 +2981,8 @@ $metadataCommand
                   onToggleSelect: _toggleSelectMode,
                   selectModeActive: _terminalMode == TerminalMode.select,
                   onPaste: _pasteFromClipboard,
+                  onSearch:
+                      _terminal.isUsingAltBuffer ? null : _openSearch,
                 ),
             ],
           ),
@@ -2945,6 +2996,7 @@ $metadataCommand
             _buildErrorOverlay(sshState.error ?? _connectionError),
         ],
       ),
+    ),
     );
   }
 
@@ -3230,12 +3282,168 @@ $metadataCommand
   void _pasteFromClipboard() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data?.text != null && data!.text!.isNotEmpty) {
-      // Exit select mode so the pasted text reaches tmux.
-      if (_terminalMode == TerminalMode.select) {
-        _toggleSelectMode();
-      }
+      // Exit select/search mode so the pasted text reaches tmux.
+      _ensureNormalMode();
       _ensureTerminalViewportAtBottomForInput();
       XtermInputAdapter.sendPaste(_terminal, data.text!);
+    }
+  }
+
+  // --- Search methods ---
+
+  /// Central mode-exit helper. Every action that needs normal mode routes
+  /// through here to correctly clean up search/select state (D4).
+  void _ensureNormalMode() {
+    if (_terminalMode == TerminalMode.search) {
+      _searchDebounceTimer?.cancel();
+      _paneTerminalViewKey.currentState?.clearSearchHighlights();
+    }
+    if (_terminalMode != TerminalMode.normal) {
+      _terminalController.clearSelection();
+      setState(() {
+        _terminalMode = TerminalMode.normal;
+        _searchState = const TerminalSearchState();
+      });
+      _flushDeferredStreamOutput();
+    }
+  }
+
+  void _openSearch() {
+    if (_terminal.isUsingAltBuffer) return;
+    _terminalController.clearSelection(); // D7: clear overlapping selection
+    setState(() {
+      _terminalMode = TerminalMode.search;
+      _searchState = const TerminalSearchState(isActive: true);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _searchFocusNode.requestFocus();
+    });
+  }
+
+  void _dismissSearch() {
+    _searchDebounceTimer?.cancel();
+    _paneTerminalViewKey.currentState?.clearSearchHighlights();
+    setState(() {
+      _terminalMode = TerminalMode.normal;
+      _searchState = const TerminalSearchState();
+    });
+    _flushDeferredStreamOutput();
+  }
+
+  void _onSearchQueryChanged(String query) {
+    _searchDebounceTimer?.cancel();
+    setState(() {
+      _searchState = _searchState.copyWith(query: query);
+    });
+    if (query.isEmpty) {
+      _paneTerminalViewKey.currentState?.clearSearchHighlights();
+      setState(() {
+        _searchState = _searchState.copyWith(
+          matches: const [],
+          currentMatchIndex: -1,
+          regexError: () => null,
+        );
+      });
+      return;
+    }
+    _searchDebounceTimer = Timer(
+      const Duration(milliseconds: 200),
+      _runSearch,
+    );
+  }
+
+  void _runSearch() {
+    final query = _searchState.query;
+    if (query.isEmpty) return;
+
+    try {
+      final matches = TerminalSearchEngine.search(
+        _terminal.mainBuffer,
+        query: query,
+        caseSensitive: _searchState.caseSensitive,
+        regex: _searchState.regexEnabled,
+      );
+
+      // Determine current match index.
+      int currentIdx = matches.isEmpty ? -1 : 0;
+
+      setState(() {
+        _searchState = _searchState.copyWith(
+          matches: matches,
+          currentMatchIndex: currentIdx,
+          regexError: () => null,
+        );
+      });
+      _applySearchHighlightsAndScroll();
+    } on FormatException catch (e) {
+      _paneTerminalViewKey.currentState?.clearSearchHighlights();
+      setState(() {
+        _searchState = _searchState.copyWith(
+          matches: const [],
+          currentMatchIndex: -1,
+          regexError: () => e.message,
+        );
+      });
+    }
+  }
+
+  void _applySearchHighlightsAndScroll() {
+    final paneView = _paneTerminalViewKey.currentState;
+    if (paneView == null) return;
+
+    paneView.applySearchHighlights(
+      _searchState.matches,
+      _searchState.currentMatchIndex,
+    );
+
+    final currentMatch = _searchState.currentMatch;
+    if (currentMatch != null) {
+      paneView.scrollToLine(currentMatch.start.y);
+    }
+  }
+
+  void _nextSearchMatch() {
+    if (_searchState.matches.isEmpty) return;
+    final nextIdx =
+        (_searchState.currentMatchIndex + 1) % _searchState.matches.length;
+    setState(() {
+      _searchState = _searchState.copyWith(currentMatchIndex: nextIdx);
+    });
+    _applySearchHighlightsAndScroll();
+  }
+
+  void _previousSearchMatch() {
+    if (_searchState.matches.isEmpty) return;
+    final prevIdx = (_searchState.currentMatchIndex - 1) < 0
+        ? _searchState.matches.length - 1
+        : _searchState.currentMatchIndex - 1;
+    setState(() {
+      _searchState = _searchState.copyWith(currentMatchIndex: prevIdx);
+    });
+    _applySearchHighlightsAndScroll();
+  }
+
+  void _toggleSearchCaseSensitive() {
+    setState(() {
+      _searchState = _searchState.copyWith(
+        caseSensitive: !_searchState.caseSensitive,
+      );
+    });
+    if (_searchState.query.isNotEmpty) {
+      _searchDebounceTimer?.cancel();
+      _runSearch();
+    }
+  }
+
+  void _toggleSearchRegex() {
+    setState(() {
+      _searchState = _searchState.copyWith(
+        regexEnabled: !_searchState.regexEnabled,
+      );
+    });
+    if (_searchState.query.isNotEmpty) {
+      _searchDebounceTimer?.cancel();
+      _runSearch();
     }
   }
 
@@ -3768,6 +3976,28 @@ $metadataCommand
                 latency: _latencyNotifier.value,
                 bandwidthBitsPerSecond: _bandwidthNotifier.value,
               ),
+            ),
+            // Search button
+            IconButton(
+              onPressed: _terminal.isUsingAltBuffer
+                  ? null
+                  : _terminalMode == TerminalMode.search
+                      ? () => _searchFocusNode.requestFocus()
+                      : _openSearch,
+              tooltip: _terminal.isUsingAltBuffer
+                  ? 'Search unavailable in alt buffer'
+                  : 'Search',
+              icon: Icon(
+                Icons.search,
+                size: 16,
+                color: _terminal.isUsingAltBuffer
+                    ? colorScheme.onSurface.withValues(alpha: 0.2)
+                    : _terminalMode == TerminalMode.search
+                        ? DesignColors.primary
+                        : colorScheme.onSurface.withValues(alpha: 0.6),
+              ),
+              padding: const EdgeInsets.all(8),
+              constraints: const BoxConstraints(),
             ),
             // Settings button
             IconButton(
@@ -5106,7 +5336,12 @@ $metadataCommand
                         ),
                       ),
                       onTap: () {
-                        _toggleSelectMode();
+                        if (_terminalMode == TerminalMode.select) {
+                          _ensureNormalMode();
+                        } else {
+                          _ensureNormalMode();
+                          _toggleSelectMode();
+                        }
                         Navigator.pop(context);
                       },
                     ),

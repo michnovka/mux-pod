@@ -10,13 +10,14 @@ import 'package:xterm/xterm.dart';
 
 import '../../../providers/settings_provider.dart';
 import '../../../services/terminal/font_calculator.dart';
+import '../../../services/terminal/terminal_search_engine.dart';
 import '../../../services/terminal/terminal_url_detector.dart';
 import '../../../services/tmux/pane_navigator.dart';
 import '../../../theme/design_colors.dart';
 import '../../../utils/async_utils.dart';
 
 /// Terminal interaction mode.
-enum PaneTerminalMode { normal, select }
+enum PaneTerminalMode { normal, select, search }
 
 @immutable
 class PaneTerminalViewportState {
@@ -98,6 +99,9 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   Timer? _urlScanTimer;
   VoidCallback? _terminalUrlListener;
 
+  // Search highlight state
+  final List<TerminalHighlight> _searchHighlights = [];
+
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
   Offset _twoFingerPanStart = Offset.zero;
   Offset _twoFingerPanDelta = Offset.zero;
@@ -145,11 +149,18 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
         oldWidget.terminal.removeListener(_terminalUrlListener!);
       }
       _clearUrlHighlights();
+      _clearSearchHighlights();
       _detectedUrls = const [];
       _setupUrlDetection();
       _scheduleUrlScan();
     }
     if (oldWidget.mode != widget.mode) {
+      // Clear URL highlights synchronously when entering search mode to
+      // prevent stale URL data from the debounced scan window.
+      if (widget.mode == PaneTerminalMode.search) {
+        _clearUrlHighlights();
+        _detectedUrls = const [];
+      }
       _scheduleUrlScan();
     }
   }
@@ -157,6 +168,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   @override
   void dispose() {
     _teardownUrlDetection();
+    _clearSearchHighlights();
     widget.terminalController.removeListener(_handleSelectionChanged);
     _horizontalScrollController.dispose();
     _internalVerticalScrollController?.dispose();
@@ -669,7 +681,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     if (!mounted) return;
     final settings = ref.read(settingsProvider);
     if (!settings.enableUrlDetection ||
-        widget.mode == PaneTerminalMode.select) {
+        widget.mode != PaneTerminalMode.normal) {
       if (_detectedUrls.isNotEmpty) {
         _clearUrlHighlights();
         _detectedUrls = const [];
@@ -717,6 +729,74 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     _urlHighlights.clear();
   }
 
+  // --- Search highlights ---
+
+  /// Apply search highlights for the given matches, with [currentIdx] as
+  /// the "current" match (highlighted differently).
+  void applySearchHighlights(
+    List<TerminalSearchMatch> matches,
+    int currentIdx,
+  ) {
+    _clearSearchHighlights();
+    final buffer = widget.terminal.mainBuffer;
+    final lineCount = buffer.lines.length;
+    final theme = _buildTheme();
+
+    for (var i = 0; i < matches.length; i++) {
+      final match = matches[i];
+      // Guard against out-of-range offsets.
+      if (match.start.y >= lineCount || match.end.y >= lineCount) continue;
+
+      final p1 = buffer.createAnchorFromOffset(match.start);
+      // Highlight range end is exclusive — advance one column past the last
+      // character so the background covers the full match.
+      final p2 = buffer.createAnchorFromOffset(
+        CellOffset(match.end.x + 1, match.end.y),
+      );
+      final color = i == currentIdx
+          ? theme.searchHitBackgroundCurrent
+          : theme.searchHitBackground;
+      final highlight = widget.terminalController.highlight(
+        p1: p1,
+        p2: p2,
+        color: color,
+      );
+      _searchHighlights.add(highlight);
+    }
+  }
+
+  /// Remove all search highlights.
+  void clearSearchHighlights() => _clearSearchHighlights();
+
+  void _clearSearchHighlights() {
+    for (final h in _searchHighlights) {
+      h.dispose();
+    }
+    _searchHighlights.clear();
+  }
+
+  /// Scroll so that [absoluteLine] is visible, roughly 1/3 from the top.
+  void scrollToLine(int absoluteLine) {
+    if (!_verticalScrollController.hasClients) return;
+
+    final position = _verticalScrollController.position;
+    final maxExtent = position.maxScrollExtent;
+    final viewportHeight = position.viewportDimension;
+    if (viewportHeight <= 0 || maxExtent <= 0) return;
+
+    // Estimate line height from scroll metrics.
+    final totalLines = widget.terminal.buffer.lines.length;
+    if (totalLines <= 0) return;
+    final totalContentHeight = maxExtent + viewportHeight;
+    final lineHeight = totalContentHeight / totalLines;
+
+    // Target: place the line at ~1/3 from the top.
+    final targetPixels =
+        (absoluteLine * lineHeight - viewportHeight / 3).clamp(0.0, maxExtent);
+    position.jumpTo(targetPixels);
+    _setFollowBottom(false);
+  }
+
   bool _urlsEqual(List<DetectedUrl> a, List<DetectedUrl> b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {
@@ -726,7 +806,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   }
 
   void _handleUrlTap(TapUpDetails details, CellOffset cellOffset) {
-    if (widget.mode == PaneTerminalMode.select) return;
+    if (widget.mode != PaneTerminalMode.normal) return;
     final settings = ref.read(settingsProvider);
     if (!settings.enableUrlDetection) return;
 
@@ -740,7 +820,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   }
 
   bool _handleUrlLongPress(LongPressStartDetails details, CellOffset cellOffset) {
-    if (widget.mode == PaneTerminalMode.select) return false;
+    if (widget.mode != PaneTerminalMode.normal) return false;
     final settings = ref.read(settingsProvider);
     if (!settings.enableUrlDetection) return false;
 
@@ -1040,13 +1120,14 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
               controller: widget.terminalController,
               scrollController: _verticalScrollController,
               autoResize: false,
-              autofocus: true,
+              autofocus: widget.mode == PaneTerminalMode.normal,
               deleteDetection: true,
-              hardwareKeyboardOnly: !_followBottom,
-              readOnly:
-                  widget.readOnly || widget.mode == PaneTerminalMode.select,
+              hardwareKeyboardOnly:
+                  widget.mode == PaneTerminalMode.search || !_followBottom,
+              readOnly: widget.readOnly ||
+                  widget.mode != PaneTerminalMode.normal,
               simulateScroll:
-                  widget.mode == PaneTerminalMode.normal &&
+                  widget.mode != PaneTerminalMode.select &&
                   widget.verticalScrollEnabled,
               scrollPhysics: widget.verticalScrollEnabled
                   ? null
