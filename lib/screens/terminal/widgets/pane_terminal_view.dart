@@ -154,6 +154,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       _clearUrlHighlights();
       _detectedUrls = const [];
       _setupUrlDetection();
+      _scheduleUrlScan();
     }
     if (oldWidget.mode != widget.mode) {
       _scheduleUrlScan();
@@ -178,6 +179,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       _baseScale = 1.0;
     });
     widget.onZoomChanged?.call(1.0);
+    _scheduleUrlScan();
   }
 
   void scrollToBottom() {
@@ -236,6 +238,12 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     if (scaleChanged) {
       widget.onZoomChanged?.call(effectiveState.zoomScale);
     }
+
+    // URL highlights depend on viewport position and zoom — rescan after
+    // the viewport settles (the scroll listener will also fire, but this
+    // covers the scale-only path and the initial restore before scroll
+    // controller has clients).
+    _scheduleUrlScan();
 
     if (effectiveState.followBottom) {
       scrollToBottom();
@@ -1032,6 +1040,20 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   @override
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
+
+    // Re-run URL detection when settings that affect it change (toggle,
+    // font size / family / auto-fit — all influence cell height or whether
+    // detection is enabled).
+    ref.listen(settingsProvider, (prev, next) {
+      if (prev == null) return;
+      if (prev.enableUrlDetection != next.enableUrlDetection ||
+          prev.fontSize != next.fontSize ||
+          prev.fontFamily != next.fontFamily ||
+          prev.autoFitEnabled != next.autoFitEnabled ||
+          prev.minFontSize != next.minFontSize) {
+        _scheduleUrlScan();
+      }
+    });
 
     return LayoutBuilder(
       builder: (context, constraints) {
