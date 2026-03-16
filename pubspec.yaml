@@ -47,6 +47,7 @@ dependencies:
   crypto: ^3.0.3
   # Settings/notifications
   url_launcher: ^6.3.2
+  flutter_local_notifications: ^19.0.0
   # Background SSH connection maintenance
   flutter_foreground_task: ^9.2.1
   # Keep screen on
