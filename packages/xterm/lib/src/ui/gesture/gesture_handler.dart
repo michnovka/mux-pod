@@ -21,6 +21,7 @@ class TerminalGestureHandler extends StatefulWidget {
     this.onSecondaryTapUp,
     this.onTertiaryTapDown,
     this.onTertiaryTapUp,
+    this.onLongPressStart,
     this.readOnly = false,
   });
 
@@ -43,6 +44,9 @@ class TerminalGestureHandler extends StatefulWidget {
   final GestureTapDownCallback? onTertiaryTapDown;
 
   final GestureTapUpCallback? onTertiaryTapUp;
+
+  /// Called on long-press. Return true to suppress default word selection.
+  final bool Function(LongPressStartDetails)? onLongPressStart;
 
   final bool readOnly;
 
@@ -162,7 +166,10 @@ class _TerminalGestureHandlerState extends State<TerminalGestureHandler> {
 
   void onLongPressStart(LongPressStartDetails details) {
     _lastLongPressStartDetails = details;
-    renderTerminal.selectWord(details.localPosition);
+    final handled = widget.onLongPressStart?.call(details) ?? false;
+    if (!handled) {
+      renderTerminal.selectWord(details.localPosition);
+    }
   }
 
   void onLongPressMoveUpdate(LongPressMoveUpdateDetails details) {

@@ -39,6 +39,7 @@ void main() {
       await tester.pumpWidget(buildTestApp());
       await tester.pumpAndSettle();
 
+      await tester.scrollUntilVisible(find.text('Haptic Feedback'), 100);
       expect(find.text('Haptic Feedback'), findsOneWidget);
       expect(find.text('Vibrate on key press'), findsOneWidget);
       expect(find.byType(SwitchListTile), findsWidgets);
@@ -58,7 +59,8 @@ void main() {
       await tester.pumpWidget(buildTestApp());
       await tester.pumpAndSettle();
 
-      // Find the Haptic Feedback switch
+      // Scroll to Haptic Feedback
+      await tester.scrollUntilVisible(find.text('Haptic Feedback'), 100);
       final hapticSwitch = find.ancestor(
         of: find.text('Haptic Feedback'),
         matching: find.byType(SwitchListTile),

@@ -33,6 +33,9 @@ class AppSettings {
   /// SSH keep-alive timeout in seconds
   final int keepAliveTimeoutSeconds;
 
+  /// URL detection in terminal output
+  final bool enableUrlDetection;
+
   const AppSettings({
     this.darkMode = true,
     this.fontSize = 14.0,
@@ -47,6 +50,7 @@ class AppSettings {
     this.showTerminalCursor = true,
     this.invertPaneNavigation = false,
     this.keepAliveTimeoutSeconds = 10,
+    this.enableUrlDetection = true,
   });
 
   AppSettings copyWith({
@@ -63,6 +67,7 @@ class AppSettings {
     bool? showTerminalCursor,
     bool? invertPaneNavigation,
     int? keepAliveTimeoutSeconds,
+    bool? enableUrlDetection,
   }) {
     return AppSettings(
       darkMode: darkMode ?? this.darkMode,
@@ -78,6 +83,7 @@ class AppSettings {
       showTerminalCursor: showTerminalCursor ?? this.showTerminalCursor,
       invertPaneNavigation: invertPaneNavigation ?? this.invertPaneNavigation,
       keepAliveTimeoutSeconds: keepAliveTimeoutSeconds ?? this.keepAliveTimeoutSeconds,
+      enableUrlDetection: enableUrlDetection ?? this.enableUrlDetection,
     );
   }
 
@@ -96,6 +102,7 @@ class AppSettings {
       'showTerminalCursor': showTerminalCursor,
       'invertPaneNavigation': invertPaneNavigation,
       'keepAliveTimeoutSeconds': keepAliveTimeoutSeconds,
+      'enableUrlDetection': enableUrlDetection,
     };
   }
 
@@ -114,6 +121,7 @@ class AppSettings {
       showTerminalCursor: json['showTerminalCursor'] as bool? ?? true,
       invertPaneNavigation: json['invertPaneNavigation'] as bool? ?? false,
       keepAliveTimeoutSeconds: json['keepAliveTimeoutSeconds'] as int? ?? 10,
+      enableUrlDetection: json['enableUrlDetection'] as bool? ?? true,
     );
   }
 }
@@ -379,6 +387,13 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> setKeepAliveTimeoutSeconds(int value) async {
     await _waitForInitialLoad();
     state = state.copyWith(keepAliveTimeoutSeconds: value);
+    await _saveSettings();
+  }
+
+  /// Set URL detection
+  Future<void> setEnableUrlDetection(bool value) async {
+    await _waitForInitialLoad();
+    state = state.copyWith(enableUrlDetection: value);
     await _saveSettings();
   }
 

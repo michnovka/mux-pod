@@ -46,6 +46,7 @@ class TerminalView extends StatefulWidget {
     this.deleteDetection = false,
     this.shortcuts,
     this.onKeyEvent,
+    this.onLongPressStart,
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
@@ -96,6 +97,10 @@ class TerminalView extends StatefulWidget {
 
   /// Function called when the user stops holding down a secondary button.
   final void Function(TapUpDetails, CellOffset)? onSecondaryTapUp;
+
+  /// Function called when the user long-presses on the terminal.
+  /// Return true to indicate the event was handled (suppresses word selection).
+  final bool Function(LongPressStartDetails, CellOffset)? onLongPressStart;
 
   /// The mouse cursor for mouse pointers that are hovering over the terminal.
   /// [SystemMouseCursors.text] by default.
@@ -317,6 +322,8 @@ class TerminalViewState extends State<TerminalView> {
           widget.onSecondaryTapDown != null ? _onSecondaryTapDown : null,
       onSecondaryTapUp:
           widget.onSecondaryTapUp != null ? _onSecondaryTapUp : null,
+      onLongPressStart:
+          widget.onLongPressStart != null ? _onLongPressStart : null,
       readOnly: widget.readOnly,
       child: child,
     );
@@ -377,6 +384,11 @@ class TerminalViewState extends State<TerminalView> {
   void _onSecondaryTapUp(TapUpDetails details) {
     final offset = renderTerminal.getCellOffset(details.localPosition);
     widget.onSecondaryTapUp?.call(details, offset);
+  }
+
+  bool _onLongPressStart(LongPressStartDetails details) {
+    final offset = renderTerminal.getCellOffset(details.localPosition);
+    return widget.onLongPressStart?.call(details, offset) ?? false;
   }
 
   bool get hasInputConnection {

@@ -1,12 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../../providers/settings_provider.dart';
 import '../../../services/terminal/font_calculator.dart';
+import '../../../services/terminal/terminal_url_detector.dart';
 import '../../../services/tmux/pane_navigator.dart';
 import '../../../theme/design_colors.dart';
 import '../../../utils/async_utils.dart';
@@ -88,6 +92,12 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   bool _followBottom = true;
   bool _bottomSnapPending = false;
 
+  // URL detection state
+  List<DetectedUrl> _detectedUrls = const [];
+  final List<TerminalHighlight> _urlHighlights = [];
+  Timer? _urlScanTimer;
+  VoidCallback? _terminalUrlListener;
+
   _TwoFingerMode _twoFingerMode = _TwoFingerMode.undetermined;
   Offset _twoFingerPanStart = Offset.zero;
   Offset _twoFingerPanDelta = Offset.zero;
@@ -109,6 +119,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       _internalVerticalScrollController = ScrollController();
     }
     widget.terminalController.addListener(_handleSelectionChanged);
+    _setupUrlDetection();
   }
 
   @override
@@ -129,10 +140,23 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       widget.terminalController.addListener(_handleSelectionChanged);
       _handleSelectionChanged();
     }
+    if (oldWidget.terminal != widget.terminal) {
+      if (_terminalUrlListener != null) {
+        oldWidget.terminal.removeListener(_terminalUrlListener!);
+      }
+      _clearUrlHighlights();
+      _detectedUrls = const [];
+      _setupUrlDetection();
+      _scheduleUrlScan();
+    }
+    if (oldWidget.mode != widget.mode) {
+      _scheduleUrlScan();
+    }
   }
 
   @override
   void dispose() {
+    _teardownUrlDetection();
     widget.terminalController.removeListener(_handleSelectionChanged);
     _horizontalScrollController.dispose();
     _internalVerticalScrollController?.dispose();
@@ -619,6 +643,139 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     });
   }
 
+  // --- URL detection ---
+
+  void _setupUrlDetection() {
+    _terminalUrlListener = _scheduleUrlScan;
+    widget.terminal.addListener(_terminalUrlListener!);
+  }
+
+  void _teardownUrlDetection() {
+    _urlScanTimer?.cancel();
+    _urlScanTimer = null;
+    if (_terminalUrlListener != null) {
+      widget.terminal.removeListener(_terminalUrlListener!);
+      _terminalUrlListener = null;
+    }
+    _clearUrlHighlights();
+  }
+
+  void _scheduleUrlScan() {
+    _urlScanTimer?.cancel();
+    _urlScanTimer = Timer(const Duration(milliseconds: 500), _runUrlScan);
+  }
+
+  void _runUrlScan() {
+    if (!mounted) return;
+    final settings = ref.read(settingsProvider);
+    if (!settings.enableUrlDetection ||
+        widget.mode == PaneTerminalMode.select) {
+      if (_detectedUrls.isNotEmpty) {
+        _clearUrlHighlights();
+        _detectedUrls = const [];
+      }
+      return;
+    }
+
+    final buffer = widget.terminal.buffer;
+    final lineCount = buffer.lines.length;
+    if (lineCount == 0) return;
+
+    final newUrls = TerminalUrlDetector.scanLines(buffer, 0, lineCount - 1);
+
+    // Diff: only update if URLs changed.
+    if (_urlsEqual(newUrls, _detectedUrls)) return;
+
+    _clearUrlHighlights();
+    _detectedUrls = newUrls;
+
+    // Create highlights for each detected URL.
+    for (final url in newUrls) {
+      // Guard against out-of-range offsets (buffer may have been trimmed).
+      if (url.start.y >= lineCount || url.end.y >= lineCount) continue;
+
+      final p1 = buffer.createAnchorFromOffset(url.start);
+      // Highlight range end is exclusive — advance one column past the last
+      // character so the underline/background covers the full URL.
+      final p2 = buffer.createAnchorFromOffset(
+        CellOffset(url.end.x + 1, url.end.y),
+      );
+      final highlight = widget.terminalController.highlight(
+        p1: p1,
+        p2: p2,
+        color: const Color(0x30448AFF),
+        underline: true,
+      );
+      _urlHighlights.add(highlight);
+    }
+  }
+
+  void _clearUrlHighlights() {
+    for (final h in _urlHighlights) {
+      h.dispose();
+    }
+    _urlHighlights.clear();
+  }
+
+  bool _urlsEqual(List<DetectedUrl> a, List<DetectedUrl> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  void _handleUrlTap(TapUpDetails details, CellOffset cellOffset) {
+    if (widget.mode == PaneTerminalMode.select) return;
+    final settings = ref.read(settingsProvider);
+    if (!settings.enableUrlDetection) return;
+
+    final url = TerminalUrlDetector.getUrlAt(_detectedUrls, cellOffset);
+    if (url != null) {
+      final uri = Uri.tryParse(url.url);
+      if (uri != null) {
+        launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+    }
+  }
+
+  bool _handleUrlLongPress(LongPressStartDetails details, CellOffset cellOffset) {
+    if (widget.mode == PaneTerminalMode.select) return false;
+    final settings = ref.read(settingsProvider);
+    if (!settings.enableUrlDetection) return false;
+
+    final url = TerminalUrlDetector.getUrlAt(_detectedUrls, cellOffset);
+    if (url == null) return false;
+
+    HapticFeedback.mediumImpact();
+    _showUrlContextMenu(details.globalPosition, url);
+    return true;
+  }
+
+  void _showUrlContextMenu(Offset position, DetectedUrl detectedUrl) {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        position & const Size(1, 1),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        const PopupMenuItem(value: 'open', child: Text('Open URL')),
+        const PopupMenuItem(value: 'copy', child: Text('Copy URL')),
+      ],
+    ).then((value) {
+      if (value == 'open') {
+        final uri = Uri.tryParse(detectedUrl.url);
+        if (uri != null) {
+          launchUrl(uri, mode: LaunchMode.externalApplication);
+        }
+      } else if (value == 'copy') {
+        Clipboard.setData(ClipboardData(text: detectedUrl.url));
+      }
+    });
+  }
+
   TerminalTheme _buildTheme() {
     final base = TerminalThemes.defaultTheme;
     final cursorColor = widget.showCursor
@@ -842,6 +999,14 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider);
 
+    // Re-run URL detection when the toggle changes.
+    ref.listen(settingsProvider, (prev, next) {
+      if (prev == null) return;
+      if (prev.enableUrlDetection != next.enableUrlDetection) {
+        _scheduleUrlScan();
+      }
+    });
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final baseFontSize = settings.autoFitEnabled
@@ -892,6 +1057,8 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
                 height: 1.4,
                 fontFamily: settings.fontFamily,
               ),
+              onTapUp: _handleUrlTap,
+              onLongPressStart: _handleUrlLongPress,
             ),
           ),
         );

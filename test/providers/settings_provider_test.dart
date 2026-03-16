@@ -22,6 +22,7 @@ void main() {
       showTerminalCursor: false,
       invertPaneNavigation: true,
       keepAliveTimeoutSeconds: 25,
+      enableUrlDetection: false,
     );
 
     final restored = AppSettings.fromJson(settings.toJson());
@@ -39,6 +40,7 @@ void main() {
     expect(restored.showTerminalCursor, settings.showTerminalCursor);
     expect(restored.invertPaneNavigation, settings.invertPaneNavigation);
     expect(restored.keepAliveTimeoutSeconds, settings.keepAliveTimeoutSeconds);
+    expect(restored.enableUrlDetection, settings.enableUrlDetection);
   });
 
   test('keepAliveTimeoutSeconds defaults to 10 when missing from JSON', () {
