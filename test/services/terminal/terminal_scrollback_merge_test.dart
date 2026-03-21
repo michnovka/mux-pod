@@ -143,6 +143,39 @@ void main() {
       },
     );
 
+    test(
+      'falls back to paneHeight when overlap detection fails completely',
+      () {
+        // Simulate the case where both the target buffer and the backfill
+        // capture have diverged (e.g. network latency on a physical device)
+        // so strict and lenient overlap both fail.
+        final terminal = buildTerminal([
+          'diverged-visible-1',
+          'diverged-visible-2',
+        ]);
+
+        final applied = prependTerminalScrollback(
+          terminal: terminal,
+          fullSnapshotLines: [
+            debugCreateTerminalBufferLine('history-1'),
+            debugCreateTerminalBufferLine('history-2'),
+            debugCreateTerminalBufferLine('different-visible-1'),
+            debugCreateTerminalBufferLine('different-visible-2'),
+          ],
+          paneHeight: 2,
+        );
+
+        expect(applied, isTrue);
+        // The prefix (everything above paneHeight) is prepended to the
+        // current terminal lines.  Some visible-area duplication is
+        // acceptable — the user gets scrollback history.
+        expect(
+          lineTexts(terminal),
+          ['history-1', 'history-2', 'diverged-visible-1', 'diverged-visible-2'],
+        );
+      },
+    );
+
     test('notifies terminal listeners after applying backfill', () {
       final terminal = buildTerminal([
         'shared-1',

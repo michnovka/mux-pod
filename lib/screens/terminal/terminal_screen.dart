@@ -2196,6 +2196,7 @@ $metadataCommand
         terminal: targetTerminal,
         fullSnapshotLines: scratchTerminal.mainBuffer.lines.toList(),
         referenceLines: snapshotBufferLines,
+        paneHeight: visibleFrame.paneHeight,
       );
       if (!applied) {
         return;
