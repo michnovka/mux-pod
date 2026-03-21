@@ -79,7 +79,6 @@ bool prependTerminalScrollback({
   required Terminal terminal,
   required List<BufferLine> fullSnapshotLines,
   List<BufferLine>? referenceLines,
-  int? paneHeight,
   int maxLinesToCheck = 200,
 }) {
   if (fullSnapshotLines.isEmpty) {
@@ -110,7 +109,7 @@ bool prependTerminalScrollback({
     newerLines: overlapTarget,
     maxLinesToCheck: maxLinesToCheck,
   );
-  var effectiveOverlap =
+  final effectiveOverlap =
       overlap > 0
       ? overlap
       : (() {
@@ -122,17 +121,6 @@ bool prependTerminalScrollback({
           final minimumLenientOverlap = math.min(overlapTarget.length, 8);
           return lenientOverlap >= minimumLenientOverlap ? lenientOverlap : 0;
         })();
-
-  // Fallback: when both strict and lenient overlap fail (e.g. the backfill
-  // SSH capture happened later and the visible portion diverged), use the
-  // pane height as the assumed overlap.  The last `paneHeight` lines of the
-  // backfill correspond to the visible area — prepending everything above
-  // that gives the user scrollback history even if a few lines duplicate.
-  // Some duplicate lines are much better than no scrollback at all.
-  if (effectiveOverlap <= 0 && paneHeight != null && paneHeight > 0) {
-    effectiveOverlap = math.min(paneHeight, normalizedSnapshotLines.length);
-  }
-
   if (effectiveOverlap <= 0) {
     return false;
   }

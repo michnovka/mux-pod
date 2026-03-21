@@ -60,11 +60,13 @@ class _PaneSnapshotPayload {
   final String activeContent;
   final String mainContent;
   final String metadata;
+  final String? scrollbackContent;
 
   const _PaneSnapshotPayload({
     required this.activeContent,
     required this.mainContent,
     required this.metadata,
+    this.scrollbackContent,
   });
 }
 
@@ -305,6 +307,8 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   static const Duration _paneCacheMaxAge = Duration(seconds: 4);
   static const String _snapshotMainMarker = '\x01__MUXPOD_MAIN__\x01';
   static const String _snapshotAltMarker = '\x01__MUXPOD_ALT__\x01';
+  static const String _snapshotScrollbackMarker =
+      '\x01__MUXPOD_SCROLLBACK__\x01';
   static const String _snapshotMetadataMarker = '\x01__MUXPOD_META__\x01';
 
   final _secureStorage = SecureStorageService();
@@ -2032,6 +2036,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   String _buildPaneSnapshotCommand(
     String paneId, {
     bool includeScrollback = true,
+    bool includeScrollbackSection = false,
   }) {
     final alternateOnCommand = TmuxCommands.getPaneAlternateOn(paneId);
     final metadataCommand = TmuxCommands.getPaneSnapshotMetadata(paneId);
@@ -2055,6 +2060,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       quiet: true,
     );
 
+    // When scrollback section is requested, capture full scrollback in the
+    // same SSH command to avoid a timing gap with a second SSH call.
+    final scrollbackSection =
+        includeScrollbackSection && _terminalScrollbackLines > 0
+            ? """
+  printf '\\001__MUXPOD_SCROLLBACK__\\001\\n';
+  ${TmuxCommands.capturePane(
+                paneId,
+                escapeSequences: true,
+                preserveTrailingSpaces: true,
+                joinWrappedLines: false,
+                startLine: -_terminalScrollbackLines,
+              )};"""
+            : '';
+
     return '''
 __muxpod_alt=\$($alternateOnCommand);
 if [ "\$__muxpod_alt" = "1" ]; then
@@ -2063,7 +2083,7 @@ if [ "\$__muxpod_alt" = "1" ]; then
   printf '\\001__MUXPOD_ALT__\\001\n';
   $alternateSnapshotCommand;
 else
-  $mainSnapshotCommand;
+  $mainSnapshotCommand;$scrollbackSection
 fi;
 printf '\\001__MUXPOD_META__\\001';
 $metadataCommand
@@ -2097,7 +2117,21 @@ $metadataCommand
     final metadata = combinedOutput
         .substring(metadataIndex + _snapshotMetadataMarker.length)
         .trim();
-    final trimmedBody = _trimSingleTrailingNewline(body);
+
+    // Extract scrollback section if present (captured in the same SSH call).
+    String? scrollbackContent;
+    String bodyWithoutScrollback = body;
+    final scrollbackMarkerIndex = body.indexOf(_snapshotScrollbackMarker);
+    if (scrollbackMarkerIndex != -1) {
+      scrollbackContent = _trimSingleTrailingNewline(
+        body.substring(
+          scrollbackMarkerIndex + _snapshotScrollbackMarker.length,
+        ),
+      );
+      bodyWithoutScrollback = body.substring(0, scrollbackMarkerIndex);
+    }
+
+    final trimmedBody = _trimSingleTrailingNewline(bodyWithoutScrollback);
     final mainMarkerIndex = trimmedBody.indexOf(_snapshotMainMarker);
     final altMarkerIndex = trimmedBody.indexOf(_snapshotAltMarker);
 
@@ -2125,6 +2159,7 @@ $metadataCommand
       activeContent: snapshot,
       mainContent: snapshot,
       metadata: metadata,
+      scrollbackContent: scrollbackContent,
     );
   }
 
@@ -2140,14 +2175,10 @@ $metadataCommand
     required TerminalSnapshotFrame visibleFrame,
     required Terminal targetTerminal,
     List<BufferLine>? snapshotBufferLines,
+    String? prefetchedScrollbackContent,
   }) async {
     if (visibleFrame.alternateScreen ||
         _terminalScrollbackLines <= visibleFrame.paneHeight) {
-      return;
-    }
-
-    final sshClient = ref.read(sshProvider.notifier).client;
-    if (sshClient == null || !sshClient.isConnected) {
       return;
     }
 
@@ -2157,13 +2188,27 @@ $metadataCommand
         : null;
 
     try {
-      final fullMainContent = _trimSingleTrailingNewline(
-        await sshClient.execDirect(
-          _buildPaneScrollbackBackfillCommand(paneId),
-          timeout: const Duration(seconds: 2),
-        ),
-      );
-      fetchStopwatch?.stop();
+      // Use pre-fetched scrollback content when available (captured in the
+      // same SSH command as the visible snapshot, so there's no timing gap).
+      // Fall back to a separate SSH call only when not pre-fetched.
+      final String fullMainContent;
+      if (prefetchedScrollbackContent != null &&
+          prefetchedScrollbackContent.isNotEmpty) {
+        fullMainContent = prefetchedScrollbackContent;
+        fetchStopwatch?.stop();
+      } else {
+        final sshClient = ref.read(sshProvider.notifier).client;
+        if (sshClient == null || !sshClient.isConnected) {
+          return;
+        }
+        fullMainContent = _trimSingleTrailingNewline(
+          await sshClient.execDirect(
+            _buildPaneScrollbackBackfillCommand(paneId),
+            timeout: const Duration(seconds: 2),
+          ),
+        );
+        fetchStopwatch?.stop();
+      }
 
       if (!mounted || _isDisposed || token != _scrollbackBackfillToken) {
         return;
@@ -2196,7 +2241,6 @@ $metadataCommand
         terminal: targetTerminal,
         fullSnapshotLines: scratchTerminal.mainBuffer.lines.toList(),
         referenceLines: snapshotBufferLines,
-        paneHeight: visibleFrame.paneHeight,
       );
       if (!applied) {
         return;
@@ -2286,6 +2330,7 @@ $metadataCommand
     String? visiblePaneIdForBackfill;
     Terminal? targetTerminalForBackfill;
     List<BufferLine>? snapshotBufferLinesForBackfill;
+    String? prefetchedScrollbackContent;
 
     try {
       _isResyncingPane = true;
@@ -2315,6 +2360,7 @@ $metadataCommand
       final snapshotCommand = _buildPaneSnapshotCommand(
         activePane.id,
         includeScrollback: false,
+        includeScrollbackSection: true,
       );
 
       _setLoadingStage('Capturing pane…');
@@ -2342,6 +2388,7 @@ $metadataCommand
       final snapshotPayload = _parseSnapshotPayload(combinedOutput);
       parseStopwatch?.stop();
       activeTrace?.snapshotParseMs = parseStopwatch?.elapsedMilliseconds;
+      prefetchedScrollbackContent = snapshotPayload.scrollbackContent;
 
       var nextView = _viewNotifier.value.copyWith(
         content: snapshotPayload.activeContent,
@@ -2508,6 +2555,7 @@ $metadataCommand
           visibleFrame: visibleFrameForBackfill,
           targetTerminal: targetTerminalForBackfill,
           snapshotBufferLines: snapshotBufferLinesForBackfill,
+          prefetchedScrollbackContent: prefetchedScrollbackContent,
         ),
         debugLabel: 'TerminalScreen scrollback backfill',
       );
