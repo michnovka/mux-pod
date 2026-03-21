@@ -1,7 +1,9 @@
 import 'dart:developer' as developer;
+import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
+import 'package:xterm/xterm.dart' show TerminalStyle;
 import 'terminal_font_styles.dart';
 
 /// Font size calculation result
@@ -149,14 +151,38 @@ class FontCalculator {
 
   /// Calculate the terminal display width (pixels)
   ///
-  /// Used for sizing the horizontal scroll container.
+  /// Used for sizing the horizontal scroll container.  Replicates xterm's
+  /// TerminalPainter._measureCharSize() so the SizedBox width matches the
+  /// actual rendered content width exactly — preventing horizontal scroll
+  /// past the right edge of the terminal.
   static double calculateTerminalWidth({
     required int paneCharWidth,
     required double fontSize,
     required String fontFamily,
   }) {
-    final charWidthRatio = measureCharWidthRatio(fontFamily);
-    return paneCharWidth * charWidthRatio * fontSize;
+    final cellWidth = _measureXtermCellWidth(fontSize: fontSize, fontFamily: fontFamily);
+    return paneCharWidth * cellWidth;
+  }
+
+  /// Measure cell width using the same approach as xterm's
+  /// TerminalPainter._measureCharSize().
+  static double _measureXtermCellWidth({
+    required double fontSize,
+    required String fontFamily,
+  }) {
+    const test = 'mmmmmmmmmm';
+    final style = TerminalStyle(
+      fontSize: fontSize,
+      fontFamily: fontFamily,
+    ).toTextStyle();
+    final builder = ui.ParagraphBuilder(style.getParagraphStyle());
+    builder.pushStyle(style.getTextStyle());
+    builder.addText(test);
+    final paragraph = builder.build();
+    paragraph.layout(const ui.ParagraphConstraints(width: double.infinity));
+    final cellWidth = paragraph.maxIntrinsicWidth / test.length;
+    paragraph.dispose();
+    return cellWidth;
   }
 
   /// Calculate the ideal column count to fit the available screen width.
