@@ -996,8 +996,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       // only at the top, or the user scrolled up), don't force scroll-to-
       // bottom just because the keyboard appeared.
       if (_terminalScrollController.hasClients &&
-          _terminalScrollController.position.pixels <=
-              TerminalScrollPolicy.nearTopThreshold) {
+          TerminalScrollPolicy.shouldSuppressKeyboardScrollToBottom(
+            pixels: _terminalScrollController.position.pixels,
+          )) {
         return;
       }
 
@@ -6127,9 +6128,12 @@ class _StableScrollPosition extends ScrollPositionWithSingleContext {
     // we deliberately skip the viewportShrinkBudget check: even if
     // there's lots of scrollback history, a viewport near the top
     // should stay at the top when the keyboard opens.
-    if (controller.suppressScrollToMax &&
-        pixels <= TerminalScrollPolicy.nearTopThreshold &&
-        newPosition.maxScrollExtent > oldPosition.maxScrollExtent) {
+    if (TerminalScrollPolicy.shouldSuppressDimensionCorrection(
+      suppressScrollToMax: controller.suppressScrollToMax,
+      pixels: pixels,
+      oldMaxScrollExtent: oldPosition.maxScrollExtent,
+      newMaxScrollExtent: newPosition.maxScrollExtent,
+    )) {
       return true;
     }
     return super.correctForNewDimensions(oldPosition, newPosition);
