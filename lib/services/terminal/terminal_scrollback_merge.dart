@@ -78,6 +78,7 @@ int _findTerminalScrollbackOverlap({
 bool prependTerminalScrollback({
   required Terminal terminal,
   required List<BufferLine> fullSnapshotLines,
+  List<BufferLine>? referenceLines,
   int maxLinesToCheck = 200,
 }) {
   if (fullSnapshotLines.isEmpty) {
@@ -93,10 +94,19 @@ bool prependTerminalScrollback({
     return true;
   }
 
+  // Use referenceLines for overlap detection when provided.  The caller
+  // captures these right after the snapshot is applied — before deferred
+  // or live output can mutate the terminal buffer.  This avoids a race
+  // where incoming output changes the HEAD of currentLines and breaks
+  // the overlap seam, even though the scrollback prefix is still valid.
+  final overlapTarget = referenceLines != null
+      ? cloneTerminalBufferLines(referenceLines)
+      : currentLines;
+
   final normalizedSnapshotLines = cloneTerminalBufferLines(fullSnapshotLines);
   final overlap = findTerminalScrollbackOverlap(
     olderLines: normalizedSnapshotLines,
-    newerLines: currentLines,
+    newerLines: overlapTarget,
     maxLinesToCheck: maxLinesToCheck,
   );
   final effectiveOverlap =
@@ -105,10 +115,10 @@ bool prependTerminalScrollback({
       : (() {
           final lenientOverlap = findTerminalScrollbackOverlapLenient(
             olderLines: normalizedSnapshotLines,
-            newerLines: currentLines,
+            newerLines: overlapTarget,
             maxLinesToCheck: maxLinesToCheck,
           );
-          final minimumLenientOverlap = math.min(currentLines.length, 8);
+          final minimumLenientOverlap = math.min(overlapTarget.length, 8);
           return lenientOverlap >= minimumLenientOverlap ? lenientOverlap : 0;
         })();
   if (effectiveOverlap <= 0) {

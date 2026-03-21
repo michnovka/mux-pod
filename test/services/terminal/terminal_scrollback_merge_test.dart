@@ -113,6 +113,36 @@ void main() {
       );
     });
 
+    test(
+      'uses reference lines for overlap detection and keeps mutated current lines',
+      () {
+        final terminal = buildTerminal([
+          'shared-1-updated',
+          'shared-2',
+          'live-1',
+        ]);
+
+        final applied = prependTerminalScrollback(
+          terminal: terminal,
+          fullSnapshotLines: [
+            debugCreateTerminalBufferLine('older-1'),
+            debugCreateTerminalBufferLine('shared-1'),
+            debugCreateTerminalBufferLine('shared-2'),
+          ],
+          referenceLines: [
+            debugCreateTerminalBufferLine('shared-1'),
+            debugCreateTerminalBufferLine('shared-2'),
+          ],
+        );
+
+        expect(applied, isTrue);
+        expect(
+          lineTexts(terminal),
+          ['older-1', 'shared-1-updated', 'shared-2', 'live-1'],
+        );
+      },
+    );
+
     test('notifies terminal listeners after applying backfill', () {
       final terminal = buildTerminal([
         'shared-1',

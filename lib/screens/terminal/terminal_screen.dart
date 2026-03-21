@@ -2139,6 +2139,7 @@ $metadataCommand
     required String paneId,
     required TerminalSnapshotFrame visibleFrame,
     required Terminal targetTerminal,
+    List<BufferLine>? snapshotBufferLines,
   }) async {
     if (visibleFrame.alternateScreen ||
         _terminalScrollbackLines <= visibleFrame.paneHeight) {
@@ -2194,6 +2195,7 @@ $metadataCommand
       final applied = prependTerminalScrollback(
         terminal: targetTerminal,
         fullSnapshotLines: scratchTerminal.mainBuffer.lines.toList(),
+        referenceLines: snapshotBufferLines,
       );
       if (!applied) {
         return;
@@ -2282,6 +2284,7 @@ $metadataCommand
     TerminalSnapshotFrame? visibleFrameForBackfill;
     String? visiblePaneIdForBackfill;
     Terminal? targetTerminalForBackfill;
+    List<BufferLine>? snapshotBufferLinesForBackfill;
 
     try {
       _isResyncingPane = true;
@@ -2425,6 +2428,13 @@ $metadataCommand
       visibleFrameForBackfill = nextView;
       visiblePaneIdForBackfill = activePane.id;
       targetTerminalForBackfill = _terminal;
+      // Capture the terminal buffer lines NOW, before any deferred or live
+      // output can mutate them.  These pristine lines are used by the
+      // scrollback backfill for overlap detection so the merge seam is
+      // stable regardless of later output arriving during the async fetch.
+      snapshotBufferLinesForBackfill = cloneTerminalBufferLines(
+        _terminal.mainBuffer.lines.toList(),
+      );
 
       // Post-snapshot ordering fence: send a no-op through the control
       // mode channel (same stream as %output).  We awaited the snapshot
@@ -2496,6 +2506,7 @@ $metadataCommand
           paneId: visiblePaneIdForBackfill,
           visibleFrame: visibleFrameForBackfill,
           targetTerminal: targetTerminalForBackfill,
+          snapshotBufferLines: snapshotBufferLinesForBackfill,
         ),
         debugLabel: 'TerminalScreen scrollback backfill',
       );
