@@ -15,7 +15,6 @@ import '../../../services/terminal/terminal_url_detector.dart';
 import '../../../services/tmux/pane_navigator.dart';
 import '../../../theme/design_colors.dart';
 import '../../../utils/async_utils.dart';
-import 'selection_handle.dart';
 
 /// Terminal interaction mode.
 enum PaneTerminalMode { normal, select, search }
@@ -117,16 +116,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   static const double _panGlowThreshold = 20.0;
   static const Duration _edgeFlashDuration = Duration(milliseconds: 400);
 
-  // Selection handle state
-  static const double _handleAutoScrollEdge = 40.0;
-  static const Duration _handleAutoScrollInterval = Duration(milliseconds: 50);
-  final _terminalViewKey = GlobalKey<TerminalViewState>();
-  Timer? _handleAutoScrollTimer;
-  bool _isDraggingHandle = false;
-  CellOffset? _dragAnchorCell;
-  Offset? _lastDragGlobalPos;
-  double _lastAutoScrollPixels = -1;
-
   @override
   void initState() {
     super.initState();
@@ -178,7 +167,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
 
   @override
   void dispose() {
-    _cancelHandleAutoScroll();
     _teardownUrlDetection();
     _clearSearchHighlights();
     widget.terminalController.removeListener(_handleSelectionChanged);
@@ -901,52 +889,12 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Selection handles
-  // ---------------------------------------------------------------------------
-
-  List<Widget> _buildSelectionOverlay() {
+  Widget _buildSelectionActions() {
     if (widget.mode != PaneTerminalMode.select || !_hasSelection) {
-      return const [];
+      return const SizedBox.shrink();
     }
 
-    final result = <Widget>[];
-
-    // Selection handles
-    final handlePositions = _getSelectionHandlePositions();
-    if (handlePositions != null) {
-      final (startPos, endPos) = handlePositions;
-      const halfHit = SelectionHandle.hitSize / 2;
-
-      if (startPos != null) {
-        result.add(Positioned(
-          left: startPos.dx - halfHit,
-          top: startPos.dy - halfHit + 4, // slight downward offset
-          child: SelectionHandle(
-            type: HandleType.left,
-            onPanStart: (_) => _onHandleDragStart(true),
-            onPanUpdate: (d) => _onHandleDragUpdate(d),
-            onPanEnd: (_) => _onHandleDragEnd(),
-          ),
-        ));
-      }
-
-      if (endPos != null) {
-        result.add(Positioned(
-          left: endPos.dx - halfHit,
-          top: endPos.dy - halfHit + 4,
-          child: SelectionHandle(
-            type: HandleType.right,
-            onPanStart: (_) => _onHandleDragStart(false),
-            onPanUpdate: (d) => _onHandleDragUpdate(d),
-            onPanEnd: (_) => _onHandleDragEnd(),
-          ),
-        ));
-      }
-    }
-
-    // Copy/Clear action buttons
-    result.add(Positioned(
+    return Positioned(
       right: 12,
       bottom: 12,
       child: Material(
@@ -973,171 +921,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
           ],
         ),
       ),
-    ));
-
-    return result;
-  }
-
-  /// Returns (startHandlePos, endHandlePos) in the terminal Stack's
-  /// coordinate space, or null if the RenderTerminal is not available.
-  /// Individual positions may be null if off-screen.
-  (Offset? start, Offset? end)? _getSelectionHandlePositions() {
-    final state = _terminalViewKey.currentState;
-    if (state == null) return null;
-    final selection = widget.terminalController.selection;
-    if (selection == null) return null;
-
-    final renderTerminal = (() {
-      try {
-        return state.renderTerminal;
-      } catch (_) {
-        return null; // RenderTerminal not yet available (e.g. during layout)
-      }
-    })();
-    if (renderTerminal == null) return null;
-    final cellSize = renderTerminal.cellSize;
-    final normalized = selection.normalized;
-
-    // Start handle: left edge of first selected cell, below the line
-    final startPixel = renderTerminal.getOffset(normalized.begin);
-    final startPos = Offset(startPixel.dx, startPixel.dy + cellSize.height);
-
-    // End handle: right edge of last selected cell, below the line
-    // .end is exclusive, so we need to handle the line-boundary case
-    final end = normalized.end;
-    final Offset endPixel;
-    if (end.x == 0 && end.y > 0) {
-      // Exclusive end wrapped to next line — place at right edge of previous line
-      endPixel = renderTerminal.getOffset(
-        CellOffset(widget.terminal.viewWidth, end.y - 1),
-      );
-    } else {
-      endPixel = renderTerminal.getOffset(end);
-    }
-    final endPos = Offset(endPixel.dx, endPixel.dy + cellSize.height);
-
-    // Apply horizontal scroll correction
-    final hOffset = _horizontalScrollController.hasClients
-        ? _horizontalScrollController.offset
-        : 0.0;
-
-    // Determine viewport bounds for visibility check
-    final viewportHeight = _verticalScrollController.hasClients
-        ? _verticalScrollController.position.viewportDimension
-        : double.infinity;
-
-    Offset? clampedStart;
-    if (startPos.dy >= 0 && startPos.dy <= viewportHeight + cellSize.height) {
-      clampedStart = Offset(startPos.dx - hOffset, startPos.dy);
-    }
-
-    Offset? clampedEnd;
-    if (endPos.dy >= 0 && endPos.dy <= viewportHeight + cellSize.height) {
-      clampedEnd = Offset(endPos.dx - hOffset, endPos.dy);
-    }
-
-    return (clampedStart, clampedEnd);
-  }
-
-  void _onHandleDragStart(bool isDragOnNormalizedStart) {
-    final selection = widget.terminalController.selection;
-    if (selection == null) return;
-    final normalized = selection.normalized;
-
-    // Store the opposite (non-dragged) endpoint as anchor
-    _dragAnchorCell = isDragOnNormalizedStart ? normalized.end : normalized.begin;
-    _isDraggingHandle = true;
-    _lastAutoScrollPixels = -1;
-    _verticalScrollController.addListener(_onScrollDuringDrag);
-  }
-
-  void _onHandleDragUpdate(DragUpdateDetails details) {
-    final state = _terminalViewKey.currentState;
-    if (state == null || !mounted || _dragAnchorCell == null) return;
-
-    final renderBox = state.renderTerminal;
-    final localPos = renderBox.globalToLocal(details.globalPosition);
-    final cell = renderBox.getCellOffset(localPos);
-
-    widget.terminalController.setSelection(
-      widget.terminal.buffer.createAnchorFromOffset(_dragAnchorCell!),
-      widget.terminal.buffer.createAnchorFromOffset(cell),
     );
-
-    _lastDragGlobalPos = details.globalPosition;
-
-    // Auto-scroll near edges
-    final renderBoxObj = context.findRenderObject() as RenderBox?;
-    if (renderBoxObj == null) return;
-    final localY = renderBoxObj.globalToLocal(details.globalPosition).dy;
-    final viewportHeight = renderBoxObj.size.height;
-
-    if (localY < _handleAutoScrollEdge) {
-      _startHandleAutoScroll(scrollUp: true);
-    } else if (localY > viewportHeight - _handleAutoScrollEdge) {
-      _startHandleAutoScroll(scrollUp: false);
-    } else {
-      _cancelHandleAutoScroll();
-    }
-  }
-
-  void _onHandleDragEnd() {
-    _cancelHandleAutoScroll();
-    _verticalScrollController.removeListener(_onScrollDuringDrag);
-    _isDraggingHandle = false;
-    _dragAnchorCell = null;
-    _lastDragGlobalPos = null;
-    _lastAutoScrollPixels = -1;
-  }
-
-  void _startHandleAutoScroll({required bool scrollUp}) {
-    if (_handleAutoScrollTimer != null) return;
-    _handleAutoScrollTimer = Timer.periodic(_handleAutoScrollInterval, (_) {
-      if (!mounted || _lastDragGlobalPos == null) {
-        _cancelHandleAutoScroll();
-        return;
-      }
-      if (!_verticalScrollController.hasClients) return;
-
-      final state = _terminalViewKey.currentState;
-      if (state == null) return;
-
-      final position = _verticalScrollController.position;
-      final lineHeight = state.renderTerminal.lineHeight;
-      final delta = scrollUp ? -lineHeight : lineHeight;
-      final newPixels = (position.pixels + delta).clamp(
-        position.minScrollExtent,
-        position.maxScrollExtent,
-      );
-
-      // No-progress guard
-      if (newPixels == _lastAutoScrollPixels) return;
-      _lastAutoScrollPixels = newPixels;
-
-      _verticalScrollController.jumpTo(newPixels);
-
-      // Update selection at new scroll position
-      final renderBox = state.renderTerminal;
-      final localPos = renderBox.globalToLocal(_lastDragGlobalPos!);
-      final cell = renderBox.getCellOffset(localPos);
-      if (_dragAnchorCell != null) {
-        widget.terminalController.setSelection(
-          widget.terminal.buffer.createAnchorFromOffset(_dragAnchorCell!),
-          widget.terminal.buffer.createAnchorFromOffset(cell),
-        );
-      }
-
-      if (mounted) setState(() {});
-    });
-  }
-
-  void _cancelHandleAutoScroll() {
-    _handleAutoScrollTimer?.cancel();
-    _handleAutoScrollTimer = null;
-  }
-
-  void _onScrollDuringDrag() {
-    if (_isDraggingHandle && mounted) setState(() {});
   }
 
   Widget _buildOverlayButton({
@@ -1333,7 +1117,6 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
             removeBottom: true,
             child: TerminalView(
               widget.terminal,
-              key: _terminalViewKey,
               controller: widget.terminalController,
               scrollController: _verticalScrollController,
               autoResize: false,
@@ -1389,7 +1172,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
                 terminalWidget,
                 if (_isTwoFingerPanning || _twoFingerSwipeResult != null)
                   _buildTwoFingerSwipeOverlay(),
-                ..._buildSelectionOverlay(),
+                _buildSelectionActions(),
               ],
             ),
           ),

@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_muxpod/providers/settings_provider.dart';
 import 'package:flutter_muxpod/screens/terminal/widgets/pane_terminal_view.dart';
-import 'package:flutter_muxpod/screens/terminal/widgets/selection_handle.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:xterm/xterm.dart';
 
@@ -407,106 +406,6 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(paneKey.currentState?.shouldAutoFollow, isTrue);
-    });
-  });
-
-  group('Selection handles', () {
-    Widget buildSelectHarness({
-      required Terminal terminal,
-      required TerminalController controller,
-      PaneTerminalMode mode = PaneTerminalMode.select,
-    }) {
-      return ProviderScope(
-        overrides: [
-          settingsProvider.overrideWith(() => _TestSettingsNotifier()),
-        ],
-        child: MaterialApp(
-          home: Scaffold(
-            body: SizedBox(
-              width: 320,
-              height: 240,
-              child: PaneTerminalView(
-                terminal: terminal,
-                terminalController: controller,
-                paneWidth: 40,
-                paneHeight: 10,
-                backgroundColor: Colors.black,
-                foregroundColor: Colors.white,
-                mode: mode,
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-
-    testWidgets('selection overlay visible in select mode with selection', (
-      tester,
-    ) async {
-      final terminal = Terminal(maxLines: 100, reflowEnabled: false);
-      terminal.write('hello world\r\nline two');
-      final controller = TerminalController();
-
-      await tester.pumpWidget(
-        buildSelectHarness(
-          terminal: terminal,
-          controller: controller,
-          mode: PaneTerminalMode.select,
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // Create a selection
-      controller.setSelection(
-        terminal.buffer.createAnchorFromOffset(const CellOffset(0, 0)),
-        terminal.buffer.createAnchorFromOffset(const CellOffset(5, 0)),
-      );
-      await tester.pumpAndSettle();
-
-      // Copy/Clear action buttons should appear in the overlay
-      expect(find.text('Copy'), findsOneWidget);
-      expect(find.text('Clear'), findsOneWidget);
-    });
-
-    testWidgets('handles hidden in normal mode', (tester) async {
-      final terminal = Terminal(maxLines: 100, reflowEnabled: false);
-      terminal.write('hello world');
-      final controller = TerminalController();
-
-      await tester.pumpWidget(
-        buildSelectHarness(
-          terminal: terminal,
-          controller: controller,
-          mode: PaneTerminalMode.normal,
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      controller.setSelection(
-        terminal.buffer.createAnchorFromOffset(const CellOffset(0, 0)),
-        terminal.buffer.createAnchorFromOffset(const CellOffset(5, 0)),
-      );
-      await tester.pumpAndSettle();
-
-      expect(find.byType(SelectionHandle), findsNothing);
-    });
-
-    testWidgets('handles hidden with no selection', (tester) async {
-      final terminal = Terminal(maxLines: 100, reflowEnabled: false);
-      terminal.write('hello world');
-      final controller = TerminalController();
-
-      await tester.pumpWidget(
-        buildSelectHarness(
-          terminal: terminal,
-          controller: controller,
-          mode: PaneTerminalMode.select,
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      // No selection set
-      expect(find.byType(SelectionHandle), findsNothing);
     });
   });
 }
