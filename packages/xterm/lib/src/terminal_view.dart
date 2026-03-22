@@ -380,8 +380,19 @@ class TerminalViewState extends State<TerminalView> {
     widget.onTapUp?.call(details, offset);
   }
 
-  void _onTapDown(_) {
+  void _onTapDown(TapDownDetails details) {
     if (_controller.selection != null) {
+      // Don't clear selection if the tap is on a selection handle —
+      // the user is about to drag it via long-press.
+      if (widget.showSelectionHandles) {
+        final startRect = renderTerminal.getStartHandleRect();
+        final endRect = renderTerminal.getEndHandleRect();
+        final pos = details.localPosition;
+        if ((startRect != null && startRect.contains(pos)) ||
+            (endRect != null && endRect.contains(pos))) {
+          return;
+        }
+      }
       _controller.clearSelection();
     } else if (!widget.hardwareKeyboardOnly && hasInputConnection) {
       // Keyboard is already visible — refocus to keep it alive.
