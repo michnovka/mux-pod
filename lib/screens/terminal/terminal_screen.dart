@@ -1019,6 +1019,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
       _clearPendingLiveUpdates();
     }
 
+    // Keep freezePositionForHistory in sync: when the user scrolls up
+    // into history, block xterm's _stickToBottom from pushing the
+    // viewport to the bottom on every layout.  Clear when they scroll
+    // back to the live tail.
+    _terminalScrollController.freezePositionForHistory = !followBottom;
+
     if (!mounted || _isDisposed) {
       _isFollowingLiveTail = followBottom;
       return;
@@ -1119,7 +1125,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
   void _preserveHistoryViewportAnchor(double pixels) {
     if (_isFollowingLiveTail) {
-      _terminalScrollController.freezePositionForHistory = false;
       return;
     }
 
@@ -1131,8 +1136,11 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _historyViewportAnchorScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _historyViewportAnchorScheduled = false;
-      // Layout is complete — allow normal corrections again.
-      _terminalScrollController.freezePositionForHistory = false;
+      // Only clear the freeze if the user has returned to live tail.
+      // While reading history, keep it set to block _stickToBottom.
+      if (_isFollowingLiveTail) {
+        _terminalScrollController.freezePositionForHistory = false;
+      }
 
       if (!mounted || _isDisposed || _isFollowingLiveTail) {
         return;
@@ -6131,6 +6139,13 @@ class _StableScrollPosition extends ScrollPositionWithSingleContext {
 
   @override
   void correctBy(double correction) {
+    // Block xterm's RenderTerminal._stickToBottom correctBy while the
+    // user is reading history.  Without this, _stickToBottom pushes the
+    // viewport to the bottom on every layout even though the user has
+    // scrolled up.
+    if (controller.freezePositionForHistory && correction > 0) {
+      return;
+    }
     // Suppress xterm's RenderTerminal._stickToBottom correctBy in
     // performLayout. The correction is always positive when sticking to
     // a newly-larger maxScrollExtent after a viewport shrink.
