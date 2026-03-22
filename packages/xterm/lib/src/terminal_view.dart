@@ -387,7 +387,7 @@ class TerminalViewState extends State<TerminalView> {
       if (widget.showSelectionHandles) {
         final startRect = renderTerminal.getStartHandleRect();
         final endRect = renderTerminal.getEndHandleRect();
-        final pos = details.localPosition;
+        final pos = renderTerminal.globalToLocal(details.globalPosition);
         if ((startRect != null && startRect.contains(pos)) ||
             (endRect != null && endRect.contains(pos))) {
           return;

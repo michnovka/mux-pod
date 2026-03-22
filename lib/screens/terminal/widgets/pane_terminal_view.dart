@@ -849,7 +849,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       if (renderTerminal != null) {
         final startRect = renderTerminal.getStartHandleRect();
         final endRect = renderTerminal.getEndHandleRect();
-        final local = details.localPosition;
+        final local = renderTerminal.globalToLocal(details.globalPosition);
 
         if (startRect != null && startRect.contains(local)) {
           // Dragging the start handle — anchor is the end
