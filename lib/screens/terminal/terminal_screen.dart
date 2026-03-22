@@ -2907,7 +2907,7 @@ $metadataCommand
     // would have fit without the keyboard, so we suppress.
     _terminalScrollController.suppressScrollToMax = keyboardVisible;
     _terminalScrollController.viewportShrinkBudget = keyboardVisible
-        ? keyboardInset + 120
+        ? keyboardInset + SpecialKeysBar.estimatedHeight
         : 0;
     _syncKeyboardViewportState(
       keyboardVisible: keyboardVisible,
@@ -3928,7 +3928,7 @@ $metadataCommand
         ),
         child: Row(
           children: [
-            const SizedBox(width: 8),
+            const SizedBox(width: 4),
             // Breadcrumb navigation
             Expanded(
               child: SingleChildScrollView(
@@ -4047,28 +4047,6 @@ $metadataCommand
                 bandwidthBitsPerSecond: _bandwidthNotifier.value,
               ),
             ),
-            // Search button
-            IconButton(
-              onPressed: _terminal.isUsingAltBuffer
-                  ? null
-                  : _terminalMode == TerminalMode.search
-                      ? () => _searchFocusNode.requestFocus()
-                      : _openSearch,
-              tooltip: _terminal.isUsingAltBuffer
-                  ? 'Search unavailable in alt buffer'
-                  : 'Search',
-              icon: Icon(
-                Icons.search,
-                size: 16,
-                color: _terminal.isUsingAltBuffer
-                    ? colorScheme.onSurface.withValues(alpha: 0.2)
-                    : _terminalMode == TerminalMode.search
-                        ? DesignColors.primary
-                        : colorScheme.onSurface.withValues(alpha: 0.6),
-              ),
-              padding: const EdgeInsets.all(8),
-              constraints: const BoxConstraints(),
-            ),
             // Settings button
             IconButton(
               onPressed: _showTerminalMenu,
@@ -4080,7 +4058,7 @@ $metadataCommand
               padding: const EdgeInsets.all(8),
               constraints: const BoxConstraints(),
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: 2),
           ],
         ),
       ),
@@ -5201,7 +5179,7 @@ $metadataCommand
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
         decoration: isSelected
             ? BoxDecoration(
                 color: colorScheme.onSurface.withValues(alpha: 0.05),
@@ -5261,7 +5239,7 @@ $metadataCommand
   Widget _buildBreadcrumbSeparator() {
     final colorScheme = Theme.of(context).colorScheme;
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 2),
       child: Text(
         '/',
         style: GoogleFonts.jetBrainsMono(
@@ -5554,7 +5532,7 @@ $metadataCommand
   }) {
     final colorScheme = Theme.of(context).colorScheme;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 6),
       decoration: BoxDecoration(
         border: Border(left: BorderSide(color: colorScheme.outline, width: 1)),
       ),

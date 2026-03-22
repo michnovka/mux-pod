@@ -5,6 +5,9 @@ import 'package:google_fonts/google_fonts.dart';
 import '../theme/design_colors.dart';
 
 class SpecialKeysBar extends StatelessWidget {
+  /// Approximate rendered height of this widget (used by scroll suppression).
+  static const double estimatedHeight = 90;
+
   final ValueChanged<String> onLiteralKeyPressed;
   final ValueChanged<String> onSpecialKeyPressed;
   final VoidCallback onCtrlToggle;
@@ -75,14 +78,14 @@ class SpecialKeysBar extends StatelessWidget {
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(8, 8, 8, 10),
+          padding: const EdgeInsets.fromLTRB(6, 4, 6, 6),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               _buildKeyRow(context, _topRowKeys),
-              const SizedBox(height: 8),
+              const SizedBox(height: 4),
               _buildKeyRow(context, _bottomRowKeys),
-              const SizedBox(height: 8),
+              const SizedBox(height: 4),
               _buildActionRow(context),
             ],
           ),
@@ -96,7 +99,7 @@ class SpecialKeysBar extends StatelessWidget {
       children: [
         for (var index = 0; index < keys.length; index += 1) ...[
           Expanded(child: _buildKeyButton(context, keys[index])),
-          if (index != keys.length - 1) const SizedBox(width: 6),
+          if (index != keys.length - 1) const SizedBox(width: 4),
         ],
       ],
     );
@@ -115,7 +118,7 @@ class SpecialKeysBar extends StatelessWidget {
             isActive: false,
           ),
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: 4),
         Expanded(
           flex: 2,
           child: _buildActionButton(
@@ -126,7 +129,7 @@ class SpecialKeysBar extends StatelessWidget {
             isActive: selectModeActive,
           ),
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: 4),
         Expanded(
           flex: 2,
           child: _buildActionButton(
@@ -137,7 +140,7 @@ class SpecialKeysBar extends StatelessWidget {
             isActive: false,
           ),
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: 4),
         Expanded(
           flex: 2,
           child: _buildActionButton(
@@ -188,16 +191,16 @@ class SpecialKeysBar extends StatelessWidget {
         onTap: onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 120),
-          height: 34,
+          height: 28,
           decoration: BoxDecoration(
             color: backgroundColor,
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(6),
             border: Border.all(color: borderColor),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.28),
-                blurRadius: 6,
-                offset: const Offset(0, 2),
+                blurRadius: 3,
+                offset: const Offset(0, 1),
               ),
             ],
           ),
@@ -270,16 +273,16 @@ class SpecialKeysBar extends StatelessWidget {
         onTap: onTap,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 120),
-          height: 34,
+          height: 28,
           decoration: BoxDecoration(
             color: backgroundColor,
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(6),
             border: Border.all(color: borderColor),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.28),
-                blurRadius: 6,
-                offset: const Offset(0, 2),
+                blurRadius: 3,
+                offset: const Offset(0, 1),
               ),
             ],
           ),
@@ -290,7 +293,7 @@ class SpecialKeysBar extends StatelessWidget {
             overflow: TextOverflow.fade,
             softWrap: false,
             style: GoogleFonts.jetBrainsMono(
-              fontSize: 12,
+              fontSize: 11,
               fontWeight: FontWeight.w700,
               color: textColor,
               letterSpacing: key.label.length > 3 ? 0 : 0.2,
