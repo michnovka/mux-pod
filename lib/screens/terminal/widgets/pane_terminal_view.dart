@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm/xterm.dart';
+import 'package:xterm/src/ui/render.dart';
 
 import '../../../providers/settings_provider.dart';
 import '../../../services/terminal/font_calculator.dart';
@@ -832,6 +833,77 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     return true;
   }
 
+  // ---------------------------------------------------------------------------
+  // Selection handle drag
+  // ---------------------------------------------------------------------------
+
+  CellOffset? _handleDragAnchor; // fixed end during handle drag
+
+  bool _handleSelectionOrUrlLongPress(
+    LongPressStartDetails details,
+    CellOffset cellOffset,
+  ) {
+    // In select mode with a selection, check if the press is near a handle
+    if (widget.mode == PaneTerminalMode.select && _hasSelection) {
+      final renderTerminal = _findRenderTerminal();
+      if (renderTerminal != null) {
+        final startRect = renderTerminal.getStartHandleRect();
+        final endRect = renderTerminal.getEndHandleRect();
+        final local = details.localPosition;
+
+        if (startRect != null && startRect.contains(local)) {
+          // Dragging the start handle — anchor is the end
+          final sel = widget.terminalController.selection?.normalized;
+          if (sel != null) {
+            _handleDragAnchor = sel.end;
+            return true; // suppress word selection
+          }
+        }
+        if (endRect != null && endRect.contains(local)) {
+          // Dragging the end handle — anchor is the start
+          final sel = widget.terminalController.selection?.normalized;
+          if (sel != null) {
+            _handleDragAnchor = sel.begin;
+            return true;
+          }
+        }
+      }
+    }
+
+    // Fall through to URL long-press
+    return _handleUrlLongPress(details, cellOffset);
+  }
+
+  bool _handleSelectionHandleDrag(
+    LongPressMoveUpdateDetails details,
+    CellOffset cellOffset,
+  ) {
+    if (_handleDragAnchor == null) return false;
+
+    // Update selection: anchor stays fixed, dragged end follows finger
+    widget.terminalController.setSelection(
+      widget.terminal.buffer.createAnchorFromOffset(_handleDragAnchor!),
+      widget.terminal.buffer.createAnchorFromOffset(cellOffset),
+    );
+    return true; // suppress default word-extend
+  }
+
+  RenderTerminal? _findRenderTerminal() {
+    // Walk the render tree to find the RenderTerminal
+    RenderTerminal? result;
+    void visitor(Element element) {
+      if (result != null) return;
+      final renderObj = element.renderObject;
+      if (renderObj is RenderTerminal) {
+        result = renderObj;
+        return;
+      }
+      element.visitChildren(visitor);
+    }
+    context.visitChildElements(visitor);
+    return result;
+  }
+
   void _showUrlContextMenu(Offset position, DetectedUrl detectedUrl) {
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     showMenu<String>(
@@ -1138,8 +1210,11 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
                 height: 1.4,
                 fontFamily: settings.fontFamily,
               ),
+              showSelectionHandles:
+                  widget.mode == PaneTerminalMode.select && _hasSelection,
               onTapUp: _handleUrlTap,
-              onLongPressStart: _handleUrlLongPress,
+              onLongPressStart: _handleSelectionOrUrlLongPress,
+              onLongPressMoveUpdate: _handleSelectionHandleDrag,
             ),
           ),
         );

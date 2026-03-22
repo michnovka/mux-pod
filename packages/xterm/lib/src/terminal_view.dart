@@ -47,6 +47,8 @@ class TerminalView extends StatefulWidget {
     this.shortcuts,
     this.onKeyEvent,
     this.onLongPressStart,
+    this.onLongPressMoveUpdate,
+    this.showSelectionHandles = false,
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
@@ -102,6 +104,11 @@ class TerminalView extends StatefulWidget {
   /// Return true to indicate the event was handled (suppresses word selection).
   final bool Function(LongPressStartDetails, CellOffset)? onLongPressStart;
 
+  /// Function called when the user moves during a long-press on the terminal.
+  /// Return true to suppress the default word-extend selection behavior.
+  final bool Function(LongPressMoveUpdateDetails, CellOffset)?
+      onLongPressMoveUpdate;
+
   /// The mouse cursor for mouse pointers that are hovering over the terminal.
   /// [SystemMouseCursors.text] by default.
   final MouseCursor mouseCursor;
@@ -121,6 +128,9 @@ class TerminalView extends StatefulWidget {
   /// Whether to always show the cursor. This is useful for debugging.
   /// [false] by default.
   final bool alwaysShowCursor;
+
+  /// Whether to paint selection handles at the selection boundaries.
+  final bool showSelectionHandles;
 
   /// Workaround to detect delete key for platforms and IMEs that does not
   /// emit hardware delete event. Prefered on mobile platforms. [false] by
@@ -252,6 +262,7 @@ class TerminalViewState extends State<TerminalView> {
           focusNode: _focusNode,
           cursorType: widget.cursorType,
           alwaysShowCursor: widget.alwaysShowCursor,
+          showSelectionHandles: widget.showSelectionHandles,
           onEditableRect: _onEditableRect,
           composingText: _composingText,
         );
@@ -325,6 +336,10 @@ class TerminalViewState extends State<TerminalView> {
           widget.onSecondaryTapUp != null ? _onSecondaryTapUp : null,
       onLongPressStart:
           widget.onLongPressStart != null ? _onLongPressStart : null,
+      onLongPressMoveUpdate:
+          widget.onLongPressMoveUpdate != null
+              ? _onLongPressMoveUpdate
+              : null,
       readOnly: widget.readOnly,
       child: child,
     );
@@ -397,6 +412,11 @@ class TerminalViewState extends State<TerminalView> {
   bool _onLongPressStart(LongPressStartDetails details) {
     final offset = renderTerminal.getCellOffset(details.localPosition);
     return widget.onLongPressStart?.call(details, offset) ?? false;
+  }
+
+  bool _onLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
+    final offset = renderTerminal.getCellOffset(details.localPosition);
+    return widget.onLongPressMoveUpdate?.call(details, offset) ?? false;
   }
 
   bool get hasInputConnection {
@@ -496,6 +516,7 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.focusNode,
     required this.cursorType,
     required this.alwaysShowCursor,
+    required this.showSelectionHandles,
     this.onEditableRect,
     this.composingText,
   });
@@ -521,6 +542,8 @@ class _TerminalView extends LeafRenderObjectWidget {
   final TerminalCursorType cursorType;
 
   final bool alwaysShowCursor;
+
+  final bool showSelectionHandles;
 
   final EditableRectCallback? onEditableRect;
 
@@ -559,6 +582,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..focusNode = focusNode
       ..cursorType = cursorType
       ..alwaysShowCursor = alwaysShowCursor
+      ..showSelectionHandles = showSelectionHandles
       ..onEditableRect = onEditableRect
       ..composingText = composingText;
   }

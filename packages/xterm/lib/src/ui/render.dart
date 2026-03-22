@@ -147,6 +147,14 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     markNeedsPaint();
   }
 
+  bool _showSelectionHandles = false;
+  bool get showSelectionHandles => _showSelectionHandles;
+  set showSelectionHandles(bool value) {
+    if (value == _showSelectionHandles) return;
+    _showSelectionHandles = value;
+    markNeedsPaint();
+  }
+
   TerminalSize? _viewportSize;
 
   final TerminalPainter _painter;
@@ -451,6 +459,9 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         effectFirstLine,
         effectLastLine,
       );
+      if (showSelectionHandles) {
+        _paintSelectionHandles(canvas, _controller.selection!);
+      }
     }
   }
 
@@ -574,6 +585,102 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
       Offset(start * _painter.cellSize.width, y),
       Offset(end * _painter.cellSize.width, y),
       paint,
+    );
+  }
+
+  /// Paints teardrop-shaped selection handles at the start and end of the
+  /// selection.  Coordinates are in the same space as [_paintSegment].
+  void _paintSelectionHandles(Canvas canvas, BufferRange selection) {
+    final normalized = selection.normalized;
+    final cellW = _painter.cellSize.width;
+    final cellH = _painter.cellSize.height;
+    const handleRadius = 5.0;
+    const stemLength = 10.0;
+    const stemWidth = 2.0;
+    final handleColor = _painter.theme.cursor;
+
+    void paintHandle(double x, double y, {required bool isStart}) {
+      final paint = Paint()
+        ..color = handleColor
+        ..style = PaintingStyle.fill;
+
+      // Stem from the cell edge downward
+      canvas.drawRect(
+        Rect.fromLTWH(x - stemWidth / 2, y, stemWidth, stemLength),
+        paint,
+      );
+
+      // Circle at the bottom of the stem
+      canvas.drawCircle(
+        Offset(x, y + stemLength + handleRadius),
+        handleRadius,
+        paint,
+      );
+    }
+
+    // Start handle: at the left edge of the first selected cell, below line
+    final startX = normalized.begin.x * cellW;
+    final startY = (normalized.begin.y + 1) * cellH + _lineOffset;
+    paintHandle(startX, startY, isStart: true);
+
+    // End handle: at the right edge of the last selected cell, below line
+    final end = normalized.end;
+    final double endX;
+    if (end.x == 0 && end.y > 0) {
+      // Exclusive end wrapped to next line
+      endX = _terminal.viewWidth * cellW;
+    } else {
+      endX = end.x * cellW;
+    }
+    final endY = end.x == 0 && end.y > 0
+        ? end.y * cellH + _lineOffset
+        : (end.y + 1) * cellH + _lineOffset;
+    paintHandle(endX, endY, isStart: false);
+  }
+
+  /// Returns the pixel rect for a selection handle at the given cell offset.
+  /// Used by the gesture layer to hit-test touches against handles.
+  Rect? getStartHandleRect() {
+    final selection = _controller.selection;
+    if (selection == null) return null;
+    final normalized = selection.normalized;
+    final cellW = _painter.cellSize.width;
+    final cellH = _painter.cellSize.height;
+    const handleRadius = 5.0;
+    const stemLength = 10.0;
+
+    final x = normalized.begin.x * cellW;
+    final y = (normalized.begin.y + 1) * cellH + _lineOffset;
+    return Rect.fromCenter(
+      center: Offset(x, y + stemLength + handleRadius),
+      width: (handleRadius + 16) * 2,
+      height: (stemLength + handleRadius * 2 + 8),
+    );
+  }
+
+  Rect? getEndHandleRect() {
+    final selection = _controller.selection;
+    if (selection == null) return null;
+    final normalized = selection.normalized;
+    final cellW = _painter.cellSize.width;
+    final cellH = _painter.cellSize.height;
+    const handleRadius = 5.0;
+    const stemLength = 10.0;
+
+    final end = normalized.end;
+    final double endX;
+    final double endY;
+    if (end.x == 0 && end.y > 0) {
+      endX = _terminal.viewWidth * cellW;
+      endY = end.y * cellH + _lineOffset;
+    } else {
+      endX = end.x * cellW;
+      endY = (end.y + 1) * cellH + _lineOffset;
+    }
+    return Rect.fromCenter(
+      center: Offset(endX, endY + stemLength + handleRadius),
+      width: (handleRadius + 16) * 2,
+      height: (stemLength + handleRadius * 2 + 8),
     );
   }
 }
