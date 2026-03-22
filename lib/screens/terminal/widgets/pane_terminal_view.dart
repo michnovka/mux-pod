@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -399,9 +400,19 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
     if (_followBottom == value) {
       return;
     }
-    setState(() {
-      _followBottom = value;
-    });
+    _followBottom = value;
+    // When called during layout (e.g. from a scroll notification dispatched
+    // by applyContentDimensions), defer the rebuild to avoid the "build
+    // scheduled during frame" assertion.  Otherwise call setState directly.
+    final phase = SchedulerBinding.instance.schedulerPhase;
+    if (phase == SchedulerPhase.persistentCallbacks ||
+        phase == SchedulerPhase.postFrameCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() {});
+      });
+    } else {
+      setState(() {});
+    }
     if (notify) {
       widget.onFollowBottomChanged?.call(value);
     }
