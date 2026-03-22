@@ -168,6 +168,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
 
   @override
   void dispose() {
+    _cancelHandleAutoScroll();
     _teardownUrlDetection();
     _clearSearchHighlights();
     widget.terminalController.removeListener(_handleSelectionChanged);
@@ -837,7 +838,13 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
   // Selection handle drag
   // ---------------------------------------------------------------------------
 
+  static const double _handleAutoScrollEdge = 40.0;
+  static const Duration _handleAutoScrollInterval = Duration(milliseconds: 50);
+
   CellOffset? _handleDragAnchor; // fixed end during handle drag
+  Timer? _handleAutoScrollTimer;
+  Offset? _lastHandleDragGlobalPos;
+  double _lastAutoScrollPixels = -1;
 
   bool _handleSelectionOrUrlLongPress(
     LongPressStartDetails details,
@@ -885,7 +892,73 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
       widget.terminal.buffer.createAnchorFromOffset(_handleDragAnchor!),
       widget.terminal.buffer.createAnchorFromOffset(cellOffset),
     );
+
+    _lastHandleDragGlobalPos = details.globalPosition;
+
+    // Auto-scroll when near viewport edges
+    final renderBoxObj = context.findRenderObject() as RenderBox?;
+    if (renderBoxObj != null) {
+      final localY = renderBoxObj.globalToLocal(details.globalPosition).dy;
+      final viewportHeight = renderBoxObj.size.height;
+
+      if (localY < _handleAutoScrollEdge) {
+        _startHandleAutoScroll(scrollUp: true);
+      } else if (localY > viewportHeight - _handleAutoScrollEdge) {
+        _startHandleAutoScroll(scrollUp: false);
+      } else {
+        _cancelHandleAutoScroll();
+      }
+    }
+
     return true; // suppress default word-extend
+  }
+
+  void _handleLongPressUp() {
+    _cancelHandleAutoScroll();
+    _handleDragAnchor = null;
+    _lastHandleDragGlobalPos = null;
+    _lastAutoScrollPixels = -1;
+  }
+
+  void _startHandleAutoScroll({required bool scrollUp}) {
+    if (_handleAutoScrollTimer != null) return;
+    _handleAutoScrollTimer = Timer.periodic(_handleAutoScrollInterval, (_) {
+      if (!mounted || _lastHandleDragGlobalPos == null || _handleDragAnchor == null) {
+        _cancelHandleAutoScroll();
+        return;
+      }
+      if (!_verticalScrollController.hasClients) return;
+
+      final renderTerminal = _findRenderTerminal();
+      if (renderTerminal == null) return;
+
+      final position = _verticalScrollController.position;
+      final lineHeight = renderTerminal.lineHeight;
+      final delta = scrollUp ? -lineHeight : lineHeight;
+      final newPixels = (position.pixels + delta).clamp(
+        position.minScrollExtent,
+        position.maxScrollExtent,
+      );
+
+      // No-progress guard
+      if (newPixels == _lastAutoScrollPixels) return;
+      _lastAutoScrollPixels = newPixels;
+
+      _verticalScrollController.jumpTo(newPixels);
+
+      // Update selection at new scroll position
+      final localPos = renderTerminal.globalToLocal(_lastHandleDragGlobalPos!);
+      final cell = renderTerminal.getCellOffset(localPos);
+      widget.terminalController.setSelection(
+        widget.terminal.buffer.createAnchorFromOffset(_handleDragAnchor!),
+        widget.terminal.buffer.createAnchorFromOffset(cell),
+      );
+    });
+  }
+
+  void _cancelHandleAutoScroll() {
+    _handleAutoScrollTimer?.cancel();
+    _handleAutoScrollTimer = null;
   }
 
   RenderTerminal? _findRenderTerminal() {
@@ -1215,6 +1288,7 @@ class PaneTerminalViewState extends ConsumerState<PaneTerminalView> {
               onTapUp: _handleUrlTap,
               onLongPressStart: _handleSelectionOrUrlLongPress,
               onLongPressMoveUpdate: _handleSelectionHandleDrag,
+              onLongPressUp: _handleLongPressUp,
             ),
           ),
         );

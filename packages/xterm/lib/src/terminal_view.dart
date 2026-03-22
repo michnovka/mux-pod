@@ -48,6 +48,7 @@ class TerminalView extends StatefulWidget {
     this.onKeyEvent,
     this.onLongPressStart,
     this.onLongPressMoveUpdate,
+    this.onLongPressUp,
     this.showSelectionHandles = false,
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
@@ -108,6 +109,9 @@ class TerminalView extends StatefulWidget {
   /// Return true to suppress the default word-extend selection behavior.
   final bool Function(LongPressMoveUpdateDetails, CellOffset)?
       onLongPressMoveUpdate;
+
+  /// Function called when the long-press gesture ends (finger lifted).
+  final VoidCallback? onLongPressUp;
 
   /// The mouse cursor for mouse pointers that are hovering over the terminal.
   /// [SystemMouseCursors.text] by default.
@@ -340,6 +344,7 @@ class TerminalViewState extends State<TerminalView> {
           widget.onLongPressMoveUpdate != null
               ? _onLongPressMoveUpdate
               : null,
+      onLongPressUp: widget.onLongPressUp,
       readOnly: widget.readOnly,
       child: child,
     );
