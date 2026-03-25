@@ -1868,18 +1868,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   // shell and fire notifications for any windows that acquired the
   // bell flag while we were away.
 
-  static const Duration _backgroundBellPollInterval = Duration(seconds: 30);
-
   void _startBackgroundBellPolling() {
     _backgroundBellTimer?.cancel();
     final settings = ref.read(settingsProvider);
     if (!settings.enableNotifications) return;
-    // Only poll if there are any per-window notification prefs enabled
+    if (settings.backgroundBellPollIntervalSeconds <= 0) return;
+    // Only poll if this connection has any watched windows
     final prefs = ref.read(bellNotificationPrefsProvider);
-    if (prefs.isEmpty) return;
+    final connectionPrefix = '${widget.connectionId}:';
+    final hasWatchedWindows = prefs.entries.any(
+      (e) => e.key.startsWith(connectionPrefix) && e.value,
+    );
+    if (!hasWatchedWindows) return;
 
     _backgroundBellTimer = Timer.periodic(
-      _backgroundBellPollInterval,
+      Duration(seconds: settings.backgroundBellPollIntervalSeconds),
       (_) => _pollBellsInBackground(),
     );
   }

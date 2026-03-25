@@ -228,6 +228,15 @@ class SshClient {
   /// Consecutive keep-alive success count
   int _keepAliveSuccessCount = 0;
 
+  /// Whether the client is in background mode (reduced keep-alive frequency)
+  bool _isInBackgroundMode = false;
+
+  /// Background keep-alive interval in seconds (configurable)
+  int backgroundKeepAliveIntervalSeconds = 120;
+
+  /// Minimum keep-alive interval for background mode
+  static const int _minBackgroundKeepAliveIntervalSeconds = 60;
+
   /// Current connection state
   SshConnectionState get state => _state;
 
@@ -610,6 +619,22 @@ class SshClient {
     return trimmed;
   }
 
+  /// Switch between background mode (slow keep-alive) and foreground mode.
+  void setBackgroundMode(bool isBackground) {
+    if (_isInBackgroundMode == isBackground) return;
+    _isInBackgroundMode = isBackground;
+
+    if (!isConnected || _keepAliveTimer == null) return;
+
+    if (isBackground) {
+      _currentKeepAliveIntervalSeconds = backgroundKeepAliveIntervalSeconds;
+    } else {
+      _currentKeepAliveIntervalSeconds = _minKeepAliveIntervalSeconds;
+    }
+    _keepAliveSuccessCount = 0;
+    _scheduleNextKeepAlive();
+  }
+
   /// Start keep-alive
   ///
   /// Periodically executes a lightweight command to verify the connection is alive.
@@ -620,7 +645,9 @@ class SshClient {
       return;
     }
     _stopKeepAlive();
-    _currentKeepAliveIntervalSeconds = 10; // Initial value: 10 seconds
+    _currentKeepAliveIntervalSeconds = _isInBackgroundMode
+        ? backgroundKeepAliveIntervalSeconds
+        : 10; // Foreground initial value: 10 seconds
     _keepAliveSuccessCount = 0;
     _scheduleNextKeepAlive();
   }
@@ -688,20 +715,27 @@ class SshClient {
 
   /// Adjust keep-alive interval
   void _adjustKeepAliveInterval({required bool success}) {
+    final minInterval = _isInBackgroundMode
+        ? _minBackgroundKeepAliveIntervalSeconds
+        : _minKeepAliveIntervalSeconds;
+    final maxInterval = _isInBackgroundMode
+        ? backgroundKeepAliveIntervalSeconds
+        : _maxKeepAliveIntervalSeconds;
+
     if (success) {
       _keepAliveSuccessCount++;
       // Extend interval after 3 consecutive successes
       if (_keepAliveSuccessCount >= 3) {
         _currentKeepAliveIntervalSeconds =
             (_currentKeepAliveIntervalSeconds + 5).clamp(
-              _minKeepAliveIntervalSeconds,
-              _maxKeepAliveIntervalSeconds,
+              minInterval,
+              maxInterval,
             );
         _keepAliveSuccessCount = 0;
       }
     } else {
       // Reset to minimum interval on failure
-      _currentKeepAliveIntervalSeconds = _minKeepAliveIntervalSeconds;
+      _currentKeepAliveIntervalSeconds = minInterval;
       _keepAliveSuccessCount = 0;
     }
   }

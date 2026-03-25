@@ -164,6 +164,44 @@ class SettingsScreen extends ConsumerWidget {
                   },
                 ),
                 const Divider(),
+                const _SectionHeader(title: 'Background'),
+                ListTile(
+                  leading: const Icon(Icons.timer_outlined),
+                  title: const Text('Background Keep-Alive'),
+                  subtitle: Text('${settings.backgroundKeepAliveIntervalSeconds} seconds'),
+                  onTap: () async {
+                    final value = await showDialog<int>(
+                      context: context,
+                      builder: (context) => _BackgroundKeepAliveDialog(
+                        currentValue: settings.backgroundKeepAliveIntervalSeconds,
+                      ),
+                    );
+                    if (value != null) {
+                      ref.read(settingsProvider.notifier).setBackgroundKeepAliveIntervalSeconds(value);
+                    }
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.notifications_paused),
+                  title: const Text('Background Bell Polling'),
+                  subtitle: Text(
+                    settings.backgroundBellPollIntervalSeconds <= 0
+                        ? 'Disabled'
+                        : '${settings.backgroundBellPollIntervalSeconds} seconds',
+                  ),
+                  onTap: () async {
+                    final value = await showDialog<int>(
+                      context: context,
+                      builder: (context) => _BackgroundBellPollDialog(
+                        currentValue: settings.backgroundBellPollIntervalSeconds,
+                      ),
+                    );
+                    if (value != null) {
+                      ref.read(settingsProvider.notifier).setBackgroundBellPollIntervalSeconds(value);
+                    }
+                  },
+                ),
+                const Divider(),
                 const _SectionHeader(title: 'Appearance'),
                 ListTile(
                   leading: const Icon(Icons.dark_mode),
@@ -291,6 +329,93 @@ class _KeepAliveTimeoutDialog extends StatelessWidget {
             children: _options.map((seconds) {
               return RadioListTile<int>(
                 title: Text('$seconds seconds'),
+                value: seconds,
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+      ],
+    );
+  }
+}
+
+class _BackgroundKeepAliveDialog extends StatelessWidget {
+  final int currentValue;
+
+  static const List<int> _options = [60, 90, 120, 180, 300];
+
+  const _BackgroundKeepAliveDialog({required this.currentValue});
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Background Keep-Alive'),
+      content: SingleChildScrollView(
+        child: RadioGroup<int>(
+          groupValue: currentValue,
+          onChanged: (value) {
+            if (value != null) {
+              Navigator.pop(context, value);
+            }
+          },
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: _options.map((seconds) {
+              return RadioListTile<int>(
+                title: Text('$seconds seconds'),
+                value: seconds,
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+      ],
+    );
+  }
+}
+
+class _BackgroundBellPollDialog extends StatelessWidget {
+  final int currentValue;
+
+  static const List<int> _options = [0, 60, 120, 180, 300];
+  static const Map<int, String> _labels = {
+    0: 'Disabled',
+    60: '60 seconds',
+    120: '120 seconds',
+    180: '180 seconds',
+    300: '300 seconds',
+  };
+
+  const _BackgroundBellPollDialog({required this.currentValue});
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Background Bell Polling'),
+      content: SingleChildScrollView(
+        child: RadioGroup<int>(
+          groupValue: currentValue,
+          onChanged: (value) {
+            if (value != null) {
+              Navigator.pop(context, value);
+            }
+          },
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: _options.map((seconds) {
+              return RadioListTile<int>(
+                title: Text(_labels[seconds] ?? '$seconds seconds'),
                 value: seconds,
               );
             }).toList(),

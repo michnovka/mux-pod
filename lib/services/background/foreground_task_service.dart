@@ -45,7 +45,7 @@ class SshForegroundTaskService {
         eventAction: ForegroundTaskEventAction.nothing(),
         autoRunOnBoot: false,
         autoRunOnMyPackageReplaced: false,
-        allowWakeLock: true,
+        allowWakeLock: false,
         allowWifiLock: true,
       ),
     );
@@ -62,13 +62,6 @@ class SshForegroundTaskService {
         await FlutterForegroundTask.checkNotificationPermission();
     if (notificationPermission != NotificationPermission.granted) {
       await FlutterForegroundTask.requestNotificationPermission();
-    }
-
-    // Request battery optimization exemption (optional)
-    final batteryOptimization =
-        await FlutterForegroundTask.isIgnoringBatteryOptimizations;
-    if (!batteryOptimization) {
-      await FlutterForegroundTask.requestIgnoreBatteryOptimization();
     }
 
     return await FlutterForegroundTask.checkNotificationPermission() ==

@@ -36,6 +36,12 @@ class AppSettings {
   /// URL detection in terminal output
   final bool enableUrlDetection;
 
+  /// Background keep-alive interval in seconds (how often to ping SSH when backgrounded)
+  final int backgroundKeepAliveIntervalSeconds;
+
+  /// Background bell polling interval in seconds (0 = disabled)
+  final int backgroundBellPollIntervalSeconds;
+
   const AppSettings({
     this.darkMode = true,
     this.fontSize = 14.0,
@@ -51,6 +57,8 @@ class AppSettings {
     this.invertPaneNavigation = false,
     this.keepAliveTimeoutSeconds = 10,
     this.enableUrlDetection = true,
+    this.backgroundKeepAliveIntervalSeconds = 120,
+    this.backgroundBellPollIntervalSeconds = 120,
   });
 
   AppSettings copyWith({
@@ -68,6 +76,8 @@ class AppSettings {
     bool? invertPaneNavigation,
     int? keepAliveTimeoutSeconds,
     bool? enableUrlDetection,
+    int? backgroundKeepAliveIntervalSeconds,
+    int? backgroundBellPollIntervalSeconds,
   }) {
     return AppSettings(
       darkMode: darkMode ?? this.darkMode,
@@ -84,6 +94,8 @@ class AppSettings {
       invertPaneNavigation: invertPaneNavigation ?? this.invertPaneNavigation,
       keepAliveTimeoutSeconds: keepAliveTimeoutSeconds ?? this.keepAliveTimeoutSeconds,
       enableUrlDetection: enableUrlDetection ?? this.enableUrlDetection,
+      backgroundKeepAliveIntervalSeconds: backgroundKeepAliveIntervalSeconds ?? this.backgroundKeepAliveIntervalSeconds,
+      backgroundBellPollIntervalSeconds: backgroundBellPollIntervalSeconds ?? this.backgroundBellPollIntervalSeconds,
     );
   }
 
@@ -103,6 +115,8 @@ class AppSettings {
       'invertPaneNavigation': invertPaneNavigation,
       'keepAliveTimeoutSeconds': keepAliveTimeoutSeconds,
       'enableUrlDetection': enableUrlDetection,
+      'backgroundKeepAliveIntervalSeconds': backgroundKeepAliveIntervalSeconds,
+      'backgroundBellPollIntervalSeconds': backgroundBellPollIntervalSeconds,
     };
   }
 
@@ -122,7 +136,17 @@ class AppSettings {
       invertPaneNavigation: json['invertPaneNavigation'] as bool? ?? false,
       keepAliveTimeoutSeconds: json['keepAliveTimeoutSeconds'] as int? ?? 10,
       enableUrlDetection: json['enableUrlDetection'] as bool? ?? true,
+      backgroundKeepAliveIntervalSeconds:
+          (json['backgroundKeepAliveIntervalSeconds'] as int? ?? 120).clamp(60, 300),
+      backgroundBellPollIntervalSeconds:
+          _clampBellPollInterval(json['backgroundBellPollIntervalSeconds'] as int? ?? 120),
     );
+  }
+
+  /// Clamp bell poll interval: 0 (disabled) or 60-300.
+  static int _clampBellPollInterval(int value) {
+    if (value <= 0) return 0;
+    return value.clamp(60, 300);
   }
 }
 
@@ -394,6 +418,22 @@ class SettingsNotifier extends Notifier<AppSettings> {
   Future<void> setEnableUrlDetection(bool value) async {
     await _waitForInitialLoad();
     state = state.copyWith(enableUrlDetection: value);
+    await _saveSettings();
+  }
+
+  /// Set background keep-alive interval in seconds (clamped to 60-300)
+  Future<void> setBackgroundKeepAliveIntervalSeconds(int value) async {
+    await _waitForInitialLoad();
+    state = state.copyWith(backgroundKeepAliveIntervalSeconds: value.clamp(60, 300));
+    await _saveSettings();
+  }
+
+  /// Set background bell polling interval in seconds (0 = disabled, otherwise 60-300)
+  Future<void> setBackgroundBellPollIntervalSeconds(int value) async {
+    await _waitForInitialLoad();
+    state = state.copyWith(
+      backgroundBellPollIntervalSeconds: AppSettings._clampBellPollInterval(value),
+    );
     await _saveSettings();
   }
 

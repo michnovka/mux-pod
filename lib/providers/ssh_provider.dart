@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/background/foreground_task_service.dart';
@@ -93,10 +94,18 @@ class SshNotifier extends Notifier<SshState> {
   // Unlimited retry mode (0 = unlimited)
   static const int _maxReconnectAttempts = 0; // Unlimited
 
-  // Exponential backoff (max 60 seconds)
+  // Exponential backoff
   static const int _baseDelayMs = 1000;
-  static const int _maxDelayMs = 60000;
+  static const int _foregroundMaxDelayMs = 60000;
+  static const int _backgroundMaxDelayMs = 120000;
   static const double _backoffMultiplier = 1.5;
+
+  // Background mode
+  bool _isInBackgroundMode = false;
+  _AppLifecycleObserver? _lifecycleObserver;
+
+  int get _maxDelayMs =>
+      _isInBackgroundMode ? _backgroundMaxDelayMs : _foregroundMaxDelayMs;
 
   // For connection state monitoring
   StreamSubscription<SshConnectionState>? _connectionStateSubscription;
@@ -121,10 +130,22 @@ class SshNotifier extends Notifier<SshState> {
     // Monitor network state
     _startNetworkMonitoring();
 
-    // Propagate keep-alive timeout changes to the live client
+    // Observe app lifecycle for background mode
+    _lifecycleObserver = _AppLifecycleObserver(_onAppLifecycleChanged);
+    WidgetsBinding.instance.addObserver(_lifecycleObserver!);
+
+    // Propagate keep-alive timeout and background interval changes to the live client
     ref.listen<AppSettings>(settingsProvider, (previous, next) {
       if (previous?.keepAliveTimeoutSeconds != next.keepAliveTimeoutSeconds) {
         _client?.keepAliveTimeoutSeconds = next.keepAliveTimeoutSeconds;
+      }
+      if (previous?.backgroundKeepAliveIntervalSeconds !=
+          next.backgroundKeepAliveIntervalSeconds) {
+        _client?.backgroundKeepAliveIntervalSeconds =
+            next.backgroundKeepAliveIntervalSeconds;
+        if (_isInBackgroundMode) {
+          _client?.setBackgroundMode(true);
+        }
       }
     });
 
@@ -132,6 +153,10 @@ class SshNotifier extends Notifier<SshState> {
     ref.onDispose(() {
       _reconnectGeneration++;
       _cancelReconnectFlow(completePending: true);
+      if (_lifecycleObserver != null) {
+        WidgetsBinding.instance.removeObserver(_lifecycleObserver!);
+        _lifecycleObserver = null;
+      }
       // Stream subscriptions and client dispose are async but
       // ref.onDispose is synchronous. Cancel what we can synchronously
       // and fire the async cleanup without awaiting.
@@ -147,6 +172,26 @@ class SshNotifier extends Notifier<SshState> {
       _foregroundService.stopService();
     });
     return const SshState();
+  }
+
+  void _onAppLifecycleChanged(AppLifecycleState lifecycleState) {
+    switch (lifecycleState) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+        setBackgroundMode(true);
+      case AppLifecycleState.resumed:
+        setBackgroundMode(false);
+      case AppLifecycleState.detached:
+        break;
+    }
+  }
+
+  /// Switch SSH keep-alive and reconnect behavior for background/foreground.
+  void setBackgroundMode(bool isBackground) {
+    if (_isInBackgroundMode == isBackground) return;
+    _isInBackgroundMode = isBackground;
+    _client?.setBackgroundMode(isBackground);
   }
 
   /// Start monitoring network state
@@ -205,6 +250,11 @@ class SshNotifier extends Notifier<SshState> {
     final client = ref.read(sshClientFactoryProvider)();
     final settings = ref.read(settingsProvider);
     client.keepAliveTimeoutSeconds = settings.keepAliveTimeoutSeconds;
+    client.backgroundKeepAliveIntervalSeconds =
+        settings.backgroundKeepAliveIntervalSeconds;
+    if (_isInBackgroundMode) {
+      client.setBackgroundMode(true);
+    }
     return client;
   }
 
@@ -606,12 +656,15 @@ class SshNotifier extends Notifier<SshState> {
       }
 
       _client = nextClient;
-      // Re-apply the latest keep-alive timeout. The settings listener uses
-      // `_client?.keepAliveTimeoutSeconds = ...` which is a no-op while
-      // `_client` is null during the reconnect handshake. Any change that
-      // arrived in that window would have been lost.
+      // Re-apply settings that may have changed while _client was null.
+      final currentSettings = ref.read(settingsProvider);
       _client!.keepAliveTimeoutSeconds =
-          ref.read(settingsProvider).keepAliveTimeoutSeconds;
+          currentSettings.keepAliveTimeoutSeconds;
+      _client!.backgroundKeepAliveIntervalSeconds =
+          currentSettings.backgroundKeepAliveIntervalSeconds;
+      if (_isInBackgroundMode) {
+        _client!.setBackgroundMode(true);
+      }
       _connectionStateSubscription = _client!.connectionStateStream.listen(
         _onConnectionStateChanged,
       );
@@ -737,3 +790,15 @@ class SshNotifier extends Notifier<SshState> {
 final sshProvider = NotifierProvider<SshNotifier, SshState>(() {
   return SshNotifier();
 });
+
+/// Lightweight [WidgetsBindingObserver] that forwards lifecycle events to a callback.
+class _AppLifecycleObserver extends WidgetsBindingObserver {
+  _AppLifecycleObserver(this._onChanged);
+
+  final void Function(AppLifecycleState) _onChanged;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _onChanged(state);
+  }
+}
