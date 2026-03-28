@@ -408,6 +408,12 @@ class EscapeParser {
   ///
   /// https://terminalguide.namepad.de/seq/csi_sm/
   void _csiHandleSgr() {
+    // CSI sequences with a prefix (e.g., CSI > 4;2 m for kitty progressive
+    // enhancement) are NOT SGR and must be ignored.
+    if (_csi.prefix != null) {
+      return;
+    }
+
     final params = _csi.params;
 
     if (params.isEmpty) {
@@ -448,9 +454,13 @@ class EscapeParser {
           continue;
 
         case 21:
+          // SGR 21: Some terminals treat as bold-off, standard says
+          // "doubly underlined". We follow common terminal practice.
           handler.unsetCursorBold();
           continue;
         case 22:
+          // SGR 22: Normal intensity — resets both bold AND faint.
+          handler.unsetCursorBold();
           handler.unsetCursorFaint();
           continue;
         case 23:

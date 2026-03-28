@@ -445,6 +445,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     _isInBackground = true;
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
+
     _stopConnectionStatsPolling(resetValue: true);
     fireAndForget(
       _stopControlClient(resetRestartState: true),
@@ -1581,6 +1582,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   Future<void> _stopControlClient({bool resetRestartState = false}) async {
     _controlSyncTimer?.cancel();
     _controlSyncTimer = null;
+
     _shouldRefreshTreeAfterControlSync = false;
     _shouldResyncAfterControlRefresh = false;
     _pendingFirstLiveOutputPaneId = null;
@@ -1692,10 +1694,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
             _terminalScrollController.hasClients
         ? _terminalScrollController.position.pixels
         : null;
-    // Tell the scroll position to block framework-driven corrections
-    // (correctForNewDimensions) while we write to the terminal buffer.
-    // Without this, applyContentDimensions → adjustPositionForNewDimensions
-    // can shift the viewport toward the new bottom during layout.
     if (shouldPreserveHistoryViewport) {
       _terminalScrollController.freezePositionForHistory = true;
     }
@@ -1705,20 +1703,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
     if ((shouldAutoScroll || !_hasInitialScrolled) &&
         !_terminal.isInSynchronizedUpdate) {
       _hasInitialScrolled = true;
-      // Clear the freeze flag — this branch auto-scrolls to bottom, so
-      // history preservation is not needed (and leaving it set would block
-      // correctForNewDimensions on the new pane indefinitely).
       _terminalScrollController.freezePositionForHistory = false;
       _paneTerminalViewKey.currentState?.scrollToBottom();
     } else if (historyViewportPixels != null) {
-      // When the scrollback buffer is at capacity, writing new output evicts
-      // old lines from the top.  The content that was at pixel P is now at
-      // P - evictedLines * lineHeight.  Apply the correction synchronously
-      // via correctBy() so the upcoming layout pass renders the right content
-      // (a post-frame jumpTo alone would cause a one-frame glitch).
-      //
-      // Derive the exact row height from total content height / total lines
-      // so partial-row viewports don't accumulate drift.
       final evicted = _terminal.buffer.lines.droppedCount - droppedBefore;
       double adjustedPixels = historyViewportPixels;
       if (evicted > 0 && _terminalScrollController.hasClients) {
@@ -2858,6 +2845,7 @@ $metadataCommand
   void dispose() {
     // First set _isDisposed to stop async operations
     _isDisposed = true;
+
     WidgetsBinding.instance.removeObserver(this);
     // Disable WakeLock
     WakelockPlus.disable();
