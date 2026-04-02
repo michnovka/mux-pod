@@ -388,6 +388,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
   // Input queue (holds input during disconnection)
   final _inputQueue = InputQueue();
 
+  // Serializes terminal input sends so keystrokes are delivered in order.
+  Future<void> _sendChain = Future.value();
+
+  // Incremented on pane/window/session switch to invalidate stale chain links.
+  int _sendGeneration = 0;
+
   // Background state
   bool _isInBackground = false;
 
@@ -653,7 +659,13 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen>
 
     final queuedInput = _inputQueue.flush();
     if (queuedInput.isNotEmpty) {
-      await _sendTerminalData(queuedInput);
+      final generation = _sendGeneration;
+      final future = _sendChain.then((_) async {
+        if (_sendGeneration != generation) return;
+        await _sendTerminalData(queuedInput);
+      }).catchError((_) {});
+      _sendChain = future;
+      await future;
     }
   }
 
@@ -2631,10 +2643,12 @@ $metadataCommand
               ) ??
               data;
 
-    fireAndForget(
-      _sendTerminalData(normalizeTerminalOutput(output)),
-      debugLabel: 'TerminalScreen send terminal data',
-    );
+    final normalized = normalizeTerminalOutput(output);
+    final generation = _sendGeneration;
+    _sendChain = _sendChain.then((_) async {
+      if (_sendGeneration != generation) return;
+      await _sendTerminalData(normalized);
+    }).catchError((_) {});
   }
 
   /// Attempt auto-reconnection
@@ -3589,6 +3603,8 @@ $metadataCommand
 
     var switchConfirmed = false;
     try {
+      _sendGeneration++;
+      await _sendChain;
       if (previousSelection.paneId != null &&
           previousSelection.paneId != nextPane.id) {
         await sshClient.execPersistentInput(
@@ -3676,6 +3692,8 @@ $metadataCommand
     var remoteSelectionChanged = false;
     var switchConfirmed = false;
     try {
+      _sendGeneration++;
+      await _sendChain;
       if (previousSelection.paneId != null &&
           previousSelection.paneId != activePane.id) {
         await sshClient.execPersistentInput(
@@ -3760,6 +3778,8 @@ $metadataCommand
     var remoteSelectionChanged = false;
     var switchConfirmed = false;
     try {
+      _sendGeneration++;
+      await _sendChain;
       // Send focus-out to the previous pane
       if (oldPaneId != null && oldPaneId != paneId) {
         await sshClient.execPersistentInput(
