@@ -168,4 +168,194 @@ void main() {
       expect(find.text('SEL'), findsOneWidget);
     });
   });
+
+  group('Arrow key repeat', () {
+    late int fireCount;
+    late Widget harness;
+
+    setUp(() {
+      fireCount = 0;
+      harness = MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.bottomCenter,
+            child: SpecialKeysBar(
+              onLiteralKeyPressed: (_) {},
+              onSpecialKeyPressed: (_) => fireCount++,
+              onCtrlToggle: () {},
+              onAltToggle: () {},
+              ctrlPressed: false,
+              altPressed: false,
+              hapticFeedback: false,
+            ),
+          ),
+        ),
+      );
+    });
+
+    testWidgets('single tap fires exactly once', (tester) async {
+      await tester.pumpWidget(harness);
+      final center = tester.getCenter(find.text('↑'));
+      final gesture = await tester.startGesture(center);
+      await tester.pump();
+      await gesture.up();
+      await tester.pump();
+
+      expect(fireCount, 1);
+    });
+
+    testWidgets('repeat starts after 500ms initial delay', (tester) async {
+      await tester.pumpWidget(harness);
+      final center = tester.getCenter(find.text('→'));
+      final gesture = await tester.startGesture(center);
+      await tester.pump();
+      expect(fireCount, 1); // immediate fire
+
+      // Advance just under the delay — no repeats yet
+      await tester.pump(const Duration(milliseconds: 490));
+      expect(fireCount, 1);
+
+      // Cross the delay threshold — repeats should start
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(fireCount, greaterThan(1));
+
+      await gesture.up();
+      await tester.pump();
+    });
+
+    testWidgets('repeat rate is approximately 30 Hz', (tester) async {
+      await tester.pumpWidget(harness);
+      final center = tester.getCenter(find.text('←'));
+      final gesture = await tester.startGesture(center);
+      await tester.pump();
+      expect(fireCount, 1);
+
+      // 500ms delay + 330ms = ~10 repeat intervals at 33ms each
+      await tester.pump(const Duration(milliseconds: 830));
+      // 1 initial + ~10 repeats
+      expect(fireCount, inInclusiveRange(9, 12));
+
+      await gesture.up();
+      await tester.pump();
+    });
+
+    testWidgets('release stops repeat', (tester) async {
+      await tester.pumpWidget(harness);
+      final center = tester.getCenter(find.text('↓'));
+      final gesture = await tester.startGesture(center);
+      await tester.pump();
+
+      // Enter repeat mode
+      await tester.pump(const Duration(milliseconds: 600));
+      final countAtRelease = fireCount;
+      expect(countAtRelease, greaterThan(1));
+
+      // Release and wait — no more fires
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(fireCount, countAtRelease);
+    });
+
+    testWidgets('drag-off cancels repeat', (tester) async {
+      await tester.pumpWidget(harness);
+      final center = tester.getCenter(find.text('↑'));
+      final gesture = await tester.startGesture(center);
+      await tester.pump();
+      expect(fireCount, 1);
+
+      // Move pointer well outside the button bounds
+      await gesture.moveTo(center + const Offset(200, 200));
+      await tester.pump();
+      final countAfterDragOff = fireCount;
+
+      // Wait — no more fires should occur
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(fireCount, countAfterDragOff);
+
+      await gesture.up();
+      await tester.pump();
+    });
+
+    testWidgets('second finger is ignored (multi-touch safety)',
+        (tester) async {
+      await tester.pumpWidget(harness);
+      final center = tester.getCenter(find.text('→'));
+
+      // First finger down
+      final gesture1 = await tester.startGesture(center);
+      await tester.pump();
+      expect(fireCount, 1);
+
+      // Second finger on same button — should be ignored
+      final gesture2 = await tester.startGesture(center);
+      await tester.pump();
+      expect(fireCount, 1); // no additional fire
+
+      // Wait for repeat — should be single-pointer rate
+      await tester.pump(const Duration(milliseconds: 600));
+      final countBefore = fireCount;
+      expect(countBefore, greaterThan(1));
+
+      // Lift second finger — repeat should continue
+      await gesture2.up();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(fireCount, greaterThan(countBefore));
+
+      await gesture1.up();
+      await tester.pump();
+    });
+
+    testWidgets('non-repeatable key does not repeat on hold', (tester) async {
+      // TAB is a non-repeatable special key
+      var tabFireCount = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.bottomCenter,
+              child: SpecialKeysBar(
+                onLiteralKeyPressed: (_) {},
+                onSpecialKeyPressed: (_) => tabFireCount++,
+                onCtrlToggle: () {},
+                onAltToggle: () {},
+                ctrlPressed: false,
+                altPressed: false,
+                hapticFeedback: false,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // Long-press TAB via GestureDetector — it only fires on tap (up), not
+      // on down, so holding without releasing should produce zero fires.
+      final center = tester.getCenter(find.text('TAB'));
+      final gesture = await tester.startGesture(center);
+      await tester.pump(const Duration(milliseconds: 1000));
+      // TAB uses GestureDetector.onTap which fires on pointer up, not down.
+      // So while held, count should still be 0.
+      expect(tabFireCount, 0);
+
+      await gesture.up();
+      await tester.pump();
+      // Now onTap fires
+      expect(tabFireCount, 1);
+    });
+
+    testWidgets('dispose cancels timers without errors', (tester) async {
+      await tester.pumpWidget(harness);
+      final center = tester.getCenter(find.text('↑'));
+      await tester.startGesture(center);
+      await tester.pump();
+
+      // Enter repeat mode
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(fireCount, greaterThan(1));
+
+      // Dispose by replacing the widget tree — should not throw
+      await tester.pumpWidget(const MaterialApp(home: Scaffold()));
+      await tester.pump(const Duration(milliseconds: 500));
+      // No assertion errors = pass
+    });
+  });
 }

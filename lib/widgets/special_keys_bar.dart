@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -49,7 +51,7 @@ class SpecialKeysBar extends StatelessWidget {
     _ExtraKeySpec.literal(label: '-', value: '-'),
     _ExtraKeySpec.special(label: 'HOME', value: 'Home'),
     _ExtraKeySpec.modifier(label: 'ALT'),
-    _ExtraKeySpec.special(label: '↑', value: 'Up'),
+    _ExtraKeySpec.special(label: '↑', value: 'Up', repeatable: true),
     _ExtraKeySpec.special(label: 'END', value: 'End'),
     _ExtraKeySpec.special(label: 'PGUP', value: 'PPage'),
     _ExtraKeySpec.special(label: 'ESC', value: 'Escape'),
@@ -60,11 +62,11 @@ class SpecialKeysBar extends StatelessWidget {
     _ExtraKeySpec.special(label: 'TAB', value: 'Tab'),
     _ExtraKeySpec.modifier(label: 'SHIFT'),
     _ExtraKeySpec.modifier(label: 'CTRL'),
-    _ExtraKeySpec.special(label: '←', value: 'Left'),
-    _ExtraKeySpec.special(label: '↓', value: 'Down'),
-    _ExtraKeySpec.special(label: '→', value: 'Right'),
+    _ExtraKeySpec.special(label: '←', value: 'Left', repeatable: true),
+    _ExtraKeySpec.special(label: '↓', value: 'Down', repeatable: true),
+    _ExtraKeySpec.special(label: '→', value: 'Right', repeatable: true),
     _ExtraKeySpec.special(label: 'PGDN', value: 'NPage'),
-    _ExtraKeySpec.special(label: 'DEL', value: 'DC'),
+    _ExtraKeySpec.special(label: 'DEL', value: 'DC', repeatable: true),
   ];
 
   @override
@@ -249,6 +251,17 @@ class SpecialKeysBar extends StatelessWidget {
         ? DesignColors.primary
         : DesignColors.textPrimary.withValues(alpha: 0.92);
 
+    if (key.repeatable) {
+      return _RepeatableKeyButton(
+        label: key.label,
+        onPressed: () => onSpecialKeyPressed(key.value!),
+        backgroundColor: backgroundColor,
+        borderColor: borderColor,
+        textColor: textColor,
+        hapticFeedback: hapticFeedback,
+      );
+    }
+
     final VoidCallback? onTap = switch (key.kind) {
       _ExtraKeyKind.literal => () => onLiteralKeyPressed(key.value!),
       _ExtraKeyKind.special => () => onSpecialKeyPressed(key.value!),
@@ -311,14 +324,145 @@ class _ExtraKeySpec {
   final String label;
   final String? value;
   final _ExtraKeyKind kind;
+  final bool repeatable;
 
   const _ExtraKeySpec.literal({required this.label, required this.value})
-    : kind = _ExtraKeyKind.literal;
+    : kind = _ExtraKeyKind.literal,
+      repeatable = false;
 
-  const _ExtraKeySpec.special({required this.label, required this.value})
-    : kind = _ExtraKeyKind.special;
+  const _ExtraKeySpec.special({
+    required this.label,
+    required this.value,
+    this.repeatable = false,
+  }) : kind = _ExtraKeyKind.special;
 
   const _ExtraKeySpec.modifier({required this.label})
     : kind = _ExtraKeyKind.modifier,
-      value = null;
+      value = null,
+      repeatable = false;
+}
+
+/// A key button that supports typematic repeat: fires once on touch-down,
+/// then repeats at ~30 Hz after a 500 ms initial delay (matching standard
+/// OS keyboard defaults). Only the first pointer is tracked; additional
+/// fingers are ignored until it releases.
+class _RepeatableKeyButton extends StatefulWidget {
+  final String label;
+  final VoidCallback onPressed;
+  final Color backgroundColor;
+  final Color borderColor;
+  final Color textColor;
+  final bool hapticFeedback;
+
+  const _RepeatableKeyButton({
+    required this.label,
+    required this.onPressed,
+    required this.backgroundColor,
+    required this.borderColor,
+    required this.textColor,
+    required this.hapticFeedback,
+  });
+
+  @override
+  State<_RepeatableKeyButton> createState() => _RepeatableKeyButtonState();
+}
+
+class _RepeatableKeyButtonState extends State<_RepeatableKeyButton> {
+  static const _kInitialDelay = Duration(milliseconds: 500);
+  static const _kRepeatInterval = Duration(milliseconds: 33);
+
+  Timer? _delayTimer;
+  Timer? _repeatTimer;
+  // First pointer owns the repeat; additional fingers are ignored.
+  int? _activePointer;
+
+  void _startRepeat(PointerDownEvent event) {
+    if (_activePointer != null) return;
+    _activePointer = event.pointer;
+    widget.onPressed();
+    if (widget.hapticFeedback) {
+      HapticFeedback.lightImpact();
+    }
+    _delayTimer = Timer(_kInitialDelay, () {
+      _repeatTimer = Timer.periodic(_kRepeatInterval, (_) {
+        widget.onPressed();
+      });
+    });
+  }
+
+  void _stopRepeat() {
+    _activePointer = null;
+    _delayTimer?.cancel();
+    _delayTimer = null;
+    _repeatTimer?.cancel();
+    _repeatTimer = null;
+  }
+
+  /// Returns true if [position] (global coordinates) is inside this widget's
+  /// layout bounds (excludes shadow/decoration overflow).
+  bool _isInsideBounds(Offset position) {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null) return false;
+    final local = box.globalToLocal(position);
+    return (Offset.zero & box.size).contains(local);
+  }
+
+  @override
+  void dispose() {
+    _stopRepeat();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: widget.label,
+      onTap: widget.onPressed,
+      child: Listener(
+        onPointerDown: _startRepeat,
+        onPointerMove: (event) {
+          if (event.pointer != _activePointer) return;
+          if (!_isInsideBounds(event.position)) {
+            _stopRepeat();
+          }
+        },
+        onPointerUp: (event) {
+          if (event.pointer == _activePointer) _stopRepeat();
+        },
+        onPointerCancel: (event) {
+          if (event.pointer == _activePointer) _stopRepeat();
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          height: 28,
+          decoration: BoxDecoration(
+            color: widget.backgroundColor,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: widget.borderColor),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.28),
+                blurRadius: 3,
+                offset: const Offset(0, 1),
+              ),
+            ],
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            widget.label,
+            maxLines: 1,
+            overflow: TextOverflow.fade,
+            softWrap: false,
+            style: GoogleFonts.jetBrainsMono(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: widget.textColor,
+              letterSpacing: widget.label.length > 3 ? 0 : 0.2,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
